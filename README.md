@@ -110,6 +110,9 @@ SOLVER → PREVIEW
 
 ## 说明
 
-本版聚焦还原原型交互闭环（Director 意图 → 求解 → 实时预览）。
-原代码中的 Camera Solver / Previs Export / Undo-Redo / 本地持久化 与当前数据模型不兼容，已移除；
-相关能力（多机位、Camera Interest、AI Direction Package）建议在新的 Segment / Constraint 模型稳定后再接回。
+本版聚焦还原原型交互闭环（Director 意图 → 求解 → 实时预览），并已接回部分原被移除的能力：
+
+- 本地持久化：已重新实现为片场/场景页 per-page localStorage（v3），见上文「场景持久化」与 Baseline §73。
+- Previs Export：已重新实现为 Previs 视频导出（多机位批量、MediaRecorder 实时录制），见上文「视频导出」与 Baseline §74。
+- 多机位：已在 Camera 章节实现（多相机 + 各自 Camera Track + 交接）。
+- 待接回：Camera Solver（独立镜头求解）、Undo-Redo、Camera Interest、AI Direction Package——建议在 Segment / Constraint 模型稳定后继续。
