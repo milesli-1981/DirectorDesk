@@ -129,6 +129,25 @@ export function objectFacing(state: DirectorState, objectId: string, time: numbe
     const t = objectPosition(state, look.target, time);
     if (Math.hypot(t.x - p.x, t.z - p.z) > 1e-4) return Math.atan2(t.x - p.x, t.z - p.z);
   }
+
+  // 静止时沿用即将执行 / 刚执行完的 Segment 方向，避免朝向突变为默认值
+  // （否则「3/4 背跟」这类相对朝向的机位会在 Segment 起点瞬移）。
+  const own = state.segments
+    .filter((segment) => segment.object === objectId)
+    .sort((a, b) => a.timeStart - b.timeStart);
+  const upcoming = own.find((segment) => time < segment.timeStart);
+  if (upcoming) {
+    const dxs = upcoming.endX - upcoming.startX;
+    const dzs = upcoming.endZ - upcoming.startZ;
+    if (Math.hypot(dxs, dzs) > 1e-4) return Math.atan2(dxs, dzs);
+  }
+  const finished = [...own].reverse().find((segment) => time > segment.timeEnd);
+  if (finished) {
+    const dxs = finished.endX - finished.startX;
+    const dzs = finished.endZ - finished.startZ;
+    if (Math.hypot(dxs, dzs) > 1e-4) return Math.atan2(dxs, dzs);
+  }
+
   return Math.atan2(dx, dz);
 }
 

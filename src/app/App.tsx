@@ -38,11 +38,17 @@ export function App() {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
-      if (event.key !== "Delete" && event.key !== "Backspace") return;
-      const store = useDirectorStore.getState();
-      if (store.selectedPoint && store.selectedItem) {
+      if (event.key === "Delete" || event.key === "Backspace") {
+        const store = useDirectorStore.getState();
+        if (store.selectedPoint && store.selectedItem) {
+          event.preventDefault();
+          store.deletePoint(store.selectedItem, store.selectedPoint);
+        }
+        return;
+      }
+      if (event.key.toLowerCase() === "l") {
         event.preventDefault();
-        store.deletePoint(store.selectedItem, store.selectedPoint);
+        useDirectorStore.getState().toggleViewLocked();
       }
     };
     window.addEventListener("keydown", onKeyDown);

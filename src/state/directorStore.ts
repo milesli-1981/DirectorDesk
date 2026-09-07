@@ -1,5 +1,12 @@
 import { create } from "zustand";
 import {
+  AspectRatio,
+  CameraFraming,
+  CameraMove,
+  CameraMotionType,
+  CameraObject,
+  CameraSide,
+  CameraView,
   Constraint,
   DirectorState,
   EaseCurve,
@@ -7,26 +14,43 @@ import {
   MoveSegment,
   PathPoint,
   Vec2,
+  ViewMode,
 } from "../domain/schema";
 import { createDemoState } from "../engine/demoShot";
 import { normalizePathPointModes, pathInsertIndex } from "../engine/path";
+
+const CAMERA_COLORS = ["#c792ea", "#67a7ff", "#63d39b", "#f0a35a", "#ff7b91", "#8ad1ff"];
+
+export type SelectionKind = "object" | "camera";
 
 interface DirectorStore {
   state: DirectorState;
   currentTime: number;
   playing: boolean;
   zoom: number;
-  selectedObj: string;
+  selectedKind: SelectionKind;
+  selectedId: string;
   selectedItem: string | null;
   selectedPoint: string | null;
   radialObjectId: string | null;
+  viewMode: ViewMode;
+  activeCameraId: string | null;
+  /** 锁视角：开启后拖拽不再改变 Director View 的机位。 */
+  viewLocked: boolean;
+  /** 是否正在拖拽场景对象 / 路径点，用于临时接管 OrbitControls。 */
+  dragging: boolean;
 
   setTime: (time: number) => void;
   setPlaying: (playing: boolean) => void;
   togglePlay: () => void;
   setZoom: (zoom: number) => void;
+  setViewMode: (mode: ViewMode) => void;
+  setActiveCamera: (cameraId: string) => void;
+  toggleViewLocked: () => void;
+  setDragging: (dragging: boolean) => void;
 
   selectObject: (objectId: string) => void;
+  selectCamera: (cameraId: string) => void;
   selectItem: (itemId: string | null) => void;
   selectPoint: (pointId: string | null) => void;
   openRing: (objectId: string) => void;
@@ -42,6 +66,18 @@ interface DirectorStore {
   setSegmentTime: (segmentId: string, start: number, end: number) => void;
   setConstraintTime: (constraintId: string, start: number, end: number) => void;
   setSegmentEase: (segmentId: string, ease: EaseCurve) => void;
+
+  addCamera: () => void;
+  updateCamera: (
+    cameraId: string,
+    patch: Partial<Pick<CameraObject, "targetId" | "framing" | "view" | "side" | "lensMm" | "motion" | "name">>,
+  ) => void;
+  addCameraMove: (cameraId: string, type: CameraMotionType) => void;
+  setCameraMoveTime: (moveId: string, start: number, end: number) => void;
+  setCameraMoveEase: (moveId: string, ease: EaseCurve) => void;
+  patchCameraMove: (moveId: string, patch: Partial<CameraMove>) => void;
+  deleteCameraMove: (moveId: string) => void;
+  setAspectRatio: (ratio: AspectRatio) => void;
 
   executeIntent: (objectId: string, action: IntentAction) => void;
   reset: () => void;
@@ -70,8 +106,36 @@ function nextConstraintId(state: DirectorState, prefix: string): string {
   return id;
 }
 
-function nextPointId(state: DirectorState): string {
+function nextPointId(): string {
   return `P_${Date.now().toString(36)}_${Math.floor(Math.random() * 1000)}`;
+}
+
+function nextCameraId(state: DirectorState): string {
+  const index = state.cameras.length;
+  if (index < 26) {
+    const id = `CAM_${String.fromCharCode(65 + index)}`;
+    if (!state.cameras.some((c) => c.id === id)) return id;
+  }
+  let suffix = index + 1;
+  let id = `CAM_${suffix}`;
+  while (state.cameras.some((c) => c.id === id)) {
+    suffix += 1;
+    id = `CAM_${suffix}`;
+  }
+  return id;
+}
+
+function nextCameraMoveId(state: DirectorState, cameraId: string): string {
+  const count = state.cameraMoves.filter((move) => move.camera === cameraId).length + 1;
+  const base = `MOVE_${cameraId}_${String(count).padStart(2, "0")}`;
+  if (!state.cameraMoves.some((move) => move.id === base)) return base;
+  let index = count + 1;
+  let id = `MOVE_${cameraId}_${String(index).padStart(2, "0")}`;
+  while (state.cameraMoves.some((move) => move.id === id)) {
+    index += 1;
+    id = `MOVE_${cameraId}_${String(index).padStart(2, "0")}`;
+  }
+  return id;
 }
 
 export const useDirectorStore = create<DirectorStore>((set, get) => {
@@ -97,15 +161,31 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
       },
     }));
 
+  const patchCameraMove = (moveId: string, patch: Partial<CameraMove>) =>
+    set((store) => ({
+      state: {
+        ...store.state,
+        revision: store.state.revision + 1,
+        cameraMoves: store.state.cameraMoves.map((move) =>
+          move.id === moveId ? { ...move, ...patch } : move,
+        ),
+      },
+    }));
+
   return {
     state: createDemoState(),
     currentTime: 0,
     playing: false,
     zoom: 1,
-    selectedObj: "M17",
+    selectedKind: "object",
+    selectedId: "M17",
     selectedItem: null,
     selectedPoint: null,
     radialObjectId: null,
+    viewMode: "director",
+    activeCameraId: "CAM_A",
+    viewLocked: false,
+    dragging: false,
 
     // 播放需要连续时间，不能在这里做 0.1s 量化。
     setTime: (time) =>
@@ -119,12 +199,31 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
 
     setZoom: (zoom) => set({ zoom: clamp(round1(clamp(zoom, 0.5, 2)), 0.5, 2) }),
 
+    setViewMode: (mode) => set({ viewMode: mode }),
+
+    setActiveCamera: (cameraId) => set({ activeCameraId: cameraId }),
+
+    toggleViewLocked: () => set((store) => ({ viewLocked: !store.viewLocked })),
+
+    setDragging: (dragging) => set({ dragging }),
+
     selectObject: (objectId) =>
       set((store) => ({
-        selectedObj: objectId,
+        selectedKind: "object",
+        selectedId: objectId,
         // 切换对象时不能残留上一个对象的路径点选中状态。
-        selectedPoint: store.selectedObj === objectId ? store.selectedPoint : null,
+        selectedPoint:
+          store.selectedKind === "object" && store.selectedId === objectId
+            ? store.selectedPoint
+            : null,
       })),
+
+    selectCamera: (cameraId) =>
+      set({
+        selectedKind: "camera",
+        selectedId: cameraId,
+        selectedPoint: null,
+      }),
 
     selectItem: (itemId) => set({ selectedItem: itemId }),
 
@@ -152,7 +251,7 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
       const points = segment.points ?? [];
       const index = pathInsertIndex(segment, x, z);
       const node: PathPoint = {
-        id: nextPointId(store.state),
+        id: nextPointId(),
         type: "path",
         shape: "LINE",
         x,
@@ -216,6 +315,97 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
 
     setSegmentEase: (segmentId, ease) => patchSegment(segmentId, { ease }),
 
+    addCamera: () => {
+      const store = get();
+      const { state } = store;
+      const id = nextCameraId(state);
+      const camera: CameraObject = {
+        id,
+        name: id,
+        color: CAMERA_COLORS[state.cameras.length % CAMERA_COLORS.length],
+        targetId: state.objects.find((object) => object.type === "actor")?.id ?? state.objects[0]?.id ?? "",
+        framing: "medium",
+        view: "eye_level",
+        side: "back_3_4",
+        lensMm: 50,
+        motion: "FOLLOW",
+      };
+      set({
+        state: {
+          ...state,
+          revision: state.revision + 1,
+          cameras: [...state.cameras, camera],
+        },
+        selectedKind: "camera",
+        selectedId: id,
+        activeCameraId: store.activeCameraId ?? id,
+      });
+    },
+
+    updateCamera: (cameraId, patch) =>
+      set((store) => ({
+        state: {
+          ...store.state,
+          revision: store.state.revision + 1,
+          cameras: store.state.cameras.map((camera) =>
+            camera.id === cameraId ? { ...camera, ...patch } : camera,
+          ),
+        },
+      })),
+
+    addCameraMove: (cameraId, type) => {
+      const store = get();
+      const { state } = store;
+      const start = round1(store.currentTime);
+      const move: CameraMove = {
+        id: nextCameraMoveId(state, cameraId),
+        camera: cameraId,
+        type,
+        timeStart: start,
+        timeEnd: round1(Math.min(state.duration, Math.max(start + 1, start + 3))),
+        orbitDeg: 90,
+        dollyScale: type === "DOLLY" ? 0.55 : 1,
+        craneHeight: type === "CRANE" ? 3 : 0,
+        ease: [0.42, 0, 0.58, 1],
+      };
+      set({
+        state: {
+          ...state,
+          revision: state.revision + 1,
+          cameraMoves: [...state.cameraMoves, move],
+        },
+        selectedKind: "camera",
+        selectedId: cameraId,
+        selectedItem: move.id,
+      });
+    },
+
+    setCameraMoveTime: (moveId, start, end) => {
+      const duration = get().state.duration;
+      const nextStart = clamp(round1(start), 0, duration - 0.1);
+      const nextEnd = clamp(round1(end), nextStart + 0.1, duration);
+      patchCameraMove(moveId, { timeStart: nextStart, timeEnd: nextEnd });
+    },
+
+    setCameraMoveEase: (moveId, ease) => patchCameraMove(moveId, { ease }),
+
+    patchCameraMove: (moveId, patch) => patchCameraMove(moveId, patch),
+
+    deleteCameraMove: (moveId) =>
+      set((store) => ({
+        state: {
+          ...store.state,
+          revision: store.state.revision + 1,
+          cameraMoves: store.state.cameraMoves.filter((move) => move.id !== moveId),
+        },
+        selectedItem: store.selectedItem === moveId ? null : store.selectedItem,
+      })),
+
+    setAspectRatio: (ratio) =>
+      set((store) => ({
+        state: { ...store.state, revision: store.state.revision + 1, aspectRatio: ratio },
+      })),
+
     executeIntent: (objectId, action) => {
       const store = get();
       const { state } = store;
@@ -241,7 +431,8 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
             revision: state.revision + 1,
             constraints: [...state.constraints, constraint],
           },
-          selectedObj: objectId,
+          selectedKind: "object",
+          selectedId: objectId,
           selectedItem: constraint.id,
           radialObjectId: null,
         });
@@ -289,7 +480,8 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
             revision: state.revision + 1,
             segments: [...state.segments, segment],
           },
-          selectedObj: objectId,
+          selectedKind: "object",
+          selectedId: objectId,
           selectedItem: segment.id,
           radialObjectId: null,
         });
@@ -325,10 +517,15 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
         currentTime: 0,
         playing: false,
         zoom: 1,
-        selectedObj: "M17",
+        selectedKind: "object",
+        selectedId: "M17",
         selectedItem: null,
         selectedPoint: null,
         radialObjectId: null,
+        viewMode: "director",
+        activeCameraId: "CAM_A",
+        viewLocked: false,
+        dragging: false,
       }),
   };
 });

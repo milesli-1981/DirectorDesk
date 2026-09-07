@@ -26,8 +26,18 @@
   - 当前意图 / 选中时间轴项 / 路径点数量与形态
   - Speed Curve：cubic-bezier 预设 + 双控制柄拖拽 + 速度条 + 播放头
   - State Revision 与 Director State JSON
+- Camera（多机位）
+  - 可任意增加机位：`＋ CAMERA`
+  - Camera Intent：Target / Framing / View / Side / Lens / 默认 Motion
+  - 每台相机拥有自己的 Camera Track：`STATIC / FOLLOW / ORBIT / DOLLY / CRANE`
+    片段在 Timeline 上拖动改时间、边缘修剪时长、可单独编辑速度曲线
+  - 运镜参数：ORBIT 角度、DOLLY 距离系数、CRANE 高度
+  - Director View 显示相机代理、视锥与整段运镜轨迹
+  - Camera View：通过当前机位取景，带三分法 / 中心 / 安全框与画幅比遮幅
+  - 项目级 Master Ratio：16:9 / 2.39:1 / 1.85:1 / 4:3 / 9:16
 - Timeline
   - 每个对象一条轨道，Segment / Constraint 自动生成 Clip
+  - 每台相机一条轨道，Camera Move Clip 手动添加
   - 拖动 Clip 改变时间（不改变空间几何），拖边缘修剪时长
   - Segment Clip 显示缓动缩略图
   - 播放头拖拽定位，Play / Home / Reset

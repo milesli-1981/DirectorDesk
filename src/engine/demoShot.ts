@@ -4,11 +4,13 @@ import { DirectorState } from "../domain/schema";
  * M17 Killer Test（原型 V1.20 初始状态）：
  * M17 → RUN（MOVE）→ VALLEY 方向
  * M18 / M19 → FOLLOW → M17
+ * CAM_A → MEDIUM / 3-4 BACK / FOLLOW → M17
  */
 export function createDemoState(): DirectorState {
   return {
     revision: 1,
     duration: 12,
+    aspectRatio: "2.39:1",
     objects: [
       { id: "M17", type: "actor", x: -6, z: 4, color: "#67a7ff" },
       { id: "M18", type: "actor", x: -3, z: 2, color: "#63d39b" },
@@ -60,5 +62,19 @@ export function createDemoState(): DirectorState {
         timeEnd: 7.8,
       },
     ],
+    cameras: [
+      {
+        id: "CAM_A",
+        name: "CAM_A",
+        color: "#c792ea",
+        targetId: "M17",
+        framing: "medium",
+        view: "eye_level",
+        side: "back_3_4",
+        lensMm: 50,
+        motion: "FOLLOW",
+      },
+    ],
+    cameraMoves: [],
   };
 }

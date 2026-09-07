@@ -35,13 +35,15 @@ interface ClipDrag {
 
 function TimelineReadout() {
   const currentTime = useDirectorStore((s) => s.currentTime);
-  const selectedObj = useDirectorStore((s) => s.selectedObj);
+  const selectedKind = useDirectorStore((s) => s.selectedKind);
+  const selectedId = useDirectorStore((s) => s.selectedId);
   const seconds = currentTime.toFixed(1);
 
   return (
     <>
       <span className="ctx" id="ctx">
-        Frame {seconds}s · Track {selectedObj}
+        Frame {seconds}s · Track {selectedId}
+        {selectedKind === "camera" ? " (CAM)" : ""}
       </span>
       <span className="timecode" id="tc">
         00:{seconds.padStart(4, "0")}
@@ -60,9 +62,11 @@ export function Timeline() {
   const selectedItem = useDirectorStore((s) => s.selectedItem);
   const selectItem = useDirectorStore((s) => s.selectItem);
   const selectObject = useDirectorStore((s) => s.selectObject);
+  const selectCamera = useDirectorStore((s) => s.selectCamera);
   const setTime = useDirectorStore((s) => s.setTime);
   const setSegmentTime = useDirectorStore((s) => s.setSegmentTime);
   const setConstraintTime = useDirectorStore((s) => s.setConstraintTime);
+  const setCameraMoveTime = useDirectorStore((s) => s.setCameraMoveTime);
 
   const items = useMemo(() => buildTimelineItems(state), [state]);
   const dragRef = useRef<ClipDrag | null>(null);
@@ -94,7 +98,64 @@ export function Timeline() {
     }
 
     if (drag.item.kind === "segment") setSegmentTime(drag.item.source, nextStart, nextEnd);
-    else setConstraintTime(drag.item.source, nextStart, nextEnd);
+    else if (drag.item.kind === "constraint") setConstraintTime(drag.item.source, nextStart, nextEnd);
+    else setCameraMoveTime(drag.item.source, nextStart, nextEnd);
+  };
+
+  const renderClip = (item: TimelineItem) => {
+    const range = itemRange(state, item);
+    if (!range) return null;
+    const segment =
+      item.kind === "segment" ? state.segments.find((value) => value.id === item.source) : undefined;
+    const spark =
+      segment && range.end - range.start >= 0.9
+        ? easeSpark(normalizeEase(segment.ease))
+        : undefined;
+
+    return (
+      <div
+        key={item.id}
+        className={`clip ${item.kind} ${selectedItem === item.source ? "sel" : ""}`}
+        style={{
+          left: range.start * PX_PER_SEC,
+          width: Math.max(28, (range.end - range.start) * PX_PER_SEC),
+          backgroundImage: spark,
+          backgroundRepeat: spark ? "no-repeat" : undefined,
+          backgroundPosition: spark ? "right 4px center" : undefined,
+          backgroundSize: spark ? "38px 12px" : undefined,
+        }}
+        onPointerDown={(event) => {
+          event.stopPropagation();
+          selectItem(item.source);
+          if (item.kind === "camera") selectCamera(item.track);
+          else selectObject(item.track);
+          const mode: DragMode =
+            event.target instanceof HTMLElement
+              ? event.target.classList.contains("l")
+                ? "l"
+                : event.target.classList.contains("r")
+                  ? "r"
+                  : "m"
+              : "m";
+          dragRef.current = {
+            item,
+            start: range.start,
+            end: range.end,
+            originX: event.clientX,
+            mode,
+          };
+          (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
+        }}
+        onPointerMove={handleClipMove}
+        onPointerUp={() => {
+          dragRef.current = null;
+        }}
+      >
+        {item.label}
+        <span className="handle l" />
+        <span className="handle r" />
+      </div>
+    );
   };
 
   return (
@@ -116,63 +177,19 @@ export function Timeline() {
             <div key={object.id} className="row">
               <div className="label">{object.id}</div>
               <div className="lane" data-track={object.id}>
-                {items
-                  .filter((item) => item.track === object.id)
-                  .map((item) => {
-                    const range = itemRange(state, item);
-                    if (!range) return null;
-                    const segment =
-                      item.kind === "segment"
-                        ? state.segments.find((value) => value.id === item.source)
-                        : undefined;
-                    const spark =
-                      segment && range.end - range.start >= 0.9
-                        ? easeSpark(normalizeEase(segment.ease))
-                        : undefined;
+                {items.filter((item) => item.track === object.id).map(renderClip)}
+              </div>
+            </div>
+          ))}
 
-                    return (
-                      <div
-                        key={item.id}
-                        className={`clip ${item.kind} ${selectedItem === item.source ? "sel" : ""}`}
-                        style={{
-                          left: range.start * PX_PER_SEC,
-                          width: Math.max(28, (range.end - range.start) * PX_PER_SEC),
-                          backgroundImage: spark,
-                          backgroundRepeat: spark ? "no-repeat" : undefined,
-                          backgroundPosition: spark ? "right 4px center" : undefined,
-                          backgroundSize: spark ? "38px 12px" : undefined,
-                        }}
-                        onPointerDown={(event) => {
-                          event.stopPropagation();
-                          selectItem(item.source);
-                          selectObject(item.track);
-                          const mode: DragMode = event.target instanceof HTMLElement
-                            ? event.target.classList.contains("l")
-                              ? "l"
-                              : event.target.classList.contains("r")
-                                ? "r"
-                                : "m"
-                            : "m";
-                          dragRef.current = {
-                            item,
-                            start: range.start,
-                            end: range.end,
-                            originX: event.clientX,
-                            mode,
-                          };
-                          (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
-                        }}
-                        onPointerMove={handleClipMove}
-                        onPointerUp={() => {
-                          dragRef.current = null;
-                        }}
-                      >
-                        {item.label}
-                        <span className="handle l" />
-                        <span className="handle r" />
-                      </div>
-                    );
-                  })}
+          {state.cameras.map((camera) => (
+            <div key={camera.id} className="row camera-row">
+              <div className="label cam-label">
+                <span className="dot" style={{ background: camera.color }} />
+                {camera.name}
+              </div>
+              <div className="lane" data-track={camera.id}>
+                {items.filter((item) => item.track === camera.id).map(renderClip)}
               </div>
             </div>
           ))}

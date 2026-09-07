@@ -5,13 +5,29 @@ import * as THREE from "three";
 import { useDirectorStore } from "../state/directorStore";
 import { MoveSegment, PathPoint, Vec2 } from "../domain/schema";
 import { curveToggleEligible, pathChain } from "../engine/path";
-import { hitEndpoint, hitObject, hitPath, hitPathPoint, pathPolyline } from "../engine/pick";
+import {
+  hitCameraRay,
+  hitEndpoint,
+  hitObjectRay,
+  hitPath,
+  hitPathPoint,
+  pathPolyline,
+} from "../engine/pick";
 import { objectFacing, objectPosition } from "../engine/solver";
+import {
+  activeCameraMove,
+  computeFrame,
+  lensFovDeg,
+  sampleCameraPath,
+  solveCamera,
+} from "../engine/cameraSolver";
+import { aspectValue, FRAMING_LABELS, MOTION_LABELS, SIDE_LABELS, VIEW_LABELS } from "../domain/schema";
 import { RadialRing } from "./RadialRing";
 
 const GROUND_PLANE = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 const TARGET = new THREE.Vector3(0, 0, 0);
 const BASE_DISTANCE = 26;
+const DIRECTOR_FOV = 40;
 
 type DragState =
   | { kind: "object"; id: string; moved: boolean; origin: Vec2 }
@@ -37,7 +53,10 @@ function capturePointer(event: ThreeEvent<PointerEvent>) {
 
 function ActorView({ objectId }: { objectId: string }) {
   const object = useDirectorStore((s) => s.state.objects.find((o) => o.id === objectId));
-  const isSelected = useDirectorStore((s) => s.selectedObj === objectId);
+  const isSelected = useDirectorStore(
+    (s) => s.selectedKind === "object" && s.selectedId === objectId,
+  );
+  const showHelpers = useDirectorStore((s) => s.viewMode === "director");
   const groupRef = useRef<THREE.Group>(null);
   const bodyRef = useRef<THREE.Group>(null);
   const legLRef = useRef<THREE.Group>(null);
@@ -51,7 +70,11 @@ function ActorView({ objectId }: { objectId: string }) {
     if (!object) return;
     const { state, currentTime } = useDirectorStore.getState();
     const position = objectPosition(state, objectId, currentTime);
-    const previous = objectPosition(state, objectId, Math.max(0, currentTime - Math.max(delta, 0.001)));
+    const previous = objectPosition(
+      state,
+      objectId,
+      Math.max(0, currentTime - Math.max(delta, 0.001)),
+    );
     const dx = position.x - previous.x;
     const dz = position.z - previous.z;
     const distance = Math.hypot(dx, dz);
@@ -129,18 +152,25 @@ function ActorView({ objectId }: { objectId: string }) {
         </mesh>
       )}
 
-      {isSelected ? (
+      {isSelected && showHelpers ? (
         <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.03, 0]}>
           <ringGeometry args={[0.62, 0.78, 44]} />
           <meshBasicMaterial color="#ffffff" side={THREE.DoubleSide} transparent opacity={0.9} />
         </mesh>
       ) : null}
 
-      <Html position={[0, 2.15, 0]} center style={{ pointerEvents: "none" }} zIndexRange={[20, 0]}>
-        <span className="obj-label" style={{ color: isSelected ? "#ffffff" : "#cdd8e2" }}>
-          {objectId}
-        </span>
-      </Html>
+      {showHelpers ? (
+        <Html
+          position={[0, 2.15, 0]}
+          center
+          style={{ pointerEvents: "none" }}
+          zIndexRange={[20, 0]}
+        >
+          <span className="obj-label" style={{ color: isSelected ? "#ffffff" : "#cdd8e2" }}>
+            {objectId}
+          </span>
+        </Html>
+      ) : null}
     </group>
   );
 }
@@ -160,14 +190,19 @@ function Actors() {
 
 function SegmentPaths() {
   const segments = useDirectorStore((s) => s.state.segments);
-  const selectedObj = useDirectorStore((s) => s.selectedObj);
+  const selectedObjectId = useDirectorStore((s) =>
+    s.selectedKind === "object" ? s.selectedId : null,
+  );
+  const showHelpers = useDirectorStore((s) => s.viewMode === "director");
+
+  if (!showHelpers) return null;
 
   return (
     <>
       {segments.map((segment) => {
         const points = pathPolyline(segment);
         if (points.length < 2) return null;
-        const active = segment.object === selectedObj;
+        const active = segment.object === selectedObjectId;
         return (
           <Line
             key={segment.id}
@@ -249,10 +284,7 @@ function PointMarker({
 
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[point.x, 0.09, point.z]}>
         {isArc ? <ringGeometry args={[0.2, 0.34, 28]} /> : <circleGeometry args={[0.24, 26]} />}
-        <meshBasicMaterial
-          color={isSelected ? "#ffffff" : "#55d88a"}
-          side={THREE.DoubleSide}
-        />
+        <meshBasicMaterial color={isSelected ? "#ffffff" : "#55d88a"} side={THREE.DoubleSide} />
       </mesh>
 
       <Html position={[point.x, 0.42, point.z]} center style={{ pointerEvents: "none" }} zIndexRange={[25, 0]}>
@@ -283,8 +315,13 @@ function PointMarker({
 
 function PathHandles() {
   const segments = useDirectorStore((s) => s.state.segments);
-  const selectedObj = useDirectorStore((s) => s.selectedObj);
-  const visible = segments.filter((segment) => segment.object === selectedObj);
+  const selectedObjectId = useDirectorStore((s) =>
+    s.selectedKind === "object" ? s.selectedId : null,
+  );
+  const showHelpers = useDirectorStore((s) => s.viewMode === "director");
+
+  if (!showHelpers || !selectedObjectId) return null;
+  const visible = segments.filter((segment) => segment.object === selectedObjectId);
 
   return (
     <>
@@ -303,9 +340,11 @@ function PathHandles() {
 
 function FollowLinks() {
   const constraints = useDirectorStore((s) => s.state.constraints);
+  const showHelpers = useDirectorStore((s) => s.viewMode === "director");
   const refs = useRef<Record<string, any>>({});
 
   useFrame(() => {
+    if (!showHelpers) return;
     const { state, currentTime } = useDirectorStore.getState();
     state.constraints.forEach((constraint) => {
       const line = refs.current[constraint.id];
@@ -318,6 +357,8 @@ function FollowLinks() {
       line.geometry.setPositions([a.x, 0.1, a.z, b.x, 0.1, b.z]);
     });
   });
+
+  if (!showHelpers) return null;
 
   return (
     <>
@@ -342,16 +383,238 @@ function FollowLinks() {
   );
 }
 
+/* ----------------------------------------------------------------- Cameras */
+
+/**
+ * 视锥：从相机本体出发，按 Lens 的垂直 FOV 与画幅比生成金字塔。
+ *
+ * 注意朝向约定：Object3D.lookAt() 对普通对象（非 Camera / Light）把本地
+ * **+Z** 指向目标，而 THREE.Camera 是 **-Z** 指向目标。相机代理是普通
+ * <group>，所以这里视锥沿 +Z 展开。
+ */
+function CameraFrustum({ cameraId }: { cameraId: string }) {
+  const cameras = useDirectorStore((s) => s.state.cameras);
+  const aspectRatio = useDirectorStore((s) => s.state.aspectRatio);
+  const camera = cameras.find((item) => item.id === cameraId);
+  if (!camera) return null;
+
+  const distance = 4.5;
+  const halfHeight = Math.tan((lensFovDeg(camera.lensMm) * Math.PI) / 360) * distance;
+  const halfWidth = halfHeight * aspectValue(aspectRatio);
+
+  const origin: [number, number, number] = [0, 0, 0];
+  const topLeft: [number, number, number] = [-halfWidth, halfHeight, distance];
+  const topRight: [number, number, number] = [halfWidth, halfHeight, distance];
+  const bottomRight: [number, number, number] = [halfWidth, -halfHeight, distance];
+  const bottomLeft: [number, number, number] = [-halfWidth, -halfHeight, distance];
+
+  return (
+    <Line
+      segments
+      points={[
+        origin,
+        topLeft,
+        origin,
+        topRight,
+        origin,
+        bottomRight,
+        origin,
+        bottomLeft,
+        topLeft,
+        topRight,
+        topRight,
+        bottomRight,
+        bottomRight,
+        bottomLeft,
+        bottomLeft,
+        topLeft,
+      ]}
+      color={camera.color}
+      lineWidth={1.2}
+      transparent
+      opacity={0.7}
+    />
+  );
+}
+
+function CameraProxy({ cameraId }: { cameraId: string }) {
+  const camera = useDirectorStore((s) => s.state.cameras.find((c) => c.id === cameraId));
+  const isSelected = useDirectorStore(
+    (s) => s.selectedKind === "camera" && s.selectedId === cameraId,
+  );
+  const isActive = useDirectorStore((s) => s.activeCameraId === cameraId);
+  const selectCamera = useDirectorStore((s) => s.selectCamera);
+  const groupRef = useRef<THREE.Group>(null);
+
+  useFrame(() => {
+    const { state, currentTime } = useDirectorStore.getState();
+    const resolved = solveCamera(state, cameraId, currentTime);
+    if (!resolved || !groupRef.current) return;
+    groupRef.current.position.set(
+      resolved.position[0],
+      resolved.position[1],
+      resolved.position[2],
+    );
+    groupRef.current.lookAt(resolved.target[0], resolved.target[1], resolved.target[2]);
+  });
+
+  if (!camera) return null;
+
+  return (
+    <group ref={groupRef}>
+      <mesh
+        onPointerDown={(event) => {
+          event.stopPropagation();
+          selectCamera(cameraId);
+        }}
+      >
+        <boxGeometry args={[0.55, 0.38, 0.72]} />
+        <meshStandardMaterial
+          color={isSelected ? "#ffffff" : camera.color}
+          emissive={camera.color}
+          emissiveIntensity={isActive ? 0.35 : 0.12}
+        />
+      </mesh>
+      {/* 镜头朝向本地 +Z（普通对象的 lookAt 约定） */}
+      <mesh position={[0, 0, 0.52]} rotation={[Math.PI / 2, 0, 0]}>
+        <cylinderGeometry args={[0.17, 0.21, 0.34, 16]} />
+        <meshStandardMaterial color="#1b2531" roughness={0.4} metalness={0.4} />
+      </mesh>
+      <CameraFrustum cameraId={cameraId} />
+      <Html position={[0, 0.62, 0]} center style={{ pointerEvents: "none" }} zIndexRange={[22, 0]}>
+        <span className="obj-label" style={{ color: camera.color }}>
+          {camera.name}
+          {isActive ? " ●" : ""}
+        </span>
+      </Html>
+    </group>
+  );
+}
+
+function CameraProxies() {
+  const cameras = useDirectorStore((s) => s.state.cameras);
+  const activeCameraId = useDirectorStore((s) => s.activeCameraId);
+  const viewMode = useDirectorStore((s) => s.viewMode);
+
+  if (viewMode === "camera") {
+    // 相机视图下不显示当前机位自身。
+    return (
+      <>
+        {cameras
+          .filter((camera) => camera.id !== activeCameraId)
+          .map((camera) => (
+            <CameraProxy key={camera.id} cameraId={camera.id} />
+          ))}
+      </>
+    );
+  }
+
+  return (
+    <>
+      {cameras.map((camera) => (
+        <CameraProxy key={camera.id} cameraId={camera.id} />
+      ))}
+    </>
+  );
+}
+
+function CameraPaths() {
+  const state = useDirectorStore((s) => s.state);
+  const viewMode = useDirectorStore((s) => s.viewMode);
+
+  if (viewMode === "camera") return null;
+
+  return (
+    <>
+      {state.cameras.map((camera) => {
+        const points = sampleCameraPath(state, camera.id, 0.3);
+        if (points.length < 2) return null;
+        return (
+          <Line
+            key={`path_${camera.id}`}
+            points={points}
+            color={camera.color}
+            lineWidth={1.2}
+            dashed
+            dashSize={0.35}
+            gapSize={0.28}
+            transparent
+            opacity={0.55}
+          />
+        );
+      })}
+    </>
+  );
+}
+
+/** 相机视图：把渲染相机驱动到导演相机的解算结果上。 */
+function CameraRig() {
+  const { camera, size } = useThree();
+
+  useFrame(() => {
+    const { state, currentTime, viewMode, activeCameraId } = useDirectorStore.getState();
+    const perspective = camera as THREE.PerspectiveCamera;
+    if (typeof perspective.fov !== "number") return;
+
+    if (viewMode !== "camera" || !activeCameraId) {
+      if (Math.abs(perspective.fov - DIRECTOR_FOV) > 0.01) {
+        perspective.fov = DIRECTOR_FOV;
+        perspective.aspect = size.width / size.height;
+        perspective.updateProjectionMatrix();
+      }
+      return;
+    }
+
+    const resolved = solveCamera(state, activeCameraId, currentTime);
+    if (!resolved) return;
+
+    camera.position.set(resolved.position[0], resolved.position[1], resolved.position[2]);
+    camera.lookAt(resolved.target[0], resolved.target[1], resolved.target[2]);
+
+    const frame = computeFrame(aspectValue(state.aspectRatio), size.width, size.height);
+    if (frame.height <= 0 || frame.width <= 0) return;
+    const ratio = size.height / frame.height;
+    const fov =
+      (2 * Math.atan(Math.tan((resolved.fovDeg * Math.PI) / 360) * ratio) * 180) / Math.PI;
+
+    if (
+      Math.abs(perspective.fov - fov) > 0.01 ||
+      perspective.aspect !== size.width / size.height
+    ) {
+      perspective.fov = fov;
+      perspective.aspect = size.width / size.height;
+      perspective.updateProjectionMatrix();
+    }
+  });
+
+  return null;
+}
+
 /* ------------------------------------------------------------ Interaction */
 
 function Interaction() {
   const dragRef = useRef<DragState | null>(null);
   const [ghost, setGhost] = useState<Vec2 | null>(null);
+  const controls = useThree((state) => state.controls) as { enabled: boolean } | null;
+
+  // 拖拽对象 / 路径点时临时接管 OrbitControls，避免编辑路径同时把视角转走。
+  const beginDrag = (drag: DragState) => {
+    dragRef.current = drag;
+    useDirectorStore.getState().setDragging(true);
+    if (controls) controls.enabled = false;
+  };
+
+  const endDrag = () => {
+    const store = useDirectorStore.getState();
+    if (!dragRef.current) return;
+    dragRef.current = null;
+    store.setDragging(false);
+    if (controls) controls.enabled = store.viewMode === "director" && !store.viewLocked;
+  };
 
   useEffect(() => {
     const finish = () => {
       const drag = dragRef.current;
-      dragRef.current = null;
       if (!drag) return;
       const store = useDirectorStore.getState();
       if (drag.kind === "object" && !drag.moved) {
@@ -361,11 +624,12 @@ function Interaction() {
           Math.hypot(drag.current.x - drag.origin.x, drag.current.z - drag.origin.z) > 0.12;
         if (moved) store.addPathPoint(drag.segmentId, drag.current.x, drag.current.z);
       }
+      endDrag();
       setGhost(null);
     };
     window.addEventListener("pointerup", finish);
     return () => window.removeEventListener("pointerup", finish);
-  }, []);
+  });
 
   const handleDown = (event: ThreeEvent<PointerEvent>) => {
     if (event.button !== 0) return;
@@ -373,62 +637,73 @@ function Interaction() {
     if (!point) return;
 
     const store = useDirectorStore.getState();
+    if (store.viewMode !== "director") return;
     if (store.radialObjectId) {
       store.closeRing();
       return;
     }
 
     const tolerance = 1 / store.zoom;
+    const selectedObjectId = store.selectedKind === "object" ? store.selectedId : null;
 
-    const objectHit = hitObject(store.state, store.currentTime, point, 0.8 * tolerance);
+    const cameraHit = hitCameraRay(store.state, store.currentTime, event.ray, 0.9 * tolerance);
+    const objectHit = hitObjectRay(store.state, store.currentTime, event.ray, 0.7 * tolerance);
+
+    if (cameraHit && (!objectHit || cameraHit.distance <= objectHit.distance)) {
+      store.selectCamera(cameraHit.camera.id);
+      return;
+    }
+
     if (objectHit) {
       store.selectObject(objectHit.object.id);
       store.selectItem(null);
       store.selectPoint(null);
-      dragRef.current = {
+      beginDrag({
         kind: "object",
         id: objectHit.object.id,
         moved: false,
         origin: point,
-      };
+      });
       capturePointer(event);
       return;
     }
 
-    const pointHit = hitPathPoint(store.state, store.selectedObj, point, 0.45 * tolerance);
+    if (!selectedObjectId) return;
+
+    const pointHit = hitPathPoint(store.state, selectedObjectId, point, 0.45 * tolerance);
     if (pointHit) {
       store.selectItem(pointHit.segment.id);
       store.selectPoint(pointHit.point.id);
-      dragRef.current = {
+      beginDrag({
         kind: "point",
         segmentId: pointHit.segment.id,
         pointId: pointHit.point.id,
-      };
+      });
       capturePointer(event);
       return;
     }
 
-    const endpointHit = hitEndpoint(store.state, store.selectedObj, point, 0.45 * tolerance);
+    const endpointHit = hitEndpoint(store.state, selectedObjectId, point, 0.45 * tolerance);
     if (endpointHit) {
       store.selectItem(endpointHit.segment.id);
       store.selectPoint(null);
-      dragRef.current = {
+      beginDrag({
         kind: "endpoint",
         segmentId: endpointHit.segment.id,
         which: endpointHit.which,
-      };
+      });
       capturePointer(event);
       return;
     }
 
-    const pathHit = hitPath(store.state, store.selectedObj, point, 0.6 * tolerance);
+    const pathHit = hitPath(store.state, selectedObjectId, point, 0.6 * tolerance);
     if (pathHit) {
-      dragRef.current = {
+      beginDrag({
         kind: "new",
         segmentId: pathHit.segment.id,
         origin: { x: pathHit.x, z: pathHit.z },
         current: { x: pathHit.x, z: pathHit.z },
-      };
+      });
       setGhost({ x: pathHit.x, z: pathHit.z });
       capturePointer(event);
     }
@@ -456,11 +731,7 @@ function Interaction() {
 
   return (
     <>
-      <mesh
-        rotation={[-Math.PI / 2, 0, 0]}
-        onPointerDown={handleDown}
-        onPointerMove={handleMove}
-      >
+      <mesh rotation={[-Math.PI / 2, 0, 0]} onPointerDown={handleDown} onPointerMove={handleMove}>
         <planeGeometry args={[140, 140]} />
         <meshStandardMaterial color="#101725" roughness={0.95} />
       </mesh>
@@ -491,21 +762,27 @@ function Interaction() {
 function CameraZoom() {
   const zoom = useDirectorStore((s) => s.zoom);
   const setZoom = useDirectorStore((s) => s.setZoom);
+  const viewMode = useDirectorStore((s) => s.viewMode);
   const { camera } = useThree();
   const applied = useRef(zoom);
 
   useEffect(() => {
+    if (viewMode !== "director") return;
     const direction = camera.position.clone().sub(TARGET);
     if (direction.lengthSq() < 1e-6) direction.set(0, 20.5, 16);
     direction.setLength(BASE_DISTANCE / zoom);
     camera.position.copy(TARGET).add(direction);
     camera.lookAt(TARGET);
     applied.current = zoom;
-  }, [camera, zoom]);
+  }, [camera, zoom, viewMode]);
 
   useFrame(() => {
+    if (viewMode !== "director") return;
     const distance = camera.position.distanceTo(TARGET);
-    const next = Math.min(2, Math.max(0.5, Math.round((BASE_DISTANCE / Math.max(distance, 0.001)) * 10) / 10));
+    const next = Math.min(
+      2,
+      Math.max(0.5, Math.round((BASE_DISTANCE / Math.max(distance, 0.001)) * 10) / 10),
+    );
     if (Math.abs(next - applied.current) > 0.001) {
       applied.current = next;
       setZoom(next);
@@ -537,17 +814,29 @@ function RingAnchor({ objectId }: { objectId: string }) {
 
 function RadialLayer() {
   const radialObjectId = useDirectorStore((s) => s.radialObjectId);
-  if (!radialObjectId) return null;
+  const viewMode = useDirectorStore((s) => s.viewMode);
+  if (!radialObjectId || viewMode !== "director") return null;
   return <RingAnchor objectId={radialObjectId} />;
 }
 
 /* ------------------------------------------------------------- World view */
 
 function WorldScene() {
+  const viewMode = useDirectorStore((s) => s.viewMode);
+  const viewLocked = useDirectorStore((s) => s.viewLocked);
+  const dragging = useDirectorStore((s) => s.dragging);
+
   return (
     <>
-      <PerspectiveCamera makeDefault position={[0, 20.5, 16]} fov={40} near={0.1} far={400} />
+      <PerspectiveCamera
+        makeDefault
+        position={[0, 20.5, 16]}
+        fov={DIRECTOR_FOV}
+        near={0.1}
+        far={400}
+      />
       <CameraZoom />
+      <CameraRig />
       <ambientLight intensity={0.8} />
       <directionalLight position={[14, 24, 10]} intensity={1.1} />
       <Interaction />
@@ -555,36 +844,164 @@ function WorldScene() {
       <PathHandles />
       <FollowLinks />
       <Actors />
+      <CameraPaths />
+      <CameraProxies />
       <RadialLayer />
-      <OrbitControls makeDefault target={[0, 0, 0]} enablePan={false} enableDamping={false} />
+      <OrbitControls
+        makeDefault
+        target={[0, 0, 0]}
+        enablePan={false}
+        enableDamping={false}
+        enabled={viewMode === "director" && !viewLocked && !dragging}
+      />
     </>
+  );
+}
+
+function CameraHud() {
+  const state = useDirectorStore((s) => s.state);
+  const currentTime = useDirectorStore((s) => s.currentTime);
+  const activeCameraId = useDirectorStore((s) => s.activeCameraId);
+  const camera = state.cameras.find((item) => item.id === activeCameraId);
+  if (!camera) return null;
+
+  const move = activeCameraMove(state, camera.id, currentTime);
+  const moveCount = state.cameraMoves.filter((item) => item.camera === camera.id).length;
+
+  return (
+    <div className="cam-hud">
+      <strong>{camera.name}</strong>
+      <span>
+        {FRAMING_LABELS[camera.framing]} · {SIDE_LABELS[camera.side]} · {VIEW_LABELS[camera.view]} ·{" "}
+        {camera.lensMm}mm
+      </span>
+      <span>TARGET {move?.targetId ?? camera.targetId}</span>
+      <span>
+        {MOTION_LABELS[move?.type ?? camera.motion]}
+        {move ? " · move" : " · default"} · {moveCount} move{moveCount === 1 ? "" : "s"}
+      </span>
+      <span>{state.aspectRatio}</span>
+    </div>
+  );
+}
+
+function FramingOverlay() {
+  const state = useDirectorStore((s) => s.state);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState({ width: 0, height: 0 });
+
+  useEffect(() => {
+    const element = wrapRef.current;
+    if (!element) return undefined;
+    const update = () =>
+      setSize({ width: element.clientWidth, height: element.clientHeight });
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  const frame = computeFrame(aspectValue(state.aspectRatio), size.width, size.height);
+
+  return (
+    <div className="framing-overlay" ref={wrapRef}>
+      <div className="mask-bar mask-top" style={{ height: frame.top }} />
+      <div className="mask-bar mask-bottom" style={{ height: frame.top }} />
+      <div className="mask-bar mask-left" style={{ width: frame.left }} />
+      <div className="mask-bar mask-right" style={{ width: frame.left }} />
+      <div
+        className="frame-box"
+        style={{ left: frame.left, top: frame.top, width: frame.width, height: frame.height }}
+      >
+        <div className="ot-line ot-v-1" />
+        <div className="ot-line ot-v-2" />
+        <div className="ot-line ot-h-1" />
+        <div className="ot-line ot-h-2" />
+        <div className="center-cross v" />
+        <div className="center-cross h" />
+        <div className="safe-box action" />
+        <div className="safe-box title" />
+      </div>
+      <CameraHud />
+    </div>
   );
 }
 
 export function WorldView() {
   const zoom = useDirectorStore((s) => s.zoom);
   const setZoom = useDirectorStore((s) => s.setZoom);
-  const selectedObj = useDirectorStore((s) => s.selectedObj);
+  const viewMode = useDirectorStore((s) => s.viewMode);
+  const setViewMode = useDirectorStore((s) => s.setViewMode);
+  const cameras = useDirectorStore((s) => s.state.cameras);
+  const activeCameraId = useDirectorStore((s) => s.activeCameraId);
+  const setActiveCamera = useDirectorStore((s) => s.setActiveCamera);
+  const selectedId = useDirectorStore((s) => s.selectedId);
   const selectedPoint = useDirectorStore((s) => s.selectedPoint);
+  const viewLocked = useDirectorStore((s) => s.viewLocked);
+  const toggleViewLocked = useDirectorStore((s) => s.toggleViewLocked);
 
   return (
     <main>
       <div className="viewbar">
         <div>
-          <b>DIRECTOR VIEW</b>
+          <b>{viewMode === "director" ? "DIRECTOR VIEW" : "CAMERA VIEW"}</b>
           <small id="mode">{selectedPoint ? "PATH EDIT" : "SELECT"}</small>
-          <small>{selectedObj}</small>
+          <small>{selectedId}</small>
+          {viewLocked ? <small className="lock-flag">VIEW LOCKED</small> : null}
         </div>
-        <div className="zoomctl">
-          <button type="button" id="zout" title="Zoom out" onClick={() => setZoom(zoom - 0.1)}>
-            −
+        <div className="view-tools">
+          <button
+            type="button"
+            className={`lock-btn ${viewLocked ? "active" : ""}`}
+            title="Lock View (L)：锁定后拖拽不再改变视角，方便编辑路径"
+            onClick={toggleViewLocked}
+          >
+            {viewLocked ? "🔒 Locked" : "🔓 Lock View"}
           </button>
-          <button type="button" id="zr" title="Reset to 100%" onClick={() => setZoom(1)}>
-            {Math.round(zoom * 100)}%
-          </button>
-          <button type="button" id="zin" title="Zoom in" onClick={() => setZoom(zoom + 0.1)}>
-            +
-          </button>
+          <div className="view-mode-toggle" role="tablist" aria-label="View Mode">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={viewMode === "director"}
+              className={`view-tab ${viewMode === "director" ? "active" : ""}`}
+              onClick={() => setViewMode("director")}
+            >
+              Director
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={viewMode === "camera"}
+              className={`view-tab ${viewMode === "camera" ? "active" : ""}`}
+              onClick={() => setViewMode("camera")}
+              disabled={cameras.length === 0}
+            >
+              Camera
+            </button>
+          </div>
+          <select
+            className="camera-select"
+            value={activeCameraId ?? ""}
+            onChange={(event) => setActiveCamera(event.target.value)}
+            disabled={cameras.length === 0}
+          >
+            {cameras.map((camera) => (
+              <option key={camera.id} value={camera.id}>
+                {camera.name}
+              </option>
+            ))}
+          </select>
+          <div className="zoomctl">
+            <button type="button" id="zout" title="Zoom out" onClick={() => setZoom(zoom - 0.1)}>
+              −
+            </button>
+            <button type="button" id="zr" title="Reset to 100%" onClick={() => setZoom(1)}>
+              {Math.round(zoom * 100)}%
+            </button>
+            <button type="button" id="zin" title="Zoom in" onClick={() => setZoom(zoom + 0.1)}>
+              +
+            </button>
+          </div>
         </div>
       </div>
       <div className="canvasWrap">
@@ -592,6 +1009,7 @@ export function WorldView() {
           <color attach="background" args={["#0a1016"]} />
           <WorldScene />
         </Canvas>
+        {viewMode === "camera" ? <FramingOverlay /> : null}
       </div>
     </main>
   );

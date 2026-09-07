@@ -27,6 +27,17 @@ export function buildTimelineItems(state: DirectorState): TimelineItem[] {
     });
   });
 
+  // 每台相机拥有自己的 Camera Track。
+  state.cameraMoves.forEach((move) => {
+    items.push({
+      id: `clip_${move.id}`,
+      track: move.camera,
+      source: move.id,
+      kind: "camera",
+      label: `${move.type} · ${move.targetId ?? "default target"}`,
+    });
+  });
+
   return items;
 }
 
@@ -46,8 +57,12 @@ export function itemRange(
     const segment = state.segments.find((s) => s.id === item.source);
     return segment ? { start: segment.timeStart, end: segment.timeEnd } : null;
   }
-  const constraint = state.constraints.find((q) => q.id === item.source);
-  return constraint ? { start: constraint.timeStart, end: constraint.timeEnd } : null;
+  if (item.kind === "constraint") {
+    const constraint = state.constraints.find((q) => q.id === item.source);
+    return constraint ? { start: constraint.timeStart, end: constraint.timeEnd } : null;
+  }
+  const move = state.cameraMoves.find((m) => m.id === item.source);
+  return move ? { start: move.timeStart, end: move.timeEnd } : null;
 }
 
 export function roundTime(value: number): number {

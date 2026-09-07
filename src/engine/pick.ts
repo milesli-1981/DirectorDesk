@@ -1,6 +1,17 @@
-import { DirectorObject, DirectorState, MoveSegment, PathPoint, Vec2 } from "../domain/schema";
+import * as THREE from "three";
+import {
+  CameraObject,
+  DirectorObject,
+  DirectorState,
+  MoveSegment,
+  PathPoint,
+  Vec2,
+} from "../domain/schema";
 import { nearestOnPath, samplePath } from "./path";
 import { objectPosition } from "./solver";
+import { solveCamera } from "./cameraSolver";
+
+const ACTOR_HEIGHT = 1.9;
 
 export interface ObjectHit {
   object: DirectorObject;
@@ -10,6 +21,11 @@ export interface ObjectHit {
 export interface PointHit {
   segment: MoveSegment;
   point: PathPoint;
+  distance: number;
+}
+
+export interface CameraHit {
+  camera: CameraObject;
   distance: number;
 }
 
@@ -24,6 +40,71 @@ export interface PathHit {
   x: number;
   z: number;
   distance: number;
+}
+
+/** 射线到竖直线段的最短距离：让点击角色身体任意高度都能选中。 */
+function raySegmentDistance(ray: THREE.Ray, a: THREE.Vector3, b: THREE.Vector3): number {
+  const u = new THREE.Vector3().subVectors(b, a);
+  const v = ray.direction;
+  const w0 = new THREE.Vector3().subVectors(a, ray.origin);
+  const A = u.dot(u);
+  const B = u.dot(v);
+  const C = v.dot(v);
+  const D = u.dot(w0);
+  const E = v.dot(w0);
+  const denom = A * C - B * B;
+
+  let s = Math.abs(denom) < 1e-8 ? 0 : (B * E - C * D) / denom;
+  s = Math.max(0, Math.min(1, s));
+
+  const point = new THREE.Vector3().copy(a).addScaledVector(u, s);
+  const t = Math.max(0, new THREE.Vector3().subVectors(point, ray.origin).dot(v));
+  const onRay = new THREE.Vector3().copy(ray.origin).addScaledVector(v, t);
+  return point.distanceTo(onRay);
+}
+
+export function hitObjectRay(
+  state: DirectorState,
+  time: number,
+  ray: THREE.Ray,
+  radius: number,
+): ObjectHit | null {
+  let best: ObjectHit | null = null;
+  for (const object of state.objects) {
+    const position = objectPosition(state, object.id, time);
+    const distance = raySegmentDistance(
+      ray,
+      new THREE.Vector3(position.x, 0, position.z),
+      new THREE.Vector3(position.x, ACTOR_HEIGHT, position.z),
+    );
+    if (distance <= radius && (!best || distance < best.distance)) {
+      best = { object, distance };
+    }
+  }
+  return best;
+}
+
+export function hitCameraRay(
+  state: DirectorState,
+  time: number,
+  ray: THREE.Ray,
+  radius: number,
+): CameraHit | null {
+  let best: CameraHit | null = null;
+  for (const camera of state.cameras) {
+    const resolved = solveCamera(state, camera.id, time);
+    if (!resolved) continue;
+    const point = new THREE.Vector3(
+      resolved.position[0],
+      resolved.position[1],
+      resolved.position[2],
+    );
+    const distance = ray.distanceToPoint(point);
+    if (distance <= radius && (!best || distance < best.distance)) {
+      best = { camera, distance };
+    }
+  }
+  return best;
 }
 
 export function hitObject(

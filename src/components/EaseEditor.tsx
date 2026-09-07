@@ -46,24 +46,28 @@ function speedBars(ease: EaseCurve) {
   });
 }
 
-export function EaseEditor({ segmentId }: { segmentId: string }) {
-  const segment = useDirectorStore((s) => s.state.segments.find((item) => item.id === segmentId));
+export interface EaseEditorProps {
+  title: string;
+  ease: EaseCurve;
+  timeStart: number;
+  timeEnd: number;
+  onChange: (ease: EaseCurve) => void;
+}
+
+export function EaseEditor({ title, ease, timeStart, timeEnd, onChange }: EaseEditorProps) {
   const currentTime = useDirectorStore((s) => s.currentTime);
-  const setSegmentEase = useDirectorStore((s) => s.setSegmentEase);
   const handleRef = useRef<1 | 2 | null>(null);
 
-  if (!segment) return null;
-
-  const ease = normalizeEase(segment.ease);
-  const inside = currentTime >= segment.timeStart && currentTime <= segment.timeEnd;
-  const span = segment.timeEnd - segment.timeStart || 1;
-  const progress = inside ? clamp((currentTime - segment.timeStart) / span, 0, 1) : 0;
-  const eased = easeVal(ease, progress);
+  const curve = normalizeEase(ease);
+  const inside = currentTime >= timeStart && currentTime <= timeEnd;
+  const span = timeEnd - timeStart || 1;
+  const progress = inside ? clamp((currentTime - timeStart) / span, 0, 1) : 0;
+  const eased = easeVal(curve, progress);
 
   let curvePath = "";
   for (let i = 0; i <= 60; i += 1) {
     const u = i / 60;
-    curvePath += `${i ? "L" : "M"}${ex(u).toFixed(1)} ${ey(easeVal(ease, u)).toFixed(1)}`;
+    curvePath += `${i ? "L" : "M"}${ex(u).toFixed(1)} ${ey(easeVal(curve, u)).toFixed(1)}`;
   }
 
   const handleMove = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -75,10 +79,10 @@ export function EaseEditor({ segmentId }: { segmentId: string }) {
     const py = (event.clientY - rect.top) * scale;
     const u = (px - EX0) / (EX1 - EX0);
     const v = EASE_YMIN + ((EY1 - py) / (EY1 - EY0)) * (EASE_YMAX - EASE_YMIN);
-    const next = [...ease] as EaseCurve;
+    const next = [...curve] as EaseCurve;
     next[handle === 1 ? 0 : 2] = round3(clamp(u, 0, 1));
     next[handle === 1 ? 1 : 3] = round3(clamp(v, EASE_YMIN, EASE_YMAX));
-    setSegmentEase(segmentId, next);
+    onChange(next);
   };
 
   return (
@@ -88,8 +92,8 @@ export function EaseEditor({ segmentId }: { segmentId: string }) {
           <button
             key={preset.name}
             type="button"
-            className={`epill ${isSameEase(preset.value, ease) ? "on" : ""}`}
-            onClick={() => setSegmentEase(segmentId, [...preset.value] as EaseCurve)}
+            className={`epill ${isSameEase(preset.value, curve) ? "on" : ""}`}
+            onClick={() => onChange([...preset.value] as EaseCurve)}
           >
             {preset.name}
           </button>
@@ -140,35 +144,28 @@ export function EaseEditor({ segmentId }: { segmentId: string }) {
               stroke="#1c2933"
             />
           ))}
+          <line x1={ex(0)} y1={ey(0)} x2={ex(1)} y2={ey(1)} stroke="#2b3d4d" strokeDasharray="4 4" />
           <line
             x1={ex(0)}
             y1={ey(0)}
-            x2={ex(1)}
-            y2={ey(1)}
-            stroke="#2b3d4d"
-            strokeDasharray="4 4"
-          />
-          <line
-            x1={ex(0)}
-            y1={ey(0)}
-            x2={ex(ease[0])}
-            y2={ey(ease[1])}
+            x2={ex(curve[0])}
+            y2={ey(curve[1])}
             stroke="#67a7ff55"
             strokeDasharray="3 3"
           />
           <line
             x1={ex(1)}
             y1={ey(1)}
-            x2={ex(ease[2])}
-            y2={ey(ease[3])}
+            x2={ex(curve[2])}
+            y2={ey(curve[3])}
             stroke="#f0a35a55"
             strokeDasharray="3 3"
           />
           <path d={curvePath} fill="none" stroke="#67a7ff" strokeWidth={2} />
           <circle
             data-h="1"
-            cx={ex(ease[0])}
-            cy={ey(ease[1])}
+            cx={ex(curve[0])}
+            cy={ey(curve[1])}
             r={6}
             fill="#67a7ff"
             stroke="#0a1016"
@@ -177,8 +174,8 @@ export function EaseEditor({ segmentId }: { segmentId: string }) {
           />
           <circle
             data-h="2"
-            cx={ex(ease[2])}
-            cy={ey(ease[3])}
+            cx={ex(curve[2])}
+            cy={ey(curve[3])}
             r={6}
             fill="#f0a35a"
             stroke="#0a1016"
@@ -209,16 +206,16 @@ export function EaseEditor({ segmentId }: { segmentId: string }) {
           <text x={6} y={149} fill="#55646f" fontSize={7} letterSpacing={1}>
             SPD
           </text>
-          {speedBars(ease)}
+          {speedBars(curve)}
         </svg>
       </div>
 
       <div className="eread">
-        {`${segment.id} · cubic-bezier(${ease.map((value) => value.toFixed(2)).join(", ")})`}
+        {`${title} · cubic-bezier(${curve.map((value) => value.toFixed(2)).join(", ")})`}
         {"\n"}
         {inside
-          ? `t ${currentTime.toFixed(1)}s · time ${Math.round(progress * 100)}% → path ${Math.round(easeVal(ease, progress) * 100)}%`
-          : `playhead outside ${segment.timeStart.toFixed(1)}–${segment.timeEnd.toFixed(1)}s`}
+          ? `t ${currentTime.toFixed(1)}s · time ${Math.round(progress * 100)}% → path ${Math.round(easeVal(curve, progress) * 100)}%`
+          : `playhead outside ${timeStart.toFixed(1)}–${timeEnd.toFixed(1)}s`}
       </div>
     </>
   );

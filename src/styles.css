@@ -378,6 +378,74 @@ canvas {
   border-color: #4d8a6b;
 }
 
+.clip.camera {
+  background: #2c2340;
+  border-color: #8b6fc4;
+}
+
+.camera-row .label {
+  color: #c0a8e8;
+  display: flex;
+  align-items: center;
+}
+
+.inspector-row {
+  display: grid;
+  grid-template-columns: 82px 1fr;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  color: #93a3b4;
+}
+
+.inspector-row select,
+.inspector-row input[type="range"] {
+  width: 100%;
+  min-width: 0;
+}
+
+.inspector-row select {
+  background: #151d26;
+  color: #cbd7e3;
+  border: 1px solid #303c49;
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-size: 11px;
+}
+
+.field > select {
+  width: 100%;
+  background: #151d26;
+  color: #cbd7e3;
+  border: 1px solid #303c49;
+  border-radius: 4px;
+  padding: 5px 6px;
+  font-size: 11px;
+}
+
+.mini-btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 6px;
+}
+
+.ghost-button.on {
+  border-color: #67a7ff;
+  background: #18283a;
+  color: #cfe3f9;
+}
+
+.danger-button {
+  border-color: #6b3a41;
+  color: #e8a2aa;
+}
+
+.danger-button:hover {
+  border-color: #b4565f;
+  background: #2a1a1e;
+}
+
 .clip.sel {
   outline: 2px solid #d6e9ff;
 }
@@ -473,6 +541,224 @@ pre {
   border-color: #67a7ff;
   background: #18283a;
   color: #bcd8f6;
+}
+
+/* --------------------------------------------------------- Camera / view */
+
+.cam-st {
+  margin-top: 14px;
+}
+
+.addobj {
+  width: 100%;
+  margin: 0 0 9px;
+  color: #9fc5ff;
+  border-style: dashed;
+}
+
+.dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+.view-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.view-mode-toggle {
+  display: flex;
+  border: 1px solid #303c49;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.view-tab {
+  border: none;
+  border-radius: 0;
+  background: #101822;
+  color: #8fa0b2;
+  padding: 5px 10px;
+}
+
+.view-tab + .view-tab {
+  border-left: 1px solid #303c49;
+}
+
+.view-tab.active {
+  background: #18283a;
+  color: #cfe3f9;
+}
+
+.view-tab:disabled {
+  color: #4d5a68;
+  cursor: not-allowed;
+}
+
+.lock-btn {
+  background: #101822;
+  color: #8fa0b2;
+  border: 1px solid #303c49;
+  padding: 5px 9px;
+}
+
+.lock-btn.active {
+  border-color: #67a7ff;
+  background: #18283a;
+  color: #cfe3f9;
+}
+
+.lock-flag {
+  color: #67a7ff !important;
+  letter-spacing: 0.08em;
+}
+
+.camera-select {
+  background: #151d26;
+  color: #cbd7e3;
+  border: 1px solid #303c49;
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-size: 11px;
+}
+
+.framing-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 30;
+}
+
+.mask-bar {
+  position: absolute;
+  background: #000;
+}
+
+.mask-top {
+  top: 0;
+  left: 0;
+  right: 0;
+}
+
+.mask-bottom {
+  bottom: 0;
+  left: 0;
+  right: 0;
+}
+
+.mask-left {
+  top: 0;
+  bottom: 0;
+  left: 0;
+}
+
+.mask-right {
+  top: 0;
+  bottom: 0;
+  right: 0;
+}
+
+.frame-box {
+  position: absolute;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+}
+
+.ot-line {
+  position: absolute;
+  background: rgba(255, 255, 255, 0.13);
+}
+
+.ot-v-1 {
+  left: 33.333%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+}
+
+.ot-v-2 {
+  left: 66.666%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+}
+
+.ot-h-1 {
+  top: 33.333%;
+  left: 0;
+  right: 0;
+  height: 1px;
+}
+
+.ot-h-2 {
+  top: 66.666%;
+  left: 0;
+  right: 0;
+  height: 1px;
+}
+
+.center-cross {
+  position: absolute;
+  background: rgba(103, 167, 255, 0.55);
+}
+
+.center-cross.v {
+  left: 50%;
+  top: 46%;
+  width: 1px;
+  height: 8%;
+}
+
+.center-cross.h {
+  top: 50%;
+  left: 46%;
+  height: 1px;
+  width: 8%;
+}
+
+.safe-box {
+  position: absolute;
+  border: 1px dashed rgba(255, 255, 255, 0.18);
+}
+
+.safe-box.action {
+  left: 5%;
+  right: 5%;
+  top: 5%;
+  bottom: 5%;
+}
+
+.safe-box.title {
+  left: 10%;
+  right: 10%;
+  top: 10%;
+  bottom: 10%;
+}
+
+.cam-hud {
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 10px;
+  background: rgba(9, 13, 18, 0.72);
+  border: 1px solid #2b3a49;
+  border-radius: 4px;
+  color: #c8d6e4;
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.cam-hud strong {
+  color: #67a7ff;
+  letter-spacing: 0.08em;
 }
 
 .ease-wrap {
