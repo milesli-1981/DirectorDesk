@@ -3067,12 +3067,12 @@ PREVIS
 - 新 leg 默认：
   - 起点锚定前腿终点（共享 handoff 点）；
   - handoff 模式默认 `stop`；
-  - 默认时长占位（如 2s）；
-  - 路径在 Director View 中为一段短直线 stub。
+  - 默认时长 2s；
+  - 路径在 Director View 中为一段短直线 stub（长度固定 2 个世界单位）。
 
 ## 68.2 新 Leg 在 Director View 的表现
 
-- 默认一段短直线 stub：起点 = 共享 handoff 点，终点 = 前腿终点沿原方向偏移一小段。
+- 默认一段短直线 stub：起点 = 共享 handoff 点，终点 = 前腿终点沿原方向偏移 2 个世界单位（stub 长度固定 2 单位）。
 - 点「+」后 stub 立即出现并自动选中；用户拖终点 / 加折点塑形（与编辑任何已有 leg 一致）。
 - 终点拖回起点 = 停留腿（hold）：object 在原地待 `time` 秒，View 用环标记表示，不画线。
 
@@ -3103,3 +3103,86 @@ PREVIS
 - 拖交接点，前后两段端点始终一致（非 cut）。
 - `cut` 时前后端点可分离，并有不连续提示。
 - `smooth` 切线联动、`stop` 切线独立。
+
+---
+
+## 69. 变更记录（2026-09-07 实现落地）
+
+> 对应设计文档 `Director_Desk_Camera_Archetypes_Design_2026-09-07.md` §7 / §8；测试用例见 `Director_Desk_Automation_Test_Cases_V1.md` §14 / §15。
+
+### 69.1 加腿（Add Segment）修复与落地
+- **`styles.css` `.row`**：grid 由 `82px 1fr`（两列）改为 `82px 1fr auto`（三列），使「+ 加腿」按钮落在对象轨道末尾。原两列网格会把按钮挤入隐式第二行、叠到下一轨道，导致点不到 → 表现为「加腿不 work」。
+- **`Timeline.tsx`**：「+ 加腿」按钮增加 `onPointerDown` `stopPropagation`，避免点击按钮时误触发 timeline scrub 改播放头。
+- **`directorStore.ts` `addSegment`**：stub 长度由 5 单位改为 **2 单位**，默认时长由 2.2s 改为 **2s**（对齐 §68.1 / §68.2）。新 leg 起点锚定前腿终点、自动生成 `stop` handoff、自动双向选中。
+- **`WorldView.tsx` `SegmentPaths`**：新增**停留腿 HOLD 环**——当某段退化为零长度（起点≈终点且无折点）时，渲染 HOLD 环标记而非线段（对齐 §68.2）。
+
+### 69.2 Camera Segment 在 Timeline 可见 / 可编辑
+- **`demoShot.ts`**：预填 `CAM_A` 的两条 `CameraMove`（`MOVE_CAM_A_01` FOLLOW 0–6s、`MOVE_CAM_A_02` ORBIT 6–12s / orbit 120°），并预置 `smooth` 的 `CameraJunction`（`J_MOVE_CAM_A_01_MOVE_CAM_A_02`）。修复此前 `cameraMoves: []` 导致相机轨道空白、看不到 segment 的问题。
+- **`Timeline.tsx`**：每台相机轨道末尾新增「+」按钮，点击调用 `addCameraMove(camera.id, camera.motion)`，在播放头处追加该相机当前运镜类型的 `CameraMove` 并自动选中；同步导入 `addCameraMove`。
+- **`Inspector.tsx`**（此前已实现，现可由选中驱动）：选中相机 clip 后可编辑 motion 类型、段级 target / framing / view / side / lens 覆盖、ORBIT / DOLLY / CRANE 参数滑杆、缓动曲线与删除。
+- 验证：`tsc --noEmit` 0 错误、`read_lints` 0 错误、`npm run build` 通过；`.clip.camera` 有可见紫色样式（`#2c2340` + `#8b6fc4`）。
+
+---
+
+## 70. 资产（Asset）模型（2026-09-07 实现落地）
+
+> 设计文档：`Director_Desk_Asset_Model_Design_2026-09-07.md`；测试见 `Director_Desk_Automation_Test_Cases_V1.md` §16。
+
+- `DirectorObject` 升级为 Asset：`category`（human/animal/vehicle/building/furniture/nature/prop）、`role`（agent/set）、`rotation`、`footprint { w, d, h }`；保留 `type` 仅作兼容。
+- `engine/assetPresets.ts`：每类别默认体块 / 颜色 / role。
+- 渲染：所有资产按 `footprint` 渲染体块；`set` 半透明 + 地面轮廓；`agent` 保留朝向动画。
+- 摆放：Scene Tree `ADD ASSET` 面板（`addAsset`）一键实例化；Inspector 编辑 role / rotation / 体块 W·D·H / 删除（`removeAsset` 会清理相关 segment / constraint / 相机目标）。
+- 持久化重接：`localStorage` 自动保存（revision 触发）+ 顶栏 `Export` / `Import` JSON（`exportScene` / `importScene` / `persist`）；初始优先载入已保存场景。
+- 遮挡：`engine/occlusion.ts` 判定相机→目标连线被 `set` 资产阻挡；Director View 红色 `BLOCKED` 线框 + Camera HUD `⚠ OCCLUDED`。
+- 绕障（**已接入运动求解**）：`engine/pathfinding.ts` 以障碍拐角为节点建**可见图 + Dijkstra**（`routeAround`），起终点落在障碍内时先用 `pushOut` 推到外边缘；`path.ts` 的 `segmentRoutePoints` 同时供 `segmentPosition`（实际行走）与 Director View 的橙色虚线「导航层」使用，两者始终一致。已知限制：`FOLLOW` 跟随者按相对偏移跟随、不独立绕障；绕行改变里程而时长不变，表观速度略快。
+- 摆放碰撞：`engine/collision.ts` `footprintsOverlap` / `separateSetAsset`；**仅 set ↔ set 生效**——`addAsset` / `moveObject` / `updateAsset`（改位置或体块）时把资产沿**最小穿透轴**推开到刚好不碰（保留 0.05 间隙，最多迭代 8 轮解链式重叠）。`agent` 不参与碰撞，可自由重叠。
+- 遮挡可视化增强：Director View 绘制相机→目标**视线**——被挡为红色虚线，通畅为淡青实线。
+- demo 预置 `BLD_B`（4×4×8，位于 `CAM_A → M17` 视线中点 ≈ (-8.9, 3.1)），使遮挡开箱即见。
+- 拖拽移动：`hitObjectRay` 改用资产自身 `footprint` 做命中（高度取 `footprint.h`，抓取容差按 footprint 半宽外扩），使**包括 set 在内的所有资产**都能在 Director View 中直接按下拖动（原先固定 `ACTOR_HEIGHT` 细线段导致高大的建筑点不中）。`handleDown` 中**选中对象的路径点 / 端点优先于抓取资产**，避免外扩后的抓取范围盖住落在建筑 footprint 内的路径端点。
+- **资产锁定（防误触）**：`DirectorObject` 新增 `locked?: boolean`，store 新增 `toggleLock(id)`（翻转 `locked`、自增 `revision`）。锁定后 `moveObject` 直接 `return`（任何拖拽都不改坐标）；`WorldView` 的 `handleDown` 命中锁定对象时**只选中、不接管拖拽、也不禁用相机轨道**（锁定对象点一下能选中以便解锁，但拖它不会移动、也不会挡住转视角），当画面对象变多时减少操作阻碍。快捷开关两处：Scene Tree 每行的 `Lock` / `Locked` 按钮、Inspector 资产区的 `Lock position` / `Unlock` 按钮（调 `updateAsset(id, { locked })`）。Director View 中锁定对象头顶显示 `LOCKED` 徽标（仅 Director 视图，相机视图不显示辅助物）。
+
+---
+
+## 71. 界面 / 播放行为调整（2026-09-07 实现落地）
+
+> 测试见 `Director_Desk_Automation_Test_Cases_V1.md` §20。
+
+### 71.1 右侧 Inspector 面板不出现横向滚动条
+- 根因：`.row2` 的 `Block`（W/D/H）行 = `label 58 + 三个 .val(min-width:34) + 三个 number(48) + gap` ≈ **362px**，超出 295px 面板宽；`Role` 的 `<select>` 被长中文 option 撑开，且 `.row2` 下没有任何宽度约束。
+- 修法：`.row2` 加 `flex-wrap: wrap`；`select / input[number] / input[range]` 设 `flex: 1 1 60px; min-width: 0; max-width: 100%`；`.val` 去掉 `min-width: 34px`；`.inspector-row / .field / .mini-btns / .ease-wrap / pre` 全部 `min-width: 0; max-width: 100%`。
+- `.right` 改 `overflow-x: hidden; overflow-y: auto`（保留纵向滚动）作为兜底。
+
+### 71.2 Timeline 轨道标签截断与行排序
+- 标签列 82 → **96px**（`LABEL_WIDTH`、`.row` 网格、`.ruler` 边距、`.ph` 基准四处同步）。
+- `.label` 加 `overflow: hidden; text-overflow: ellipsis; white-space: nowrap`，并加 `title` 悬停显示全名；相机行因 `.label` 是 flex 容器（含颜色点），需把名字包进 `.track-name` 后再截断。
+- 行排序：新增 `reorderObject(dragId, targetId)`（把 `dragId` 移到 `targetId` 所在下标，自增 `revision`，因此 Scene Tree 顺序同步且触发自动保存）；UI 用 HTML5 原生拖拽，**标签即把手**，`onDragOver` 到另一行时实时重排，`.row-dragging` 半透明反馈。
+- 交互冲突：`handleScrub` 原只跳过 `.clip`，拖标签会把播放头也拽走 —— 现改为跳过 `.clip, .label`。
+
+### 71.3 human 资产的人形表示
+- 新增 `HumanoidFigure`，**仅 `category === "human"`** 使用；建筑 / 家具 / 道具仍是方盒。
+- 比例全部由 `footprint` 推导：腿 `0.44h`、躯干 `0.34h`、头 `r = 0.096h`（合计 ≈ 0.97h），双臂 `0.9 × 躯干高` 挂在躯干两侧；头用 `sphereGeometry`，其余 `boxGeometry`。
+- 仍在 `bodyRef` 内，走路 bob 与朝向动画保留。
+
+### 71.4 播放结束规则
+- 新增 `engine/timeline.ts` `contentEndTime(state)`：取 `segments / constraints / cameraMoves` 的最大 `timeEnd`；无内容时回退 `state.duration`；结果夹到 `[0, duration]`。
+- 播放循环（`App.tsx`）结束判定由 `next >= state.duration` 改为 `next >= contentEndTime(state)`；到达后 `setTime(end)` → `setPlaying(false)` → **`setTime(0)`**，播放头自动回到第一帧。
+- `togglePlay`：播放头已在末尾时按播放，先 `currentTime = 0` 再开始，避免「按下播放却立刻结束」。
+- 注：demo 中 `MOVE_CAM_A_02.timeEnd = 12s` 恰等于 `duration`，故默认场景结束点不变，变化的是**结束后自动归零**；内容早于 `duration` 时才会看到结束点提前。
+
+### 71.5 Camera 视图下不显示任何机位代理
+- 原 `CameraProxies` 在 `viewMode === "camera"` 时只排除当前机位，其余相机（机身 + 镜头 + 视锥 + 名字标签）仍会入画 —— 与「透过这台机位看画面」的语义相反。
+- 改为相机视图下直接 `return null`（同时移除不再使用的 `activeCameraId` 订阅）。
+- 已复核其余覆盖层本就由 `viewMode === "director"` 门控，相机视图下不会入画：`SegmentPaths`（含橙色导航层）、`PathHandles`、`HandoffMarkers`、`FollowLinks`、`OcclusionHighlights`、`CameraPaths`，以及 `ActorView` 的名字标签 / footprint 线框 / 选中环。取景叠加（三分法 / 中心 / 安全框 / 遮幅）是 2D overlay 而非 3D 物体，保留。
+
+---
+
+## 72. 段级 / 相机级属性覆盖语义（2026-09-07 定稿）
+
+> 设计文档 `Director_Desk_Camera_Archetypes_Design_2026-09-07.md` §8.7.1；测试见 `Director_Desk_Automation_Test_Cases_V1.md` §20 `TC-CAM-001 ~ 003`。
+
+- `CameraMove` 的 `framing / view / side / lensMm` 为**可选**字段；`placeCamera` 用 `options.X ?? camera.X` 取值。
+- **留空 = 继承相机级**（相机级改动在该段立即生效）；**填值 = 该段独立生效**，不再受相机级同名属性影响。
+- UI 可发现性：段级下拉首项 `(camera default)`；相机级 `Camera Intent` 区在存在段级覆盖时显示 `⚠` 提示。
+- `addCameraMove` 不复制相机级值，新段默认继承。
+- **已修问题**：demo 旧数据把四项写死在 `CameraMove` 上，使相机级 `Framing / View / Side / Lens` 在整条时间轴上静默失效。现 `MOVE_CAM_A_01` 全部留空、`MOVE_CAM_A_02` 仅保留 `framing: "close_up"`。
+- `STORAGE_KEY` 由 `director-desk-scene-v1` 升为 `director-desk-scene-v2`：旧存档含写死的段级值会屏蔽上述修复，升版以放弃旧存档（如需保留请先 `Export`）。

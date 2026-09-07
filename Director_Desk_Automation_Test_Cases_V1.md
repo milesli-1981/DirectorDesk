@@ -656,6 +656,148 @@ Automate:
 
 ---
 
+# 14. Segment append / Hold leg tests
+
+## TC-SEGADD-001 — Add leg appends MOVE anchored to previous end
+
+**Steps:**
+1. Select an object that already has segments (e.g. `M17`).
+2. Click 「+ 加腿」 at the end of that object's timeline track.
+
+**Expected:**
+- A new `MOVE` segment is appended.
+- Its `start` equals the previous segment's `end` (shares the handoff point).
+- A `stop` `Handoff` is auto-created between the two segments.
+- Stub end = start + **2 world units** along the previous leg's direction.
+- Default duration = **2s**.
+- The new segment is auto-selected (timeline clip + Director View path both highlighted).
+
+---
+
+## TC-SEGADD-002 — Hold leg renders HOLD ring
+
+**Steps:**
+1. Add a leg (TC-SEGADD-001).
+2. Drag its end point back onto its start point.
+
+**Expected:**
+- The segment becomes degenerate (end ≈ start, no intermediate points).
+- Director View renders a **HOLD ring** marker at that position; **no line is drawn**.
+
+---
+
+## TC-SEGADD-003 — Add-leg button placement (UI regression)
+
+**Expected:**
+- The 「+ 加腿」 button sits inside the object track's third grid column (end of the lane), not overlapping the next object row.
+
+---
+
+## TC-SEGADD-004 — Add-leg click does not scrub
+
+**Steps:** Click 「+ 加腿」.
+
+**Expected:** `currentTime` is unchanged (no timeline scrub); only `addSegment` fires.
+
+---
+
+# 15. Camera timeline tests
+
+## TC-CAMTL-001 — Camera Move clips visible on timeline
+
+**Expected:** The `CAM_A` track shows two clips (`FOLLOW · M17`, `ORBIT · M17`) and a `smooth` junction node at the boundary between them.
+
+---
+
+## TC-CAMTL-002 — Add camera move via ＋
+
+**Steps:**
+1. Select `CAM_A`.
+2. Click 「+」 at the end of the camera track at playhead `t`.
+
+**Expected:**
+- A new `CameraMove` is appended at `t` with default 3s length.
+- It is auto-selected.
+- If time-adjacent to a neighbor, a `CameraJunction` is auto-created.
+
+---
+
+## TC-CAMTL-003 — Camera clip selectable / editable
+
+**Steps:** Click a camera clip on the timeline.
+
+**Expected:** Inspector shows motion type, target / framing / view / side / lens overrides, ORBIT / DOLLY / CRANE sliders, and ease; edits apply to that `CameraMove` only.
+
+---
+
+## TC-CAMTL-004 — CameraJunction cyclable
+
+**Steps:** Click the junction node on the `CAM_A` track.
+
+**Expected:** Mode cycles `stop → smooth → cut` (and back); color / glyph updates; `reconcileCameraJunctions` preserves the chosen mode.
+
+---
+
+# 16. Asset / scene tests
+
+## TC-ASSET-001 — Add asset from palette
+**Steps:** In Scene Tree `ADD ASSET`, click `Vehicle`.
+**Expected:** A new `agent` asset `AST_VEHICLE_01` appears at a free spot with default footprint (2 × 4.2 × 1.5) and is auto-selected.
+
+## TC-ASSET-002 — Asset role / footprint editable
+**Steps:** Select an asset; in Inspector switch Role to `set`, change W/D/H.
+**Expected:** WorldView updates the block dimensions / material (set = semi-transparent); role change persists.
+
+## TC-ASSET-003 — Delete asset cleans dependents
+**Steps:** Select `M17`; click `Delete Asset`.
+**Expected:** Asset removed; its segments, constraints referencing it, and camera-move targets pointing at it are also removed / cleared.
+
+## TC-ASSET-004 — Occlusion highlight
+**Steps:** Place a building between the active camera and its target.
+**Expected:** The building shows a red `BLOCKED` wireframe in Director View; Camera HUD shows `⚠ OCCLUDED · <id>`; a camera→target sightline is drawn (**red dashed** when occluded).
+
+## TC-ASSET-005 — Route avoidance overlay
+**Steps:** Place a furniture asset across an agent's segment path.
+**Expected:** An orange dashed "navigation layer" route appears, detouring around the furniture footprint.
+
+## TC-ASSET-006 — Scene persistence
+**Steps:** Add an asset; reload the page (or Export then Import the JSON).
+**Expected:** The added asset persists via localStorage autosave; Export downloads valid JSON, Import restores the exact state.
+
+## TC-ASSET-007 — Set asset auto-separates on add
+**Steps:** Add two `building` assets via `ADD ASSET`.
+**Expected:** The second building's placement is pushed out along the minimum penetration axis until its footprint no longer overlaps the first (a ~0.05 gap remains). `agent` assets are **not** separated — they may overlap freely.
+
+## TC-ASSET-008 — Set asset auto-separates on drag
+**Steps:** Drag a `set` asset (e.g. `TBL_01`) onto `BLD_A` so their footprints overlap, then release.
+**Expected:** The dragged asset is pushed out along the minimum penetration axis to exactly touch — no interpenetration. Chained overlaps (A→B→C) resolve over up to 8 iterations.
+
+## TC-ASSET-009 — Clear line of sight
+**Steps:** With no `set` asset between the active camera and its target, observe Director View.
+**Expected:** The camera→target sightline is drawn in **teal** (not red); no `BLOCKED` marker and no `⚠ OCCLUDED` in the Camera HUD.
+
+## TC-ASSET-010 — Drag asset in Director View
+**Steps:** In Director View, press anywhere on a `set` asset's body (e.g. `BLD_A`, 10 × 10 × 24) and drag.
+**Expected:** The asset is selected and follows the pointer. Hit-testing uses the asset's own `footprint` (height = `footprint.h`, tolerance widened by half-width), so tall / wide assets are grabbable — not only near their base.
+
+## TC-ASSET-011 — Path point wins over asset grab
+**Steps:** Select `M17`; click its segment endpoint that lies inside `BLD_A`'s footprint (e.g. (7, -5)).
+**Expected:** The **endpoint** is dragged, not the building. The selected object's path points / endpoints are resolved before an asset grab, so enlarged asset grab areas never swallow path handles.
+
+## TC-ASSET-012 — Agent actually walks around obstacles
+**Steps:** `BLD_A` (10 × 10) sits across `M17`'s `SEG_02`, whose end point (7, -5) lies inside the building. Play the timeline through 4.2s → 6.5s.
+**Expected:** M17 walks **around** the building (via a corner of its expanded footprint) instead of through it. The orange navigation layer and the agent's actual trajectory coincide exactly (both come from `segmentRoutePoints`). Because the endpoint is inside the building, M17 ends at the building's outer edge — never inside it.
+
+## TC-ASSET-013 — Endpoint inside obstacle is pushed out
+**Steps:** Drag a segment endpoint into the middle of `BLD_A`, then let the timeline reach that segment's end.
+**Expected:** The resting position is on the building's expanded outer edge (min-penetration axis), not inside the footprint.
+
+## TC-ASSET-014 — Clear path is unchanged
+**Steps:** With no `set` asset intersecting an agent's segment, play the timeline.
+**Expected:** The agent follows the original path exactly (ARC curves preserved); no detour is introduced and the navigation layer overlays the raw path.
+
+---
+
 # 14. S06 regression / future Group Dynamics tests
 
 These are higher-level tests derived from the broader Director Engine design and should become a separate automation suite.
@@ -1051,3 +1193,87 @@ This should become the first full regression test.
 - Invariant `A.end == B.start` is NOT enforced under `cut`.
 
 **Automation:** Assert no equality constraint is enforced between A end and B start.
+
+---
+
+# 20. Layout / playback / camera view tests
+
+## TC-UI-001 — Right panel has no horizontal scrollbar
+**Steps:** Select an asset so the `Asset` field (Role / Rotation / Block W·D·H) renders.
+**Expected:** The right panel scrolls vertically only — `scrollWidth <= clientWidth`, no horizontal scrollbar. The `Block` row wraps instead of overflowing, and the Role `<select>` shrinks rather than being widened by its long option text.
+
+## TC-UI-002 — Long track label is truncated
+**Steps:** Add an asset with a long id (e.g. `AST_BUILDING_01`) and look at its timeline row.
+**Expected:** The label is clipped with an ellipsis inside the 96px label column and does not overlap the lane; hovering shows the full id via `title`.
+
+## TC-UI-003 — Reorder timeline rows by dragging the label
+**Steps:** Drag object row `M19`'s label above `M17` and drop.
+**Expected:** The `objects` array is reordered (Scene Tree order follows), `revision` increments (autosave fires), and the dragged row appears semi-transparent during the drag.
+
+## TC-UI-004 — Dragging a label does not scrub
+**Steps:** Press and drag a row label.
+**Expected:** `currentTime` is unchanged — the playhead does not move (only `.clip` and `.label` opt out of scrubbing).
+
+## TC-UI-005 — Human asset renders as a humanoid
+**Steps:** Add a `human` asset and a `building` asset.
+**Expected:** The human is drawn as head + torso + two arms + two legs (sphere + boxes sized from its `footprint`); the building remains a plain box. Walk bob and facing animation still apply to the humanoid.
+
+## TC-PLAY-006 — Playback stops at the last content frame
+**Steps:** Move the last camera move so content ends at 8s while `duration` stays 12s; press Play.
+**Expected:** Playback stops at 8s (not 12s) and the playhead resets to 0 automatically.
+
+## TC-PLAY-007 — Play from the end restarts at frame one
+**Steps:** Scrub the playhead to the end; press Play.
+**Expected:** Playback starts from 0 rather than immediately ending.
+
+## TC-CAMVIEW-001 — No camera proxies visible in camera view
+**Steps:** Add a second camera; switch to Camera view.
+**Expected:** Neither the active camera's own proxy nor any other camera's proxy (body, lens, frustum, name label) is visible in the shot.
+
+## TC-CAMVIEW-002 — Camera view shows only subjects and framing overlay
+**Steps:** In Camera view, inspect the frame.
+**Expected:** No path lines, path handles, handoff markers, follow links, occlusion wireframes or camera-motion trails are rendered; the thirds / centre / safe-area overlays remain.
+
+## TC-CAM-001 — Camera-level intent applies to moves that inherit
+**Steps:** With a fresh demo, select `CAM_A` (no move selected) and change `View` to `high`.
+**Expected:** The camera rig height changes during 0–6s — `MOVE_CAM_A_01` has no segment-level override, so it inherits. No `⚠` override warning is shown for `view`.
+
+## TC-CAM-002 — Segment-level override wins over camera level
+**Steps:** Select `MOVE_CAM_A_02` (framing `close_up`); then select `CAM_A` and change `Framing` to `wide`.
+**Expected:** During 6–12s the framing stays `close_up` (segment is independent); during 0–6s it follows the camera-level `wide`. The `Camera Intent` area shows a `⚠ framing ...` warning because a move overrides it.
+
+## TC-CAM-003 — Clearing a segment override restores inheritance
+**Steps:** Select `MOVE_CAM_A_02` and set `Framing` back to `(camera default)`.
+**Expected:** The field is stored as `undefined`; the segment follows the camera-level framing again and the `⚠` warning disappears.
+
+## TC-CAM-004 — New move inherits by default
+**Steps:** Click 「+」 on a camera track to append a `CameraMove`.
+**Expected:** The new move has no `framing / view / side / lensMm` values (they are not copied from the camera), so it inherits camera-level intent until explicitly overridden.
+
+---
+
+# 21. Asset locking (anti-mistouch) tests
+
+## TC-LOCK-001 — Locked asset cannot be moved by dragging
+**Steps:** Place an asset and drag it to a position; in Scene Tree click its `Lock` button (or in Inspector click `Lock position`). Then press and drag the asset in Director View.
+**Expected:** The asset does not move — its `x/z` is unchanged; `toggleLock` / `updateAsset` has set `locked: true`, and `moveObject` returns early for locked objects.
+
+## TC-LOCK-002 — Locked asset is still selectable
+**Steps:** With a locked asset, click it in Director View.
+**Expected:** It becomes the selected object (Inspector shows its properties and an `Unlock` button); the click selects without initiating a move.
+
+## TC-LOCK-003 — Camera orbit is not blocked by a locked asset
+**Steps:** Click-drag on a locked asset in Director View (without moving it).
+**Expected:** The drag rotates the camera (OrbitControls stays active) instead of being captured by the object, so locked objects do not impede view navigation.
+
+## TC-LOCK-004 — Lock state persists in saved scene
+**Steps:** Lock an asset, then `Export` the scene (or rely on localStorage autosave driven by `revision`); reload / `Import`.
+**Expected:** The asset's `locked: true` survives the round-trip; it remains unmovable after reload.
+
+## TC-LOCK-005 — Unlock restores dragging
+**Steps:** Select a locked asset and click `Unlock` (Scene Tree `Locked` button or Inspector `Unlock`).
+**Expected:** `locked` becomes falsy; the asset can be dragged again in Director View.
+
+## TC-LOCK-006 — Director View shows LOCKED badge
+**Steps:** Lock an asset and view it in Director View; switch to Camera View.
+**Expected:** A `LOCKED` badge is rendered above the asset in Director View, and is NOT shown in Camera View (helpers are hidden there).

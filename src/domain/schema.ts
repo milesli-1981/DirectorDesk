@@ -1,5 +1,25 @@
 export type ObjectKind = "actor" | "landmark" | "prop";
 
+/**
+ * 资产类别：拍摄目标与被拍对象都可以是人 / 动物 / 载具 / 建筑 / 家具 / 自然 / 道具。
+ * 抽象为「资产（Asset）」后，凡是能运动的（agent）都能当相机目标 / 拥有 segment；
+ * 静态的（set）则是环境遮挡体与路径障碍。
+ */
+export type AssetCategory =
+  | "human"
+  | "animal"
+  | "vehicle"
+  | "building"
+  | "furniture"
+  | "nature"
+  | "prop";
+
+/** agent = 可运动、可作目标；set = 静态环境（遮挡 + 障碍）。 */
+export type AssetRole = "agent" | "set";
+
+/** 默认体块尺寸（世界单位）：w=宽(x) d=深(z) h=高(y)。 */
+export type Footprint = { w: number; d: number; h: number };
+
 export type PathPointShape = "LINE" | "ARC";
 
 /** cubic-bezier(x1, y1, x2, y2) — 与 CSS 缓动一致。 */
@@ -18,10 +38,19 @@ export type Vec3 = [number, number, number];
  */
 export interface DirectorObject {
   id: string;
+  /** 兼容保留：actor / landmark / prop。新逻辑以 category + role 为主。 */
   type: ObjectKind;
+  category: AssetCategory;
+  role: AssetRole;
   x: number;
   z: number;
+  /** 摆放朝向（yaw，度）。 */
+  rotation: number;
+  /** 默认体块尺寸。 */
+  footprint: Footprint;
   color: string;
+  /** 锁定后不可通过拖拽改变位置（防误触）；仍可点选以便解锁。 */
+  locked?: boolean;
 }
 
 /** Path Point = 路径控制点。ARC 点是控制点，路径不一定穿过它。 */
@@ -49,6 +78,33 @@ export interface MoveSegment {
   timeStart: number;
   timeEnd: number;
   ease: EaseCurve;
+}
+
+/** 相邻两条 leg 的交接点模式。 */
+export type HandoffMode = "stop" | "smooth" | "cut";
+
+/**
+ * Handoff = 前腿终点 === 后腿起点 的逻辑连接。
+ * 坐标本身仍由两条 leg 各自保存（single source 通过 store 同步保证），
+ * Handoff 只记录连接关系与模式。
+ */
+export interface Handoff {
+  id: string;
+  prevSeg: string;
+  nextSeg: string;
+  mode: HandoffMode;
+}
+
+/**
+ * CameraMove 边界交接点（一镜到底）。
+ * 与 actor 的 Handoff 同构：相邻两条 CameraMove 在时间内相接时生成，
+ * 记录连接关系与模式（stop / smooth / cut）。
+ */
+export interface CameraJunction {
+  id: string;
+  prevMove: string;
+  nextMove: string;
+  mode: HandoffMode;
 }
 
 export type ConstraintType = "FOLLOW" | "LOOK_AT";
@@ -106,6 +162,11 @@ export interface CameraMove {
   dollyScale: number;
   /** CRANE：结束时相对基准机位的附加高度（米）。 */
   craneHeight: number;
+  /** 段级覆盖：景别 / 视角 / 方位 / 镜头。为空则沿用 CameraObject 默认值。 */
+  framing?: CameraFraming;
+  view?: CameraView;
+  side?: CameraSide;
+  lensMm?: number;
   ease: EaseCurve;
 }
 
@@ -124,9 +185,11 @@ export interface DirectorState {
   aspectRatio: AspectRatio;
   objects: DirectorObject[];
   segments: MoveSegment[];
+  handoffs: Handoff[];
   constraints: Constraint[];
   cameras: CameraObject[];
   cameraMoves: CameraMove[];
+  cameraJunctions: CameraJunction[];
 }
 
 export type TimelineKind = "segment" | "constraint" | "camera";

@@ -3,7 +3,7 @@ import { Canvas, ThreeEvent, useFrame, useThree } from "@react-three/fiber";
 import { Html, Line, OrbitControls, PerspectiveCamera } from "@react-three/drei";
 import * as THREE from "three";
 import { useDirectorStore } from "../state/directorStore";
-import { MoveSegment, PathPoint, Vec2 } from "../domain/schema";
+import { HandoffMode, MoveSegment, PathPoint, Vec2 } from "../domain/schema";
 import { curveToggleEligible, pathChain } from "../engine/path";
 import {
   hitCameraRay,
@@ -21,6 +21,8 @@ import {
   sampleCameraPath,
   solveCamera,
 } from "../engine/cameraSolver";
+import { blockingAssets, setRects } from "../engine/occlusion";
+import { segmentRoutePoints } from "../engine/path";
 import { aspectValue, FRAMING_LABELS, MOTION_LABELS, SIDE_LABELS, VIEW_LABELS } from "../domain/schema";
 import { RadialRing } from "./RadialRing";
 
@@ -28,6 +30,8 @@ const GROUND_PLANE = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 const TARGET = new THREE.Vector3(0, 0, 0);
 const BASE_DISTANCE = 26;
 const DIRECTOR_FOV = 40;
+/** 径向意图环暂未匹配到合适的操作，暂时关闭（置 true 即可恢复点击对象弹出）。 */
+const RING_ENABLED = false;
 
 type DragState =
   | { kind: "object"; id: string; moved: boolean; origin: Vec2 }
@@ -59,16 +63,23 @@ function ActorView({ objectId }: { objectId: string }) {
   const showHelpers = useDirectorStore((s) => s.viewMode === "director");
   const groupRef = useRef<THREE.Group>(null);
   const bodyRef = useRef<THREE.Group>(null);
-  const legLRef = useRef<THREE.Group>(null);
-  const legRRef = useRef<THREE.Group>(null);
-  const armLRef = useRef<THREE.Group>(null);
-  const armRRef = useRef<THREE.Group>(null);
   const phaseRef = useRef(0);
   const facingRef = useRef(0);
 
   useFrame((_, delta) => {
     if (!object) return;
     const { state, currentTime } = useDirectorStore.getState();
+
+    // 静态环境资产：固定在摆放位置与朝向上，无运动。
+    if (object.role === "set") {
+      if (groupRef.current) {
+        groupRef.current.position.set(object.x, 0, object.z);
+        groupRef.current.rotation.y = (object.rotation * Math.PI) / 180;
+      }
+      return;
+    }
+
+    // 可运动资产：位置由 segment 求解，朝向跟随速度方向。
     const position = objectPosition(state, objectId, currentTime);
     const previous = objectPosition(
       state,
@@ -93,11 +104,6 @@ function ActorView({ objectId }: { objectId: string }) {
     // Body Motion 与整体位移分离：Cycle 由速度驱动，位置由 Motion Curve 驱动。
     phaseRef.current += delta * speed * 2.6;
     const intensity = Math.min(1, speed / 2.6);
-    const swing = Math.sin(phaseRef.current) * intensity * 0.75;
-    if (legLRef.current) legLRef.current.rotation.x = swing;
-    if (legRRef.current) legRRef.current.rotation.x = -swing;
-    if (armLRef.current) armLRef.current.rotation.x = -swing * 0.8;
-    if (armRRef.current) armRRef.current.rotation.x = swing * 0.8;
     if (bodyRef.current) {
       bodyRef.current.position.y = Math.abs(Math.sin(phaseRef.current)) * 0.05 * intensity;
     }
@@ -105,63 +111,50 @@ function ActorView({ objectId }: { objectId: string }) {
 
   if (!object) return null;
   const color = object.color;
+  const { w, d, h } = object.footprint;
+  const ringR = Math.max(w, d) * 0.7 + 0.16;
 
   return (
     <group ref={groupRef}>
-      {object.type === "actor" ? (
-        <>
-          <group ref={bodyRef}>
-            <mesh position={[0, 1.12, 0]}>
-              <capsuleGeometry args={[0.26, 0.6, 6, 14]} />
-              <meshStandardMaterial color={color} roughness={0.5} metalness={0.05} />
-            </mesh>
-            <mesh position={[0, 1.68, 0]}>
-              <sphereGeometry args={[0.2, 20, 14]} />
-              <meshStandardMaterial color={color} roughness={0.45} />
-            </mesh>
-            <group ref={armLRef} position={[-0.32, 1.42, 0]}>
-              <mesh position={[0, -0.28, 0]}>
-                <boxGeometry args={[0.12, 0.58, 0.12]} />
-                <meshStandardMaterial color={color} roughness={0.6} />
-              </mesh>
-            </group>
-            <group ref={armRRef} position={[0.32, 1.42, 0]}>
-              <mesh position={[0, -0.28, 0]}>
-                <boxGeometry args={[0.12, 0.58, 0.12]} />
-                <meshStandardMaterial color={color} roughness={0.6} />
-              </mesh>
-            </group>
-          </group>
-          <group ref={legLRef} position={[-0.14, 0.84, 0]}>
-            <mesh position={[0, -0.42, 0]}>
-              <boxGeometry args={[0.15, 0.84, 0.15]} />
-              <meshStandardMaterial color="#2b3a4c" roughness={0.7} />
-            </mesh>
-          </group>
-          <group ref={legRRef} position={[0.14, 0.84, 0]}>
-            <mesh position={[0, -0.42, 0]}>
-              <boxGeometry args={[0.15, 0.84, 0.15]} />
-              <meshStandardMaterial color="#2b3a4c" roughness={0.7} />
-            </mesh>
-          </group>
-        </>
-      ) : (
-        <mesh position={[0, 0.85, 0]}>
-          <boxGeometry args={[0.9, 1.7, 0.9]} />
-          <meshStandardMaterial color={color} roughness={0.6} />
+      <group ref={bodyRef}>
+        {object.category === "human" ? (
+          <HumanoidFigure w={w} d={d} h={h} color={color} />
+        ) : (
+          <mesh position={[0, h / 2, 0]}>
+            <boxGeometry args={[w, h, d]} />
+            <meshStandardMaterial
+              color={color}
+              roughness={0.7}
+              metalness={0.05}
+              transparent={object.role === "set"}
+              opacity={object.role === "set" ? 0.82 : 1}
+            />
+          </mesh>
+        )}
+      </group>
+
+      {showHelpers ? (
+        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.02, 0]}>
+          <planeGeometry args={[w, d]} />
+          <meshBasicMaterial
+            color={isSelected ? "#ffffff" : object.role === "set" ? "#f0a35a" : "#55d88a"}
+            wireframe
+            transparent
+            opacity={0.5}
+          />
         </mesh>
-      )}
+      ) : null}
 
       {isSelected && showHelpers ? (
         <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.03, 0]}>
-          <ringGeometry args={[0.62, 0.78, 44]} />
+          <ringGeometry args={[ringR - 0.16, ringR, 44]} />
           <meshBasicMaterial color="#ffffff" side={THREE.DoubleSide} transparent opacity={0.9} />
         </mesh>
       ) : null}
 
       {showHelpers ? (
         <Html
-          position={[0, 2.15, 0]}
+          position={[0, h + 0.4, 0]}
           center
           style={{ pointerEvents: "none" }}
           zIndexRange={[20, 0]}
@@ -171,6 +164,75 @@ function ActorView({ objectId }: { objectId: string }) {
           </span>
         </Html>
       ) : null}
+
+      {object.locked && showHelpers ? (
+        <Html
+          position={[0, h + 0.95, 0]}
+          center
+          style={{ pointerEvents: "none" }}
+          zIndexRange={[20, 0]}
+        >
+          <span className="lock-badge">LOCKED</span>
+        </Html>
+      ) : null}
+    </group>
+  );
+}
+
+/**
+ * 人形体块：human 类资产用「头 + 躯干 + 双臂 + 双腿」的组合体表示，
+ * 与建筑 / 家具等纯方盒资产在视觉上区分开。尺寸全部由 footprint 推导。
+ */
+function HumanoidFigure({
+  w,
+  d,
+  h,
+  color,
+}: {
+  w: number;
+  d: number;
+  h: number;
+  color: string;
+}) {
+  const legH = h * 0.44;
+  const torsoH = h * 0.34;
+  const headR = h * 0.096;
+  const legW = w * 0.3;
+  const legD = d * 0.3;
+  const legX = w * 0.22;
+  const torsoW = w * 0.85;
+  const torsoD = d * 0.5;
+  const armW = w * 0.16;
+  const armD = d * 0.16;
+  const armH = torsoH * 0.9;
+  const armX = torsoW / 2 + armW / 2;
+
+  return (
+    <group>
+      <mesh position={[-legX, legH / 2, 0]}>
+        <boxGeometry args={[legW, legH, legD]} />
+        <meshStandardMaterial color={color} roughness={0.7} metalness={0.05} />
+      </mesh>
+      <mesh position={[legX, legH / 2, 0]}>
+        <boxGeometry args={[legW, legH, legD]} />
+        <meshStandardMaterial color={color} roughness={0.7} metalness={0.05} />
+      </mesh>
+      <mesh position={[0, legH + torsoH / 2, 0]}>
+        <boxGeometry args={[torsoW, torsoH, torsoD]} />
+        <meshStandardMaterial color={color} roughness={0.7} metalness={0.05} />
+      </mesh>
+      <mesh position={[-armX, legH + torsoH * 0.55, 0]}>
+        <boxGeometry args={[armW, armH, armD]} />
+        <meshStandardMaterial color={color} roughness={0.62} metalness={0.05} />
+      </mesh>
+      <mesh position={[armX, legH + torsoH * 0.55, 0]}>
+        <boxGeometry args={[armW, armH, armD]} />
+        <meshStandardMaterial color={color} roughness={0.62} metalness={0.05} />
+      </mesh>
+      <mesh position={[0, legH + torsoH + headR, 0]}>
+        <sphereGeometry args={[headR, 18, 14]} />
+        <meshStandardMaterial color={color} roughness={0.6} metalness={0.05} />
+      </mesh>
     </group>
   );
 }
@@ -194,24 +256,103 @@ function SegmentPaths() {
     s.selectedKind === "object" ? s.selectedId : null,
   );
   const showHelpers = useDirectorStore((s) => s.viewMode === "director");
+  const state = useDirectorStore((s) => s.state);
 
   if (!showHelpers) return null;
 
   return (
     <>
       {segments.map((segment) => {
+        const active = segment.object === selectedObjectId;
+        // 停留腿（stub 拖回起点）：退化为零长度，用 HOLD 环表示，不画线（文档 §7.2）。
+        const degenerate =
+          (segment.points ?? []).length === 0 &&
+          Math.hypot(segment.endX - segment.startX, segment.endZ - segment.startZ) < 0.05;
+        if (degenerate) {
+          const x = segment.startX;
+          const z = segment.startZ;
+          return (
+            <group key={segment.id}>
+              <mesh rotation={[-Math.PI / 2, 0, 0]} position={[x, 0.06, z]}>
+                <ringGeometry args={[0.32, 0.5, 32]} />
+                <meshBasicMaterial color={active ? "#67a7ff" : "#35505f"} side={THREE.DoubleSide} />
+              </mesh>
+              <Html
+                position={[x, 0.72, z]}
+                center
+                style={{ pointerEvents: "none" }}
+                zIndexRange={[25, 0]}
+              >
+                <span className="node-label" style={{ color: active ? "#67a7ff" : "#35505f" }}>
+                  HOLD
+                </span>
+              </Html>
+            </group>
+          );
+        }
         const points = pathPolyline(segment);
         if (points.length < 2) return null;
-        const active = segment.object === selectedObjectId;
+        // 障碍感知「导航层」：环境（set 资产）如何重塑该 segment 的行动路线（橙色虚线）。
+        // 与运动求解共用 segmentRoutePoints，因此这条线就是 agent 真正走的路线。
+        const rects = setRects(state);
+        const route = segmentRoutePoints(segment, rects);
+        const routePoints = route.map((p) => [p.x, 0.13, p.z] as [number, number, number]);
         return (
-          <Line
-            key={segment.id}
-            points={points}
-            color={active ? "#67a7ff" : "#35505f"}
-            lineWidth={active ? 3 : 1.5}
-          />
+          <group key={segment.id}>
+            <Line points={points} color={active ? "#67a7ff" : "#35505f"} lineWidth={active ? 3 : 1.5} />
+            {rects.length > 0 ? (
+              <Line points={routePoints} color="#f0a35a" dashed dashSize={0.35} gapSize={0.25} lineWidth={1.5} />
+            ) : null}
+          </group>
         );
       })}
+    </>
+  );
+}
+
+function OcclusionHighlights() {
+  const state = useDirectorStore((s) => s.state);
+  const currentTime = useDirectorStore((s) => s.currentTime);
+  const activeCameraId = useDirectorStore((s) => s.activeCameraId);
+  const showHelpers = useDirectorStore((s) => s.viewMode === "director");
+  if (!activeCameraId || !showHelpers) return null;
+  const camera = state.cameras.find((c) => c.id === activeCameraId);
+  if (!camera) return null;
+  const resolved = solveCamera(state, activeCameraId, currentTime);
+  if (!resolved) return null;
+  const targetId = resolved.move?.targetId ?? camera.targetId;
+  if (!targetId) return null;
+  const tgt = objectPosition(state, targetId, currentTime);
+  const camPos = { x: resolved.position[0], z: resolved.position[2] };
+  const targetPos = { x: tgt.x, z: tgt.z };
+  const blockers = blockingAssets(state, camPos, targetPos);
+  const occluded = blockers.length > 0;
+  const sightColor = occluded ? "#ff5a6a" : "#5fd0c0";
+  return (
+    <>
+      {/* 相机 → 目标 视线：被挡变红，通畅为淡青 */}
+      <Line
+        points={[
+          [resolved.position[0], resolved.position[1], resolved.position[2]],
+          [resolved.target[0], resolved.target[1], resolved.target[2]],
+        ]}
+        color={sightColor}
+        lineWidth={2}
+        dashed={occluded}
+        dashSize={0.4}
+        gapSize={0.25}
+      />
+      {blockers.map((b) => (
+        <group key={`occ_${b.id}`} position={[b.x, 0, b.z]}>
+          <mesh position={[0, b.footprint.h / 2, 0]}>
+            <boxGeometry args={[b.footprint.w, b.footprint.h, b.footprint.d]} />
+            <meshBasicMaterial color="#ff5a6a" wireframe />
+          </mesh>
+          <Html position={[0, b.footprint.h + 0.4, 0]} center style={{ pointerEvents: "none" }} zIndexRange={[30, 0]}>
+            <span className="node-label" style={{ color: "#ff7b91" }}>BLOCKED</span>
+          </Html>
+        </group>
+      ))}
     </>
   );
 }
@@ -247,6 +388,7 @@ function PointMarker({
 }) {
   const isSelected = useDirectorStore((s) => s.selectedPoint === point.id);
   const toggleCurve = useDirectorStore((s) => s.toggleCurve);
+  const deletePoint = useDirectorStore((s) => s.deletePoint);
   const isArc = point.shape === "ARC";
   const chain = pathChain(segment);
   const previous = chain[index];
@@ -291,22 +433,35 @@ function PointMarker({
         <span className="node-label">{point.id}</span>
       </Html>
 
-      {/* 不合法时不渲染按钮，而不是渲染成 disabled。 */}
-      {isSelected && eligible ? (
+      {/* 选中中间点时给出操作入口：删除始终可用；ARC/LINE 切换在不合法时不渲染（而非 disabled）。 */}
+      {isSelected ? (
         <Html
           position={[point.x, 0.6, point.z]}
           center
           style={{ pointerEvents: "auto" }}
           zIndexRange={[40, 0]}
         >
-          <button
-            type="button"
-            className="curve-toggle"
-            onPointerDown={(event) => event.stopPropagation()}
-            onClick={() => toggleCurve(segment.id, point.id)}
-          >
-            {isArc ? "━ LINE" : "⌒ CURVE"}
-          </button>
+          <div className="point-tools">
+            <button
+              type="button"
+              className="point-delete"
+              title="Delete this path point"
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={() => deletePoint(segment.id, point.id)}
+            >
+              ✕ DEL
+            </button>
+            {eligible ? (
+              <button
+                type="button"
+                className="curve-toggle"
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={() => toggleCurve(segment.id, point.id)}
+              >
+                {isArc ? "━ LINE" : "⌒ CURVE"}
+              </button>
+            ) : null}
+          </div>
         </Html>
       ) : null}
     </group>
@@ -334,6 +489,51 @@ function PathHandles() {
           ))}
         </group>
       ))}
+    </>
+  );
+}
+
+function HandoffMarkers() {
+  const handoffs = useDirectorStore((s) => s.state.handoffs);
+  const segments = useDirectorStore((s) => s.state.segments);
+  const setHandoffMode = useDirectorStore((s) => s.setHandoffMode);
+  const showHelpers = useDirectorStore((s) => s.viewMode === "director");
+  if (!showHelpers) return null;
+  return (
+    <>
+      {handoffs.map((handoff) => {
+        const prev = segments.find((segment) => segment.id === handoff.prevSeg);
+        if (!prev) return null;
+        const x = prev.endX;
+        const z = prev.endZ;
+        const color =
+          handoff.mode === "cut" ? "#ff7b91" : handoff.mode === "smooth" ? "#67a7ff" : "#f0a35a";
+        const glyph = handoff.mode === "cut" ? "✕" : handoff.mode === "smooth" ? "◉" : "■";
+        return (
+          <Html
+            key={handoff.id}
+            position={[x, 1.05, z]}
+            center
+            style={{ pointerEvents: "auto" }}
+            zIndexRange={[45, 0]}
+          >
+            <button
+              type="button"
+              className="handoff-badge"
+              title={`Handoff: ${handoff.mode} — click to cycle stop/smooth/cut`}
+              style={{ borderColor: color, color }}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={() => {
+                const order: HandoffMode[] = ["stop", "smooth", "cut"];
+                const nextMode = order[(order.indexOf(handoff.mode) + 1) % order.length];
+                setHandoffMode(handoff.id, nextMode);
+              }}
+            >
+              {glyph}
+            </button>
+          </Html>
+        );
+      })}
     </>
   );
 }
@@ -493,21 +693,11 @@ function CameraProxy({ cameraId }: { cameraId: string }) {
 
 function CameraProxies() {
   const cameras = useDirectorStore((s) => s.state.cameras);
-  const activeCameraId = useDirectorStore((s) => s.activeCameraId);
   const viewMode = useDirectorStore((s) => s.viewMode);
 
-  if (viewMode === "camera") {
-    // 相机视图下不显示当前机位自身。
-    return (
-      <>
-        {cameras
-          .filter((camera) => camera.id !== activeCameraId)
-          .map((camera) => (
-            <CameraProxy key={camera.id} cameraId={camera.id} />
-          ))}
-      </>
-    );
-  }
+  // 相机视图＝透过当前机位看画面。任何机位代理都不该入画——
+  // 既包括当前机位自身，也包括其它相机（对这台相机来说它们不可见）。
+  if (viewMode === "camera") return null;
 
   return (
     <>
@@ -618,7 +808,7 @@ function Interaction() {
       if (!drag) return;
       const store = useDirectorStore.getState();
       if (drag.kind === "object" && !drag.moved) {
-        store.openRing(drag.id);
+        if (RING_ENABLED) store.openRing(drag.id);
       } else if (drag.kind === "new") {
         const moved =
           Math.hypot(drag.current.x - drag.origin.x, drag.current.z - drag.origin.z) > 0.12;
@@ -654,8 +844,40 @@ function Interaction() {
       return;
     }
 
+    // 选中对象的路径点 / 端点优先于「抓取资产」：set 资产（建筑等）的抓取范围
+    // 按 footprint 外扩，可能盖住落在其中的路径点，否则这些点会点不到。
+    if (selectedObjectId) {
+      const pointHit = hitPathPoint(store.state, selectedObjectId, point, 0.45 * tolerance);
+      if (pointHit) {
+        store.selectItem(pointHit.segment.id);
+        store.selectPoint(pointHit.point.id);
+        beginDrag({
+          kind: "point",
+          segmentId: pointHit.segment.id,
+          pointId: pointHit.point.id,
+        });
+        capturePointer(event);
+        return;
+      }
+
+      const endpointHit = hitEndpoint(store.state, selectedObjectId, point, 0.45 * tolerance);
+      if (endpointHit) {
+        store.selectItem(endpointHit.segment.id);
+        store.selectPoint(null);
+        beginDrag({
+          kind: "endpoint",
+          segmentId: endpointHit.segment.id,
+          which: endpointHit.which,
+        });
+        capturePointer(event);
+        return;
+      }
+    }
+
     if (objectHit) {
       store.selectObject(objectHit.object.id);
+      // 锁定对象：可点选（便于解锁），但不接管拖拽、也不挡相机轨道。
+      if (objectHit.object.locked) return;
       store.selectItem(null);
       store.selectPoint(null);
       beginDrag({
@@ -669,32 +891,6 @@ function Interaction() {
     }
 
     if (!selectedObjectId) return;
-
-    const pointHit = hitPathPoint(store.state, selectedObjectId, point, 0.45 * tolerance);
-    if (pointHit) {
-      store.selectItem(pointHit.segment.id);
-      store.selectPoint(pointHit.point.id);
-      beginDrag({
-        kind: "point",
-        segmentId: pointHit.segment.id,
-        pointId: pointHit.point.id,
-      });
-      capturePointer(event);
-      return;
-    }
-
-    const endpointHit = hitEndpoint(store.state, selectedObjectId, point, 0.45 * tolerance);
-    if (endpointHit) {
-      store.selectItem(endpointHit.segment.id);
-      store.selectPoint(null);
-      beginDrag({
-        kind: "endpoint",
-        segmentId: endpointHit.segment.id,
-        which: endpointHit.which,
-      });
-      capturePointer(event);
-      return;
-    }
 
     const pathHit = hitPath(store.state, selectedObjectId, point, 0.6 * tolerance);
     if (pathHit) {
@@ -717,6 +913,9 @@ function Interaction() {
     const store = useDirectorStore.getState();
 
     if (drag.kind === "object") {
+      // 锁定对象即使在拖拽中也绝不移动位置。
+      const obj = store.state.objects.find((o) => o.id === drag.id);
+      if (obj?.locked) return;
       if (Math.hypot(point.x - drag.origin.x, point.z - drag.origin.z) > 0.15) drag.moved = true;
       store.moveObject(drag.id, point.x, point.z);
     } else if (drag.kind === "point") {
@@ -842,8 +1041,10 @@ function WorldScene() {
       <Interaction />
       <SegmentPaths />
       <PathHandles />
+      <HandoffMarkers />
       <FollowLinks />
       <Actors />
+      <OcclusionHighlights />
       <CameraPaths />
       <CameraProxies />
       <RadialLayer />
@@ -867,6 +1068,19 @@ function CameraHud() {
 
   const move = activeCameraMove(state, camera.id, currentTime);
   const moveCount = state.cameraMoves.filter((item) => item.camera === camera.id).length;
+  const resolved = solveCamera(state, camera.id, currentTime);
+  const blockers =
+    resolved && (resolved.move?.targetId ?? camera.targetId)
+      ? blockingAssets(
+          state,
+          { x: resolved.position[0], z: resolved.position[2] },
+          (() => {
+            const tid = resolved.move?.targetId ?? camera.targetId!;
+            const p = objectPosition(state, tid, currentTime);
+            return { x: p.x, z: p.z };
+          })(),
+        )
+      : [];
 
   return (
     <div className="cam-hud">
@@ -880,6 +1094,9 @@ function CameraHud() {
         {MOTION_LABELS[move?.type ?? camera.motion]}
         {move ? " · move" : " · default"} · {moveCount} move{moveCount === 1 ? "" : "s"}
       </span>
+      {blockers.length > 0 ? (
+        <span className="occ-warn">⚠ OCCLUDED · {blockers.map((b) => b.id).join(", ")}</span>
+      ) : null}
       <span>{state.aspectRatio}</span>
     </div>
   );

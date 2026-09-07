@@ -335,4 +335,103 @@ function moveHandoff(state, handoffId, newPos):
 
 ---
 
-*文档基于与用户的多次讨论整理：专业运镜分类（§1）、视频参考集中情况与模板库设计（§2–§5）、待补维度与实现清单（§4–§6）、Segment/Leg 与 Handoff 交互设计（§7）。所有内容均为设计草案，待确认后落地到 `src/domain`、`src/engine/path`、`src/engine/cameraSolver`、`src/state` 与 UI 层。*
+## 8. Camera Segment 与「一镜到底」（新增）
+
+> 本节回应一个问题：同一台相机在一镜到底里能否中途改拍摄目标 / 角度 / 距离 / 位置 / 景别？结论：camera **已经有 segment 概念（`CameraMove`）**，一镜到底可表达，但它是「半分段」的，且缺 actor 那边已解决的**段间连续性**。
+
+### 8.1 现状：camera 本来就有 segment
+每台相机在 Timeline 上有自己的 track，由一串 `CameraMove` 组成：
+
+```typescript
+interface CameraMove {
+  id: string;
+  camera: string;
+  type: CameraMotionType;          // STATIC / FOLLOW / ORBIT / DOLLY / CRANE
+  timeStart: number; timeEnd: number;
+  targetId?: string;               // 可覆盖「拍谁」
+  orbitDeg: number;                // ORBIT：本段内绕目标转过的角度
+  dollyScale: number;              // DOLLY：结束时距离系数（1=保持基准取景距离）
+  craneHeight: number;             // CRANE：结束时附加高度（米）
+  ease: EaseCurve;
+}
+```
+
+同一台相机、一镜到底、中途换目标 / 换角度 / 推进 / 升降，**已经能用多条相邻 `CameraMove` 表达**。理念上与 actor 的 `MoveSegment` 一致。
+
+### 8.2 「半分段」事实表
+| 维度 | 现在归属 | 一镜内能否按段改 |
+|---|---|---|
+| 拍摄目标 target | `CameraMove.targetId` | ✅ 能 |
+| 运动类型 motion | `CameraMove.type` | ✅ 能 |
+| 角度（绕飞） | `CameraMove.orbitDeg` | ✅ 能（仅 ORBIT 连续转） |
+| 距离（推拉） | `CameraMove.dollyScale` | ✅ 能 |
+| 高度（升降） | `CameraMove.craneHeight` | ✅ 能 |
+| **景别 framing** | `CameraObject`（相机全局） | ❌ 不能 |
+| **视角 view** | `CameraObject`（相机全局） | ❌ 不能 |
+| **方位 side** | `CameraObject`（相机全局） | ❌ 不能 |
+| **镜头 lens** | `CameraObject`（相机全局） | ❌ 不能 |
+
+**关键缺口**：`framing / view / side / lens` 现在挂在 `CameraObject` 上，是整台相机的全局设置，不按段分。所以一镜到底里「先 wide 再推成 CU」「从 eye 升到 overhead」目前做不到分段切换。
+
+### 8.3 与 actor 的结构性不对称
+- **actor 的 segment**（`MoveSegment`）：带**显式空间路径**（start/end/points 折线）+ 速度曲线，路径可直接编辑。
+- **camera 的 segment**（`CameraMove`）：只带**运动类型 + 参数**（orbit/dolly/crane），机位本身是 `placeCamera` **反推**出来的（`位置 = 目标 + framing + side + view + orbit/dolly/crane`），不是可编辑折线。
+
+因此相机要跑复杂自定义轨迹（如同时 dolly-in + crane-up + 自定义弧线），现在没有「路径编辑」手段，只能套命名运动。
+
+### 8.4 一镜到底真正的缺口：段间硬切
+`solveCamera` 在某一时刻只 `find` 当前**唯一**生效的 `CameraMove`；两条相邻 `CameraMove` 的交界处**无任何插值/混合**，直接跳变。`sampleCameraPath` 在边界会出现**位置不连续**。
+
+- 单条 `CameraMove` 内部：orbit/dolly/crane 缓动平滑 ✅
+- 两条 `CameraMove` 边界：硬切 ❌
+
+这正是 actor 那边已解决的 `Handoff`（smooth/stop/cut）。**camera 的一镜到底缺的就是这个：CameraMove 之间的接管（连续 / 停顿 / 跳切）。**
+
+### 8.5 设计建议（与 actor 对称）
+把「同一相机的一镜到底」完全类比「同一 actor 的多 leg」：
+
+1. **`CameraJunction`（边界交接）**：相邻 `CameraMove` 边界 = 一个交接点，带 `smooth / stop / cut`，**镜像 actor 的 `Handoff`**。这是一镜到底连续性的核心。
+   - `smooth`：交界前后机位（位置 + 朝向）连续插值，无跳变。
+   - `stop`：在边界处速度归零再起（允许重新构图停顿）。
+   - `cut`：允许跳变（硬切转场）。
+2. **`framing / view / side / lens` 下放到 `CameraMove`（可覆盖）**：`CameraObject` 仅保留默认值，每段可 override。这样一镜内景别 / 视角 / 方位 / 镜头都能分段演进（如 wide→CU、eye→overhead）。
+3. **（可选）相机显式空间路径**：新增 `motion: "PATH"` 类型，让相机像 actor 一样沿可编辑折线运动，覆盖 ORBIT/DOLLY/CRANE 表达不了的复杂运镜。
+
+> 与 §7 的关系：actor 用 `Handoff` 解决 leg 间连续；camera 用 `CameraJunction` 解决 `CameraMove` 间连续。两者语义同构，应共用同一套「smooth/stop/cut」交互与可视化（菱形交接节点 + 图标）。
+
+### 8.6 验收
+- 同一相机两条相邻 `CameraMove` 在 `smooth` 下机位连续、无跳变；`stop` 下可停顿；`cut` 下可跳变。
+- 一段 `CameraMove` 可独立设置 framing/view/side/lens，且覆盖 `CameraObject` 默认值。
+- Timeline 上相机 track 的 `CameraMove` 之间有可见的交接节点，可切换模式。
+
+### 8.7 实现状态（2026-09-07 落地）
+
+> 代码已在 `src/state/directorStore.ts`、`src/components/Timeline.tsx`、`src/components/Inspector.tsx`、`src/engine/demoShot.ts` 中落地；架构说明见 `Director_Desk_V1_Architecture_Baseline_2026-09-05.md` §69.2；测试见 `Director_Desk_Automation_Test_Cases_V1.md` §15。
+
+| §8.5 建议 | 状态 | 说明 |
+|---|---|---|
+| 8.5-1 `CameraJunction`（边界交接） | ✅ 已实现 | `CameraJunction { prevMove, nextMove, mode }` 已存在；`reconcileCameraJunctions` 在相邻且时间相接的 `CameraMove` 间自动生成，确定性 id `J_<prev>_<next>`，默认 `stop`；Timeline 上渲染为菱形节点（◉ smooth / ■ stop / ✕ cut），点击循环 `stop → smooth → cut`；`setCameraJunctionMode` 保留 mode。|
+| 8.5-2 `framing/view/side/lens` 下放到 `CameraMove` | ✅ 已实现 | `CameraMove` 已有可选字段 `framing? / view? / side? / lensMm?`；`CameraObject` 仅保留默认值；Inspector 提供对应下拉覆盖，求解时 `CameraMove` 段级值优先于相机全局值。|
+| 8.5-3 相机显式空间路径 `motion: "PATH"` | ⬜ 未实现（可选） | 当前相机机位仍由 `placeCamera` 反推（目标 + framing + side + view + orbit/dolly/crane），无折线编辑。复杂自定义轨迹待后续。|
+
+**Demo 预置（让相机轨道默认可见 / 可编辑）**：`demoShot.ts` 的 `CAM_A` 预填两条 `CameraMove`——`MOVE_CAM_A_01`（FOLLOW，0–6s，medium / back_3_4 / 50mm）与 `MOVE_CAM_A_02`（ORBIT，6–12s，orbit 120° / close_up / side / 35mm），二者时间相接处预置 `smooth` 的 `CameraJunction`，演示「一镜到底」连续性。
+
+**Timeline 追加入口**：每台相机轨道末尾新增「+」按钮，调用 `addCameraMove(camera.id, camera.motion)`，在播放头处追加该相机当前运镜类型的 `CameraMove` 并自动选中。
+
+### 8.7.1 段级 / 相机级取值语义（2026-09-07 定稿）
+
+`CameraMove` 的 `framing / view / side / lensMm` 均为**可选**字段，求解时按 `options.X ?? camera.X` 取值：
+
+| 段级字段 | 行为 |
+|---|---|
+| 留空（`undefined`） | **继承**相机级 `CameraObject` 的同名属性；相机级改动立即在该段生效 |
+| 填了值 | 该段**独立生效**，不再受相机级同名属性影响 |
+
+- **UI 可发现性**：段级下拉首项是 `(camera default)`（选它即回退为继承）；相机级 `Camera Intent` 区在该相机存在段级覆盖时显示 `⚠ ... 已被某些 CameraMove 段级覆盖`（`Inspector.tsx` 的 `overriddenByMoves`）。
+- **新建段默认继承**：`addCameraMove` 不会把相机级值复制进 `CameraMove`，新段一律留空。
+- ⚠ **历史坑（已修）**：demo 早期版本把 `framing / view / side / lensMm` **写死**在两条 `CameraMove` 上，导致相机级四项在整条时间轴上**静默失效**，表现为「改 camera 属性没反应」。现改为：`MOVE_CAM_A_01` 四项全部留空（完整继承），`MOVE_CAM_A_02` 仅保留 `framing: "close_up"` 演示段级覆盖。
+- ⚠ **localStorage 会屏蔽修复**：`loadScene()` 优先载入已保存场景，旧存档里写死的段级值仍然生效。因此 `STORAGE_KEY` 由 `director-desk-scene-v1` 升为 `-v2`，放弃旧存档以确保修正后的 demo 生效。
+
+---
+
+*文档基于与用户的多次讨论整理：专业运镜分类（§1）、视频参考集中情况与模板库设计（§2–§5）、待补维度与实现清单（§4–§6）、Segment/Leg 与 Handoff 交互设计（§7）、Camera Segment 与一镜到底（§8）。所有内容均为设计草案，待确认后落地到 `src/domain`、`src/engine/path`、`src/engine/cameraSolver`、`src/state` 与 UI 层。*

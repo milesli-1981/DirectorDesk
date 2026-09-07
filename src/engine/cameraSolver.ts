@@ -74,6 +74,11 @@ interface Placement {
   orbitDeg?: number;
   distanceScale?: number;
   craneHeight?: number;
+  /** 段级覆盖（framing/view/side/lens），为空沿用 CameraObject 默认。 */
+  framing?: CameraFraming;
+  view?: CameraView;
+  side?: CameraSide;
+  lensMm?: number;
 }
 
 function placeCamera(
@@ -83,15 +88,18 @@ function placeCamera(
   options: Placement,
 ): { position: Vec3; target: Vec3 } {
   const targetId = options.targetId ?? camera.targetId;
+  const framing = options.framing ?? camera.framing;
+  const view = options.view ?? camera.view;
+  const side = options.side ?? camera.side;
   const target = focusPoint(state, targetId, time);
   const facing = objectFacing(state, targetId, time);
 
-  const baseDistance = FRAMING_DISTANCE[camera.framing] * (options.distanceScale ?? 1);
-  const yaw = facing + ((SIDE_ANGLE[camera.side] + (options.orbitDeg ?? 0)) * Math.PI) / 180;
+  const baseDistance = FRAMING_DISTANCE[framing] * (options.distanceScale ?? 1);
+  const yaw = facing + ((SIDE_ANGLE[side] + (options.orbitDeg ?? 0)) * Math.PI) / 180;
 
   let horizontal = baseDistance;
-  let height = VIEW_HEIGHT[camera.view] + (options.craneHeight ?? 0);
-  if (camera.view === "overhead") {
+  let height = VIEW_HEIGHT[view] + (options.craneHeight ?? 0);
+  if (view === "overhead") {
     horizontal = baseDistance * 0.3;
     height = baseDistance + 4 + (options.craneHeight ?? 0);
   }
@@ -104,6 +112,49 @@ function placeCamera(
   return { position, target };
 }
 
+/** 解析单条 CameraMove 在某时刻的机位（不含边界插值）。 */
+function resolveMove(
+  state: DirectorState,
+  camera: CameraObject,
+  move: CameraMove,
+  time: number,
+): ResolvedCamera {
+  const lensMm = move.lensMm ?? camera.lensMm;
+  const fovDeg = lensFovDeg(lensMm);
+
+  if (move.type === "STATIC") {
+    // 锁死机位：用片段开始时刻的构图，之后不再改变。
+    const { position, target } = placeCamera(state, camera, move.timeStart, {
+      targetId: move.targetId,
+      framing: move.framing,
+      view: move.view,
+      side: move.side,
+      lensMm: move.lensMm,
+    });
+    return { position, target, lensMm, fovDeg, move };
+  }
+
+  const span = move.timeEnd - move.timeStart || 1;
+  const progress = easeVal(normalizeEase(move.ease), clamp((time - move.timeStart) / span, 0, 1));
+
+  const { position, target } = placeCamera(state, camera, time, {
+    targetId: move.targetId,
+    framing: move.framing,
+    view: move.view,
+    side: move.side,
+    lensMm: move.lensMm,
+    orbitDeg: move.type === "ORBIT" ? move.orbitDeg * progress : 0,
+    distanceScale: move.type === "DOLLY" ? 1 + (move.dollyScale - 1) * progress : 1,
+    craneHeight: move.type === "CRANE" ? move.craneHeight * progress : 0,
+  });
+
+  return { position, target, lensMm, fovDeg, move };
+}
+
+function lerp3(a: Vec3, b: Vec3, t: number): Vec3 {
+  return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+}
+
 /** 解析某台相机在某一时刻的实际机位。 */
 export function solveCamera(
   state: DirectorState,
@@ -114,32 +165,42 @@ export function solveCamera(
   if (!camera) return null;
 
   const move = activeCameraMove(state, cameraId, time);
-  const fovDeg = lensFovDeg(camera.lensMm);
-
   if (!move) {
     const { position, target } = placeCamera(state, camera, time, {});
-    return { position, target, lensMm: camera.lensMm, fovDeg };
+    return { position, target, lensMm: camera.lensMm, fovDeg: lensFovDeg(camera.lensMm) };
   }
 
-  if (move.type === "STATIC") {
-    // 锁死机位：用片段开始时刻的构图，之后不再改变。
-    const { position, target } = placeCamera(state, camera, move.timeStart, {
-      targetId: move.targetId,
-    });
-    return { position, target, lensMm: camera.lensMm, fovDeg, move };
+  const base = resolveMove(state, camera, move, time);
+
+  // 一镜到底：smooth 模式下，在 CameraMove 边界处把前后两段机位插值，避免硬切跳变。
+  const junction = state.cameraJunctions.find(
+    (j) => j.prevMove === move.id || j.nextMove === move.id,
+  );
+  if (junction && junction.mode === "smooth") {
+    const prevMove = state.cameraMoves.find((m) => m.id === junction.prevMove);
+    const nextMove = state.cameraMoves.find((m) => m.id === junction.nextMove);
+    if (prevMove && nextMove) {
+      const tb = prevMove.timeEnd;
+      const w = Math.min(
+        0.5,
+        Math.max(0.15, Math.min(prevMove.timeEnd - prevMove.timeStart, nextMove.timeEnd - nextMove.timeStart) / 4),
+      );
+      if (time >= tb - w && time <= tb + w) {
+        const f = clamp((time - (tb - w)) / (2 * w), 0, 1);
+        const before = resolveMove(state, camera, prevMove, tb - w);
+        const after = resolveMove(state, camera, nextMove, tb + w);
+        return {
+          position: lerp3(before.position, after.position, f),
+          target: lerp3(before.target, after.target, f),
+          lensMm: before.lensMm + (after.lensMm - before.lensMm) * f,
+          fovDeg: before.fovDeg + (after.fovDeg - before.fovDeg) * f,
+          move,
+        };
+      }
+    }
   }
 
-  const span = move.timeEnd - move.timeStart || 1;
-  const progress = easeVal(normalizeEase(move.ease), clamp((time - move.timeStart) / span, 0, 1));
-
-  const { position, target } = placeCamera(state, camera, time, {
-    targetId: move.targetId,
-    orbitDeg: move.type === "ORBIT" ? move.orbitDeg * progress : 0,
-    distanceScale: move.type === "DOLLY" ? 1 + (move.dollyScale - 1) * progress : 1,
-    craneHeight: move.type === "CRANE" ? move.craneHeight * progress : 0,
-  });
-
-  return { position, target, lensMm: camera.lensMm, fovDeg, move };
+  return base;
 }
 
 /** 采样一台相机整段时间的机位轨迹，用于 Director View 可视化运镜。 */

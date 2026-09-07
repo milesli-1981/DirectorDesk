@@ -72,12 +72,17 @@ export function hitObjectRay(
   let best: ObjectHit | null = null;
   for (const object of state.objects) {
     const position = objectPosition(state, object.id, time);
+    // 用资产自身体块（footprint）做命中，而不是固定 ACTOR_HEIGHT 的细线段：
+    // 高度取资产实际高度，抓取容差按 footprint 半宽外扩，
+    // 这样高大的建筑 / 宽大的家具（set 资产）点上去也能选中并拖动。
+    const height = Math.max(object.footprint.h, ACTOR_HEIGHT);
     const distance = raySegmentDistance(
       ray,
       new THREE.Vector3(position.x, 0, position.z),
-      new THREE.Vector3(position.x, ACTOR_HEIGHT, position.z),
+      new THREE.Vector3(position.x, height, position.z),
     );
-    if (distance <= radius && (!best || distance < best.distance)) {
+    const grabRadius = radius + Math.max(object.footprint.w, object.footprint.d) / 2;
+    if (distance <= grabRadius && (!best || distance < best.distance)) {
       best = { object, distance };
     }
   }

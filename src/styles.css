@@ -72,6 +72,38 @@ header {
 
 .right {
   border-left: 1px solid #27313b;
+  /* 面板内元素自适应收窄，避免出现横向滚动条 */
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.right .row2 {
+  flex-wrap: wrap;
+}
+.right .row2 label {
+  flex: 0 0 58px;
+}
+.right .row2 select,
+.right .row2 input[type="number"],
+.right .row2 input[type="range"] {
+  flex: 1 1 60px;
+  min-width: 0;
+  max-width: 100%;
+}
+.right .row2 .val {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+.right .inspector-row,
+.right .field,
+.right .mini-btns,
+.right .ease-wrap,
+.right pre {
+  min-width: 0;
+  max-width: 100%;
+}
+.right .mini-btns button {
+  max-width: 100%;
 }
 
 .st {
@@ -90,6 +122,54 @@ header {
 .obj.sel {
   border-color: #67a7ff;
   background: #18283a;
+}
+
+/* 资产锁定：Scene Tree 行内快捷开关 + Director 视图中的 LOCKED 标记 */
+.obj-row {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+}
+.obj-row.sel {
+  border: 1px solid #67a7ff;
+  border-radius: 4px;
+  background: #18283a;
+}
+.obj-row .obj {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lock-btn {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #6b7a8a;
+  background: #0f1922;
+  border: 1px solid #2a3742;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.lock-btn:hover {
+  border-color: #3a4a57;
+}
+.lock-btn.on {
+  color: #ffcf6a;
+  border-color: #6b5a2a;
+  background: #221c0e;
+}
+.lock-badge {
+  padding: 1px 6px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: #ffcf6a;
+  background: rgba(34, 28, 14, 0.85);
+  border: 1px solid #6b5a2a;
+  border-radius: 4px;
+  white-space: nowrap;
 }
 
 main {
@@ -174,6 +254,29 @@ canvas {
 
 .ghost-label {
   color: #55d88a;
+}
+
+.point-tools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.point-delete {
+  background: #2a1a1e;
+  color: #e8a2aa;
+  border: 1px solid #b4565f;
+  border-radius: 6px;
+  padding: 3px 7px;
+  font-size: 10px;
+  line-height: 1.4;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.point-delete:hover {
+  background: #3a2026;
+  border-color: #ff7b91;
 }
 
 .curve-toggle {
@@ -318,7 +421,7 @@ canvas {
 .ruler {
   height: 28px;
   position: relative;
-  margin-left: 82px;
+  margin-left: 96px;
   min-width: 1300px;
   border-bottom: 1px solid #27313b;
 }
@@ -340,14 +443,36 @@ canvas {
 .row {
   height: 36px;
   display: grid;
-  grid-template-columns: 82px 1fr;
+  grid-template-columns: 96px 1fr auto;
   border-bottom: 1px solid #1d2630;
 }
 
 .label {
-  padding: 10px;
+  padding: 10px 8px;
   border-right: 1px solid #27313b;
   color: #95a4b4;
+  /* 过长 id 截断为省略号，不再侵占右侧轨道 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: grab;
+  user-select: none;
+}
+
+.label:active {
+  cursor: grabbing;
+}
+
+.track-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-dragging {
+  opacity: 0.45;
 }
 
 .lane {
@@ -472,7 +597,7 @@ canvas {
   bottom: 0;
   width: 2px;
   background: #67a7ff;
-  left: 82px;
+  left: 96px;
   z-index: 20;
   pointer-events: none;
 }
@@ -781,4 +906,113 @@ pre {
   margin-top: 7px;
   line-height: 1.6;
   white-space: pre-line;
+}
+
+/* Timeline: append-leg button per object track */
+.add-leg {
+  width: 22px;
+  align-self: center;
+  margin-left: 4px;
+  padding: 2px 0;
+  font-size: 14px;
+  line-height: 1;
+  background: #18223a;
+  border-color: #2c3a4d;
+}
+.add-leg:hover {
+  border-color: #67a7ff;
+  background: #1d2c47;
+}
+
+/* Camera HUD: occlusion warning */
+.occ-warn {
+  color: #ff7b91;
+  font-weight: 600;
+}
+
+/* Scene Tree: asset palette */
+.asset-st {
+  margin-top: 10px;
+  color: #8ea2b6;
+}
+.asset-palette {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 0 8px 8px;
+}
+.addasset {
+  font-size: 11px;
+  padding: 3px 6px;
+}
+.addasset:hover {
+  border-color: #63d39b;
+  color: #cfeede;
+}
+
+/* Inspector: asset property rows */
+.row2 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0;
+}
+.row2 label {
+  width: 58px;
+  color: #9fb0c2;
+  font-size: 11px;
+}
+.row2 .val {
+  color: #cdd8e2;
+  font-size: 11px;
+  min-width: 34px;
+}
+.row2 input[type="number"] {
+  width: 48px;
+}
+
+/* Timeline: camera-move junction node (stop/smooth/cut) */
+.cam-junction {
+  position: absolute;
+  top: 4px;
+  width: 18px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: -9px;
+  border-left: 2px solid;
+  font-size: 12px;
+  cursor: pointer;
+  z-index: 5;
+  user-select: none;
+  background: #0e1626cc;
+}
+.cam-junction:hover {
+  filter: brightness(1.3);
+}
+
+/* Director View: handoff marker (stop/smooth/cut) */
+.handoff-badge {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 2px solid #f0a35a;
+  border-radius: 50%;
+  background: #0a1016cc;
+  color: #f0a35a;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  backdrop-filter: blur(2px);
+}
+.handoff-badge:hover {
+  background: #0a1016;
+}
+
+/* Selected toggle button state (camera view / handoff mode) */
+.ghost-button.on {
+  border-color: #67a7ff;
+  background: #1b2c46;
+  color: #ffffff;
 }

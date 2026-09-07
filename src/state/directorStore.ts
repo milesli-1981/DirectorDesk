@@ -2,6 +2,7 @@ import { create } from "zustand";
 import {
   AspectRatio,
   CameraFraming,
+  CameraJunction,
   CameraMove,
   CameraMotionType,
   CameraObject,
@@ -10,6 +11,8 @@ import {
   Constraint,
   DirectorState,
   EaseCurve,
+  Handoff,
+  HandoffMode,
   IntentAction,
   MoveSegment,
   PathPoint,
@@ -18,8 +21,38 @@ import {
 } from "../domain/schema";
 import { createDemoState } from "../engine/demoShot";
 import { normalizePathPointModes, pathInsertIndex } from "../engine/path";
+import { contentEndTime } from "../engine/timeline";
+import { ASSET_PRESETS } from "../engine/assetPresets";
+import { separateSetAsset } from "../engine/collision";
+import { AssetCategory, DirectorObject } from "../domain/schema";
 
 const CAMERA_COLORS = ["#c792ea", "#67a7ff", "#63d39b", "#f0a35a", "#ff7b91", "#8ad1ff"];
+
+// v2：v1 中保存的场景把 framing / view / side / lens 写死在 CameraMove 上（demo 旧数据），
+// 会静默屏蔽相机级 Intent。升版以放弃这些旧存档，让修正后的 demo 生效。
+const STORAGE_KEY = "director-desk-scene-v2";
+
+function loadScene(): DirectorState | null {
+  try {
+    const raw = typeof localStorage !== "undefined" ? localStorage.getItem(STORAGE_KEY) : null;
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as DirectorState;
+    if (!parsed || !Array.isArray(parsed.objects) || !Array.isArray(parsed.cameraMoves)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function saveScene(state: DirectorState): void {
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    }
+  } catch {
+    /* ignore quota / serialization errors */
+  }
+}
 
 export type SelectionKind = "object" | "camera";
 
@@ -57,11 +90,25 @@ interface DirectorStore {
   closeRing: () => void;
 
   moveObject: (objectId: string, x: number, z: number) => void;
+  /** 调整对象在时间轴 / Scene Tree 中的行顺序：把 dragId 移到 targetId 所在的位置。 */
+  reorderObject: (dragId: string, targetId: string) => void;
+  /** 锁定 / 解锁资产：锁定后不可通过拖拽移动位置（防误触），仍可点选以便解锁。 */
+  toggleLock: (id: string) => void;
+  addAsset: (category: AssetCategory) => void;
+  updateAsset: (id: string, patch: Partial<DirectorObject>) => void;
+  removeAsset: (id: string) => void;
+  exportScene: () => string;
+  importScene: (json: string) => void;
+  persist: () => void;
   addPathPoint: (segmentId: string, x: number, z: number) => string | null;
   movePathPoint: (segmentId: string, pointId: string, x: number, z: number) => void;
   moveEndpoint: (segmentId: string, which: "start" | "end", x: number, z: number) => void;
   toggleCurve: (segmentId: string, pointId: string) => void;
   deletePoint: (segmentId: string, pointId: string) => void;
+  addSegment: (objectId: string, afterSegmentId?: string) => void;
+  setHandoffMode: (handoffId: string, mode: HandoffMode) => void;
+  setCameraJunctionMode: (junctionId: string, mode: HandoffMode) => void;
+  deleteSegment: (segmentId: string) => void;
 
   setSegmentTime: (segmentId: string, start: number, end: number) => void;
   setConstraintTime: (constraintId: string, start: number, end: number) => void;
@@ -138,17 +185,81 @@ function nextCameraMoveId(state: DirectorState, cameraId: string): string {
   return id;
 }
 
+/**
+ * 由相邻 leg（同对象、时间相接）推导 Handoff 列表。
+ * 用确定性的 id（H_<prev>_<next>）保证 mode 在重算后得以保留。
+ */
+function reconcileHandoffs(segments: MoveSegment[], prevHandoffs: Handoff[]): Handoff[] {
+  const byObject: Record<string, MoveSegment[]> = {};
+  for (const segment of segments) {
+    (byObject[segment.object] ??= []).push(segment);
+  }
+  const next: Handoff[] = [];
+  for (const objectId of Object.keys(byObject)) {
+    const sorted = byObject[objectId].slice().sort((a, b) => a.timeStart - b.timeStart);
+    for (let index = 0; index < sorted.length - 1; index += 1) {
+      const prevSeg = sorted[index];
+      const nextSeg = sorted[index + 1];
+      if (prevSeg.timeEnd <= nextSeg.timeStart + 1e-6) {
+        const id = `H_${prevSeg.id}_${nextSeg.id}`;
+        const existing = prevHandoffs.find((item) => item.id === id);
+        next.push({
+          id,
+          prevSeg: prevSeg.id,
+          nextSeg: nextSeg.id,
+          mode: existing?.mode ?? "stop",
+        });
+      }
+    }
+  }
+  return next;
+}
+
+/**
+ * 由相邻 CameraMove（同相机、时间相接）推导 CameraJunction 列表。
+ * 用确定性 id（J_<prev>_<next>）保留 mode。与 reconcileHandoffs 同构。
+ */
+function reconcileCameraJunctions(moves: CameraMove[], prev: CameraJunction[]): CameraJunction[] {
+  const byCamera: Record<string, CameraMove[]> = {};
+  for (const move of moves) {
+    (byCamera[move.camera] ??= []).push(move);
+  }
+  const next: CameraJunction[] = [];
+  for (const cameraId of Object.keys(byCamera)) {
+    const sorted = byCamera[cameraId].slice().sort((a, b) => a.timeStart - b.timeStart);
+    for (let index = 0; index < sorted.length - 1; index += 1) {
+      const prevMove = sorted[index];
+      const nextMove = sorted[index + 1];
+      if (prevMove.timeEnd <= nextMove.timeStart + 1e-6) {
+        const id = `J_${prevMove.id}_${nextMove.id}`;
+        const existing = prev.find((item) => item.id === id);
+        next.push({
+          id,
+          prevMove: prevMove.id,
+          nextMove: nextMove.id,
+          mode: existing?.mode ?? "stop",
+        });
+      }
+    }
+  }
+  return next;
+}
+
 export const useDirectorStore = create<DirectorStore>((set, get) => {
   const patchSegment = (segmentId: string, patch: Partial<MoveSegment>) =>
-    set((store) => ({
-      state: {
-        ...store.state,
-        revision: store.state.revision + 1,
-        segments: store.state.segments.map((segment) =>
-          segment.id === segmentId ? { ...segment, ...patch } : segment,
-        ),
-      },
-    }));
+    set((store) => {
+      const segments = store.state.segments.map((segment) =>
+        segment.id === segmentId ? { ...segment, ...patch } : segment,
+      );
+      return {
+        state: {
+          ...store.state,
+          revision: store.state.revision + 1,
+          segments,
+          handoffs: reconcileHandoffs(segments, store.state.handoffs),
+        },
+      };
+    });
 
   const patchConstraint = (constraintId: string, patch: Partial<Constraint>) =>
     set((store) => ({
@@ -162,18 +273,22 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
     }));
 
   const patchCameraMove = (moveId: string, patch: Partial<CameraMove>) =>
-    set((store) => ({
-      state: {
-        ...store.state,
-        revision: store.state.revision + 1,
-        cameraMoves: store.state.cameraMoves.map((move) =>
-          move.id === moveId ? { ...move, ...patch } : move,
-        ),
-      },
-    }));
+    set((store) => {
+      const cameraMoves = store.state.cameraMoves.map((move) =>
+        move.id === moveId ? { ...move, ...patch } : move,
+      );
+      return {
+        state: {
+          ...store.state,
+          revision: store.state.revision + 1,
+          cameraMoves,
+          cameraJunctions: reconcileCameraJunctions(cameraMoves, store.state.cameraJunctions),
+        },
+      };
+    });
 
   return {
-    state: createDemoState(),
+    state: loadScene() ?? createDemoState(),
     currentTime: 0,
     playing: false,
     zoom: 1,
@@ -195,7 +310,15 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
 
     setPlaying: (playing) => set({ playing }),
 
-    togglePlay: () => set((store) => ({ playing: !store.playing })),
+    togglePlay: () =>
+      set((store) => {
+        const next = !store.playing;
+        // 播放头已在末尾时按播放，先回到第一帧，避免「按下播放却立刻结束」。
+        if (next && store.currentTime >= contentEndTime(store.state) - 1e-6) {
+          return { playing: true, currentTime: 0 };
+        }
+        return { playing: next };
+      }),
 
     setZoom: (zoom) => set({ zoom: clamp(round1(clamp(zoom, 0.5, 2)), 0.5, 2) }),
 
@@ -234,15 +357,187 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
     closeRing: () => set({ radialObjectId: null }),
 
     moveObject: (objectId, x, z) =>
-      set((store) => ({
-        state: {
-          ...store.state,
-          revision: store.state.revision + 1,
-          objects: store.state.objects.map((object) =>
-            object.id === objectId ? { ...object, x, z } : object,
-          ),
-        },
-      })),
+      set((store) => {
+        const state = store.state;
+        const target = state.objects.find((o) => o.id === objectId);
+        // 锁定对象不可通过拖拽移动位置（防误触）。
+        if (target && target.locked) return {};
+        // set 资产落点需与已有环境资产分离，避免穿模。
+        const { x: nx, z: nz } =
+          target && target.role === "set"
+            ? separateSetAsset(state.objects, objectId, x, z)
+            : { x, z };
+
+        // 拖动对象时，其第一段路径的起点跟随 ORIGIN：
+        // 否则播放到该段时，对象会从新的 ORIGIN 瞬移回老起点。
+        const first = state.segments
+          .filter((s) => s.object === objectId)
+          .sort((a, b) => a.timeStart - b.timeStart)[0];
+        const segments = first
+          ? state.segments.map((s) =>
+              s.id === first.id ? { ...s, startX: nx, startZ: nz } : s,
+            )
+          : state.segments;
+
+        return {
+          state: {
+            ...state,
+            revision: state.revision + 1,
+            objects: state.objects.map((object) =>
+              object.id === objectId ? { ...object, x: nx, z: nz } : object,
+            ),
+            segments,
+            handoffs: first ? reconcileHandoffs(segments, state.handoffs) : state.handoffs,
+          },
+        };
+      }),
+
+    toggleLock: (id) =>
+      set((store) => {
+        const target = store.state.objects.find((o) => o.id === id);
+        if (!target) return {};
+        return {
+          state: {
+            ...store.state,
+            revision: store.state.revision + 1,
+            objects: store.state.objects.map((o) =>
+              o.id === id ? { ...o, locked: !o.locked } : o,
+            ),
+          },
+        };
+      }),
+
+    reorderObject: (dragId, targetId) =>
+      set((store) => {
+        const objects = [...store.state.objects];
+        const from = objects.findIndex((o) => o.id === dragId);
+        const to = objects.findIndex((o) => o.id === targetId);
+        if (from < 0 || to < 0 || from === to) return {};
+        const [moved] = objects.splice(from, 1);
+        objects.splice(to, 0, moved);
+        return {
+          state: { ...store.state, revision: store.state.revision + 1, objects },
+        };
+      }),
+
+    addAsset: (category) => {
+      const store = get();
+      const { state } = store;
+      const preset = ASSET_PRESETS[category];
+      let count = state.objects.filter((o) => o.category === category).length + 1;
+      let id = `AST_${category.toUpperCase()}_${String(count).padStart(2, "0")}`;
+      while (state.objects.some((o) => o.id === id)) {
+        count += 1;
+        id = `AST_${category.toUpperCase()}_${String(count).padStart(2, "0")}`;
+      }
+      const angle = (state.objects.length * 137.5 * Math.PI) / 180;
+      const radius = 2 + state.objects.length * 0.6;
+      const spawnX = Math.round(Math.cos(angle) * radius * 10) / 10;
+      const spawnZ = Math.round(Math.sin(angle) * radius * 10) / 10;
+      const asset: DirectorObject = {
+        id,
+        type: preset.role === "agent" ? "actor" : "prop",
+        category,
+        role: preset.role,
+        x: spawnX,
+        z: spawnZ,
+        rotation: 0,
+        footprint: { ...preset.footprint },
+        color: preset.color,
+      };
+      // set 资产落点需与已有环境资产分离，避免穿模（agent 可自由摆放）。
+      const { x: placedX, z: placedZ } =
+        preset.role === "set"
+          ? separateSetAsset([...state.objects, asset], id, spawnX, spawnZ)
+          : { x: spawnX, z: spawnZ };
+      const placed: DirectorObject = { ...asset, x: placedX, z: placedZ };
+      set({
+        state: { ...state, revision: state.revision + 1, objects: [...state.objects, placed] },
+        selectedKind: "object",
+        selectedId: id,
+        selectedItem: null,
+        selectedPoint: null,
+      });
+    },
+
+    updateAsset: (id, patch) =>
+      set((store) => {
+        const state = store.state;
+        const target = state.objects.find((o) => o.id === id);
+        // 若编辑了 set 资产的位置 / 体块，重新分离以避免穿模。
+        const needsSeparate =
+          target &&
+          target.role === "set" &&
+          (patch.x !== undefined || patch.z !== undefined || patch.footprint !== undefined);
+        const merged =
+          target && needsSeparate
+            ? { ...target, ...patch }
+            : null;
+        const sep = merged ? separateSetAsset(state.objects, id, merged.x, merged.z) : null;
+        const effectivePatch =
+          sep && patch.x !== undefined
+            ? { ...patch, x: sep.x }
+            : sep && patch.z !== undefined
+              ? { ...patch, z: sep.z }
+              : patch;
+        return {
+          state: {
+            ...state,
+            revision: state.revision + 1,
+            objects: state.objects.map((o) =>
+              o.id === id ? { ...o, ...effectivePatch } : o,
+            ),
+          },
+        };
+      }),
+
+    removeAsset: (id) =>
+      set((store) => {
+        const cameraMoves = store.state.cameraMoves.map((m) =>
+          m.targetId === id ? { ...m, targetId: undefined } : m,
+        );
+        const objects = store.state.objects.filter((o) => o.id !== id);
+        return {
+          state: {
+            ...store.state,
+            revision: store.state.revision + 1,
+            objects,
+            segments: store.state.segments.filter((s) => s.object !== id),
+            constraints: store.state.constraints.filter((c) => c.subject !== id && c.target !== id),
+            cameraMoves,
+            cameraJunctions: reconcileCameraJunctions(cameraMoves, store.state.cameraJunctions),
+          },
+          selectedItem:
+            store.selectedItem && store.state.segments.some((s) => s.id === store.selectedItem)
+              ? store.selectedItem
+              : null,
+          selectedPoint: null,
+        };
+      }),
+
+    exportScene: () => JSON.stringify(get().state, null, 2),
+
+    importScene: (json) => {
+      try {
+        const parsed = JSON.parse(json) as DirectorState;
+        if (!parsed || !Array.isArray(parsed.objects) || !Array.isArray(parsed.cameraMoves)) {
+          throw new Error("invalid scene");
+        }
+        set({
+          state: { ...parsed, revision: (parsed.revision ?? 0) + 1 },
+          currentTime: 0,
+          playing: false,
+          selectedKind: "object",
+          selectedId: parsed.objects[0]?.id ?? "",
+          selectedItem: null,
+          selectedPoint: null,
+        });
+      } catch (error) {
+        console.error("importScene failed", error);
+      }
+    },
+
+    persist: () => saveScene(get().state),
 
     addPathPoint: (segmentId, x, z) => {
       const store = get();
@@ -274,8 +569,37 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
     },
 
     moveEndpoint: (segmentId, which, x, z) => {
-      if (which === "start") patchSegment(segmentId, { startX: x, startZ: z });
-      else patchSegment(segmentId, { endX: x, endZ: z });
+      const store = get();
+      const state = store.state;
+      const segment = state.segments.find((item) => item.id === segmentId);
+      if (!segment) return;
+      const handoff = state.handoffs.find((item) =>
+        which === "end" ? item.prevSeg === segmentId : item.nextSeg === segmentId,
+      );
+      // cut 模式下一段起点解耦；否则交接点是同一份坐标，两端一起更新。
+      if (!handoff || handoff.mode === "cut") {
+        if (which === "start") patchSegment(segmentId, { startX: x, startZ: z });
+        else patchSegment(segmentId, { endX: x, endZ: z });
+        return;
+      }
+      const segments = state.segments.map((item) => {
+        if (item.id === segmentId) {
+          return which === "start"
+            ? { ...item, startX: x, startZ: z }
+            : { ...item, endX: x, endZ: z };
+        }
+        if (which === "end" && item.id === handoff.nextSeg) return { ...item, startX: x, startZ: z };
+        if (which === "start" && item.id === handoff.prevSeg) return { ...item, endX: x, endZ: z };
+        return item;
+      });
+      set({
+        state: {
+          ...state,
+          revision: state.revision + 1,
+          segments,
+          handoffs: reconcileHandoffs(segments, state.handoffs),
+        },
+      });
     },
 
     toggleCurve: (segmentId, pointId) => {
@@ -297,6 +621,119 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
       const next = (segment.points ?? []).filter((point) => point.id !== pointId);
       patchSegment(segmentId, { points: normalizePathPointModes(next) });
       set({ selectedPoint: null });
+    },
+
+    addSegment: (objectId, afterSegmentId) => {
+      const store = get();
+      const { state } = store;
+      const objectSegments = state.segments
+        .filter((segment) => segment.object === objectId)
+        .sort((a, b) => a.timeStart - b.timeStart);
+      const reference = afterSegmentId
+        ? objectSegments.find((segment) => segment.id === afterSegmentId)
+        : objectSegments[objectSegments.length - 1];
+      let startX = 0;
+      let startZ = 0;
+      let timeStart = 0;
+      let directionX = 1;
+      let directionZ = 0;
+      if (reference) {
+        startX = reference.endX;
+        startZ = reference.endZ;
+        timeStart = reference.timeEnd;
+        const deltaX = reference.endX - reference.startX;
+        const deltaZ = reference.endZ - reference.startZ;
+        const length = Math.hypot(deltaX, deltaZ);
+        if (length > 0.001) {
+          directionX = deltaX / length;
+          directionZ = deltaZ / length;
+        }
+      } else {
+        const object = state.objects.find((item) => item.id === objectId);
+        startX = object?.x ?? 0;
+        startZ = object?.z ?? 0;
+        timeStart = 0;
+      }
+      const timeEnd = round1(Math.min(state.duration, Math.max(timeStart + 0.5, timeStart + 2)));
+      const segment: MoveSegment = {
+        id: nextSegmentId(state),
+        type: "MOVE",
+        object: objectId,
+        startX: round1(startX),
+        startZ: round1(startZ),
+        endX: round1(startX + directionX * 2),
+        endZ: round1(startZ + directionZ * 2),
+        points: [],
+        timeStart: round1(timeStart),
+        timeEnd,
+        ease: [0, 0, 1, 1],
+      };
+      set({
+        state: {
+          ...state,
+          revision: state.revision + 1,
+          segments: [...state.segments, segment],
+          handoffs: reconcileHandoffs([...state.segments, segment], state.handoffs),
+        },
+        selectedKind: "object",
+        selectedId: objectId,
+        selectedItem: segment.id,
+        selectedPoint: null,
+      });
+    },
+
+    setHandoffMode: (handoffId, mode) => {
+      const store = get();
+      const state = store.state;
+      const handoff = state.handoffs.find((item) => item.id === handoffId);
+      if (!handoff) return;
+      // mode 本质是 Speed Curve 边界的便捷配置：不另写物理。
+      const EASE_OUT: EaseCurve = [0, 0, 0.58, 1];
+      const EASE_IN: EaseCurve = [0.42, 0, 1, 1];
+      const LINEAR: EaseCurve = [0, 0, 1, 1];
+      const segments = state.segments.map((segment) => {
+        if (segment.id === handoff.prevSeg) {
+          return { ...segment, ease: mode === "stop" ? EASE_OUT : mode === "smooth" ? LINEAR : segment.ease };
+        }
+        if (segment.id === handoff.nextSeg) {
+          return { ...segment, ease: mode === "stop" ? EASE_IN : mode === "smooth" ? LINEAR : segment.ease };
+        }
+        return segment;
+      });
+      set({
+        state: {
+          ...state,
+          revision: state.revision + 1,
+          segments,
+          handoffs: state.handoffs.map((item) => (item.id === handoffId ? { ...item, mode } : item)),
+        },
+      });
+    },
+
+    setCameraJunctionMode: (junctionId, mode) =>
+      set((store) => ({
+        state: {
+          ...store.state,
+          revision: store.state.revision + 1,
+          cameraJunctions: store.state.cameraJunctions.map((item) =>
+            item.id === junctionId ? { ...item, mode } : item,
+          ),
+        },
+      })),
+
+    deleteSegment: (segmentId) => {
+      const store = get();
+      const state = store.state;
+      const segments = state.segments.filter((segment) => segment.id !== segmentId);
+      set({
+        state: {
+          ...state,
+          revision: state.revision + 1,
+          segments,
+          handoffs: reconcileHandoffs(segments, state.handoffs),
+        },
+        selectedItem: store.selectedItem === segmentId ? null : store.selectedItem,
+      });
     },
 
     setSegmentTime: (segmentId, start, end) => {
@@ -368,11 +805,13 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
         craneHeight: type === "CRANE" ? 3 : 0,
         ease: [0.42, 0, 0.58, 1],
       };
+      const cameraMoves = [...state.cameraMoves, move];
       set({
         state: {
           ...state,
           revision: state.revision + 1,
-          cameraMoves: [...state.cameraMoves, move],
+          cameraMoves,
+          cameraJunctions: reconcileCameraJunctions(cameraMoves, state.cameraJunctions),
         },
         selectedKind: "camera",
         selectedId: cameraId,
@@ -392,14 +831,18 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
     patchCameraMove: (moveId, patch) => patchCameraMove(moveId, patch),
 
     deleteCameraMove: (moveId) =>
-      set((store) => ({
-        state: {
-          ...store.state,
-          revision: store.state.revision + 1,
-          cameraMoves: store.state.cameraMoves.filter((move) => move.id !== moveId),
-        },
-        selectedItem: store.selectedItem === moveId ? null : store.selectedItem,
-      })),
+      set((store) => {
+        const cameraMoves = store.state.cameraMoves.filter((move) => move.id !== moveId);
+        return {
+          state: {
+            ...store.state,
+            revision: store.state.revision + 1,
+            cameraMoves,
+            cameraJunctions: reconcileCameraJunctions(cameraMoves, store.state.cameraJunctions),
+          },
+          selectedItem: store.selectedItem === moveId ? null : store.selectedItem,
+        };
+      }),
 
     setAspectRatio: (ratio) =>
       set((store) => ({

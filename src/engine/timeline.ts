@@ -68,3 +68,23 @@ export function itemRange(
 export function roundTime(value: number): number {
   return Math.round(value * 10) / 10;
 }
+
+/**
+ * 场景中最后一个有内容的时刻：segment / constraint / camera move 的最大 timeEnd。
+ * 播放应在此处结束，而不是硬编码的 state.duration。
+ * 没有任何内容时回退到 state.duration；结果夹到 [0, duration]。
+ */
+export function contentEndTime(state: DirectorState): number {
+  let end = 0;
+  state.segments.forEach((segment) => {
+    if (segment.timeEnd > end) end = segment.timeEnd;
+  });
+  state.constraints.forEach((constraint) => {
+    if (constraint.timeEnd > end) end = constraint.timeEnd;
+  });
+  state.cameraMoves.forEach((move) => {
+    if (move.timeEnd > end) end = move.timeEnd;
+  });
+  if (end <= 0) return state.duration;
+  return Math.min(end, state.duration);
+}

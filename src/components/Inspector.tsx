@@ -8,6 +8,7 @@ import {
   CameraSide,
   CameraView,
   EaseCurve,
+  HandoffMode,
   FRAMING_LABELS,
   LENS_OPTIONS,
   MOTION_HINTS,
@@ -45,12 +46,27 @@ export function Inspector() {
   const setSegmentEase = useDirectorStore((s) => s.setSegmentEase);
   const setCameraMoveEase = useDirectorStore((s) => s.setCameraMoveEase);
   const setAspectRatio = useDirectorStore((s) => s.setAspectRatio);
+  const setHandoffMode = useDirectorStore((s) => s.setHandoffMode);
+  const setCameraJunctionMode = useDirectorStore((s) => s.setCameraJunctionMode);
+  const deleteSegment = useDirectorStore((s) => s.deleteSegment);
+  const updateAsset = useDirectorStore((s) => s.updateAsset);
+  const removeAsset = useDirectorStore((s) => s.removeAsset);
 
   const object = selectedKind === "object" ? state.objects.find((o) => o.id === selectedId) : undefined;
   const camera = selectedKind === "camera" ? state.cameras.find((c) => c.id === selectedId) : undefined;
   const segment = state.segments.find((item) => item.id === selectedItem);
   const constraint = state.constraints.find((item) => item.id === selectedItem);
   const move = state.cameraMoves.find((item) => item.id === selectedItem);
+  // 该相机上被 CameraMove 写死的段级覆盖：相机级同名属性在那些时间段内不生效。
+  const overriddenByMoves = camera
+    ? (["framing", "view", "side", "lensMm"] as const).filter((key) =>
+        state.cameraMoves.some((item) => item.camera === camera.id && item[key] !== undefined),
+      )
+    : [];
+  const handoff = segment
+    ? state.handoffs.find((h) => h.prevSeg === segment.id) ??
+      state.handoffs.find((h) => h.nextSeg === segment.id)
+    : undefined;
 
   const json = useMemo(() => JSON.stringify(state, null, 2), [state]);
 
@@ -123,6 +139,117 @@ export function Inspector() {
         </div>
       </div>
 
+      {object ? (
+        <div className="field">
+          <div className="lab">Asset — {object.category}</div>
+          <div className="row2">
+            <label>Role</label>
+            <select
+              value={object.role}
+              onChange={(event) => updateAsset(object.id, { role: event.target.value as "agent" | "set" })}
+            >
+              <option value="agent">agent（可运动 / 可作目标）</option>
+              <option value="set">set（环境 / 遮挡体）</option>
+            </select>
+          </div>
+          <div className="row2">
+            <label>Rotation</label>
+            <input
+              type="range"
+              min={0}
+              max={360}
+              step={5}
+              value={object.rotation}
+              onChange={(event) => updateAsset(object.id, { rotation: Number(event.target.value) })}
+            />
+            <span className="val">{object.rotation}°</span>
+          </div>
+          <div className="row2">
+            <label>Block</label>
+            <span className="val">W</span>
+            <input
+              type="number"
+              step={0.1}
+              min={0.1}
+              value={object.footprint.w}
+              onChange={(event) =>
+                updateAsset(object.id, { footprint: { ...object.footprint, w: Number(event.target.value) } })
+              }
+            />
+            <span className="val">D</span>
+            <input
+              type="number"
+              step={0.1}
+              min={0.1}
+              value={object.footprint.d}
+              onChange={(event) =>
+                updateAsset(object.id, { footprint: { ...object.footprint, d: Number(event.target.value) } })
+              }
+            />
+            <span className="val">H</span>
+            <input
+              type="number"
+              step={0.1}
+              min={0.1}
+              value={object.footprint.h}
+              onChange={(event) =>
+                updateAsset(object.id, { footprint: { ...object.footprint, h: Number(event.target.value) } })
+              }
+            />
+          </div>
+          <div className="row2">
+            <label>Lock</label>
+            <button
+              type="button"
+              className={`ghost-button ${object.locked ? "on" : ""}`}
+              onClick={() => updateAsset(object.id, { locked: !object.locked })}
+            >
+              {object.locked ? "Unlock" : "Lock position"}
+            </button>
+          </div>
+          <div className="mini-btns">
+            <button
+              type="button"
+              className="ghost-button danger-button"
+              onClick={() => removeAsset(object.id)}
+            >
+              Delete Asset
+            </button>
+          </div>
+          <p className="hint">锁定后不可通过拖拽移动位置（防误触），仍可点选以便解锁；agent = 可运动、可作相机目标，set = 环境遮挡体与路径障碍</p>
+        </div>
+      ) : null}
+
+      {segment && handoff ? (
+        <div className="field">
+          <div className="lab">
+            Leg Handoff → {handoff.prevSeg === segment.id ? "next" : "prev"} ({handoff.id})
+          </div>
+          <div className="mini-btns">
+            {(["stop", "smooth", "cut"] as HandoffMode[]).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                className={`ghost-button ${handoff.mode === mode ? "on" : ""}`}
+                onClick={() => setHandoffMode(handoff.id, mode)}
+              >
+                {mode}
+              </button>
+            ))}
+          </div>
+          <div className="mini-btns">
+            <button
+              type="button"
+              className="ghost-button danger-button"
+              onClick={() => deleteSegment(segment.id)}
+            >
+              Delete Leg
+            </button>
+          </div>
+          <p className="hint">stop = pause then go · smooth = continuous (一镜到底) · cut = allow teleport</p>
+        </div>
+      ) : null}
+
       <div className="field" id="easeField" style={{ display: easeTarget ? "" : "none" }}>
         <div className="lab">Speed Curve · cubic-bezier</div>
         {easeTarget ? (
@@ -140,6 +267,11 @@ export function Inspector() {
         <>
           <div className="field">
             <div className="lab">Camera Intent</div>
+            {overriddenByMoves.length > 0 ? (
+              <p className="hint">
+                ⚠ {overriddenByMoves.join(" / ")} 已被某些 CameraMove 段级覆盖，相机级同名属性在那些时间段内不生效（段级留空即继承此处）。
+              </p>
+            ) : null}
             <Field label="Target">
               <select
                 value={camera.targetId}
@@ -282,6 +414,70 @@ export function Inspector() {
             </select>
           </Field>
 
+          <Field label="Framing">
+            <select
+              value={move.framing ?? ""}
+              onChange={(event) =>
+                patchCameraMove(move.id, { framing: (event.target.value || undefined) as CameraFraming | undefined })
+              }
+            >
+              <option value="">(camera default)</option>
+              {(Object.keys(FRAMING_LABELS) as CameraFraming[]).map((value) => (
+                <option key={value} value={value}>
+                  {FRAMING_LABELS[value]}
+                </option>
+              ))}
+            </select>
+          </Field>
+
+          <Field label="View">
+            <select
+              value={move.view ?? ""}
+              onChange={(event) =>
+                patchCameraMove(move.id, { view: (event.target.value || undefined) as CameraView | undefined })
+              }
+            >
+              <option value="">(camera default)</option>
+              {(Object.keys(VIEW_LABELS) as CameraView[]).map((value) => (
+                <option key={value} value={value}>
+                  {VIEW_LABELS[value]}
+                </option>
+              ))}
+            </select>
+          </Field>
+
+          <Field label="Side">
+            <select
+              value={move.side ?? ""}
+              onChange={(event) =>
+                patchCameraMove(move.id, { side: (event.target.value || undefined) as CameraSide | undefined })
+              }
+            >
+              <option value="">(camera default)</option>
+              {(Object.keys(SIDE_LABELS) as CameraSide[]).map((value) => (
+                <option key={value} value={value}>
+                  {SIDE_LABELS[value]}
+                </option>
+              ))}
+            </select>
+          </Field>
+
+          <Field label="Lens">
+            <select
+              value={move.lensMm ?? ""}
+              onChange={(event) =>
+                patchCameraMove(move.id, { lensMm: event.target.value ? Number(event.target.value) : undefined })
+              }
+            >
+              <option value="">(camera default)</option>
+              {LENS_OPTIONS.map((value) => (
+                <option key={value} value={value}>
+                  {value}mm
+                </option>
+              ))}
+            </select>
+          </Field>
+
           {move.type === "ORBIT" ? (
             <Field label={`Orbit ${move.orbitDeg.toFixed(0)}°`}>
               <input
@@ -324,6 +520,33 @@ export function Inspector() {
               />
             </Field>
           ) : null}
+
+          {(() => {
+            const junction = state.cameraJunctions.find(
+              (j) => j.prevMove === move.id || j.nextMove === move.id,
+            );
+            if (!junction) return null;
+            return (
+              <div className="field" style={{ marginTop: 8 }}>
+                <div className="lab">
+                  Move Junction → {junction.prevMove === move.id ? "next" : "prev"} ({junction.id})
+                </div>
+                <div className="mini-btns">
+                  {(["stop", "smooth", "cut"] as HandoffMode[]).map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      className={`ghost-button ${junction.mode === mode ? "on" : ""}`}
+                      onClick={() => setCameraJunctionMode(junction.id, mode)}
+                    >
+                      {mode}
+                    </button>
+                  ))}
+                </div>
+                <p className="hint">stop = pause then go · smooth = continuous (一镜到底) · cut = allow jump</p>
+              </div>
+            );
+          })()}
 
           <div className="mini-btns">
             <button type="button" className="ghost-button danger-button" onClick={() => deleteCameraMove(move.id)}>

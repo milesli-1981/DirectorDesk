@@ -6,6 +6,8 @@ import {
   Vec2,
 } from "../domain/schema";
 import { easeVal, normalizeEase } from "./ease";
+import { Rect } from "./occlusion";
+import { avoidObstacles } from "./pathfinding";
 
 export interface ChainNode extends Vec2 {
   type: "endpoint" | "path";
@@ -64,12 +66,38 @@ export function samplePath(s: MoveSegment): Vec2[] {
   return out;
 }
 
-/** Segment 在某一时刻的世界位置：先跑速度曲线，再换算成路径里程。 */
-export function segmentPosition(s: MoveSegment, time: number): Vec2 {
-  if (time <= s.timeStart) return { x: s.startX, z: s.startZ };
-  if (time >= s.timeEnd) return { x: s.endX, z: s.endZ };
+const routeCache = new Map<string, Vec2[]>();
 
-  const p = samplePath(s);
+function segmentSignature(s: MoveSegment, rects: Rect[]): string {
+  const pts = s.points.map((p) => `${p.x},${p.z},${p.shape}`).join(":");
+  const obs = rects.map((r) => `${r.x},${r.z},${r.w},${r.d}`).join(";");
+  return `${s.id}|${s.startX},${s.startZ},${s.endX},${s.endZ}|${pts}|${obs}`;
+}
+
+/**
+ * Segment 的**实际行走折线**：畅通时为原始路径，被环境（set 资产）阻挡时为绕行折线。
+ * 可视化与运动求解共用此函数，保证「看到的橙色导航层」就是 agent 真正走的路线。
+ */
+export function segmentRoutePoints(s: MoveSegment, rects: Rect[] = []): Vec2[] {
+  if (!rects.length) return samplePath(s);
+  const key = segmentSignature(s, rects);
+  const cached = routeCache.get(key);
+  if (cached) return cached;
+  const route = avoidObstacles(samplePath(s), rects);
+  if (routeCache.size > 256) routeCache.clear();
+  routeCache.set(key, route);
+  return route;
+}
+
+/** Segment 在某一时刻的世界位置：先跑速度曲线，再换算成路径里程。 */
+export function segmentPosition(s: MoveSegment, time: number, rects: Rect[] = []): Vec2 {
+  // 用绕行后的折线取端点：端点若落在楼里，agent 会停在楼外边缘而不是走进楼内。
+  const p = segmentRoutePoints(s, rects);
+  const first = p[0] ?? { x: s.startX, z: s.startZ };
+  const last = p[p.length - 1] ?? { x: s.endX, z: s.endZ };
+  if (time <= s.timeStart) return { x: first.x, z: first.z };
+  if (time >= s.timeEnd) return { x: last.x, z: last.z };
+
   const lens: number[] = [0];
   for (let i = 1; i < p.length; i += 1) {
     lens[i] = lens[i - 1] + Math.hypot(p[i].x - p[i - 1].x, p[i].z - p[i - 1].z);

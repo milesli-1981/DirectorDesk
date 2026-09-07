@@ -1,5 +1,6 @@
 import { Constraint, DirectorObject, DirectorState, Vec2 } from "../domain/schema";
-import { segmentPosition } from "./path";
+import { segmentPosition, segmentRoutePoints } from "./path";
+import { setRects } from "./occlusion";
 
 /** 无驱动（Segment / Constraint）时的基础位置。 */
 function basePosition(state: DirectorState, o: DirectorObject, time: number): Vec2 {
@@ -11,14 +12,25 @@ function basePosition(state: DirectorState, o: DirectorObject, time: number): Ve
   // 第一个 Segment 开始前，对象停在它自己的 ORIGIN。
   if (time < ss[0].timeStart) return { x: o.x, z: o.z };
 
-  const active = ss.find((s) => time >= s.timeStart && time <= s.timeEnd);
-  if (active) return segmentPosition(active, time);
+  // 环境（set 资产）参与运动求解：路径被挡时 agent 实际走绕行折线。
+  const obstacles = setRects(state);
 
+  const active = ss.find((s) => time >= s.timeStart && time <= s.timeEnd);
+  if (active) return segmentPosition(active, time, obstacles);
+
+  // 停留位置同样取绕行折线的端点，避免停在障碍内部。
   const prev = [...ss].reverse().find((s) => time > s.timeEnd);
-  if (prev) return { x: prev.endX, z: prev.endZ };
+  if (prev) {
+    const route = segmentRoutePoints(prev, obstacles);
+    const last = route[route.length - 1];
+    return { x: last.x, z: last.z };
+  }
 
   const next = ss.find((s) => time < s.timeStart);
-  if (next) return { x: next.startX, z: next.startZ };
+  if (next) {
+    const route = segmentRoutePoints(next, obstacles);
+    return { x: route[0].x, z: route[0].z };
+  }
 
   return { x: o.x, z: o.z };
 }
