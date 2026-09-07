@@ -1,0 +1,659 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Director Desk V1.20 — Follow Single Source</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;height:100%;overflow:hidden;background:#090d12;color:#d8e1ea;font:12px Inter,Segoe UI,Arial,sans-serif}
+button{background:#151d26;color:#cbd7e3;border:1px solid #303c49;border-radius:4px;padding:6px 9px;font-size:11px;cursor:pointer}
+button:hover{border-color:#67a7ff;background:#182638}
+.app{height:100vh;display:grid;grid-template-columns:155px minmax(500px,1fr) 295px;grid-template-rows:46px minmax(0,1fr) 255px}
+header{grid-column:1/4;display:flex;align-items:center;justify-content:space-between;padding:0 13px;border-bottom:1px solid #27313b;background:#0d1218}
+.brand{font-weight:700;letter-spacing:.12em}.brand span{color:#67a7ff;font-size:10px}.actions{display:flex;gap:6px}
+.left,.right{background:#0c1117;overflow:auto;padding:11px}.left{border-right:1px solid #27313b}.right{border-left:1px solid #27313b}
+.st{font-size:10px;letter-spacing:.13em;color:#738394;margin:2px 0 9px}.obj{width:100%;text-align:left;margin:3px 0}.obj.sel{border-color:#67a7ff;background:#18283a}.addobj{width:100%;margin:0 0 9px}
+main{grid-column:2;min-width:0;min-height:0;overflow:hidden;display:grid;grid-template-rows:38px minmax(0,1fr)}
+.viewbar{display:flex;align-items:center;justify-content:space-between;padding:0 10px;background:#0d1218;border-bottom:1px solid #27313b}.viewbar small{color:#7d8b99;margin-left:8px}
+.zoomctl{display:flex;align-items:center;gap:4px}.zoomctl button{min-width:26px;height:26px;padding:0;font-size:13px;line-height:1;display:inline-flex;align-items:center;justify-content:center}#zr{font-family:monospace;color:#9fc5ff;min-width:46px;font-size:11px}
+canvas{width:100%;height:100%;display:block;touch-action:none}.canvasWrap{min-height:0;position:relative}
+.radialRing{display:none;position:absolute;z-index:90;width:170px;height:170px;transform:translate(-50%,-50%);pointer-events:none}
+.radialRing.show{display:block}.radialSvg{position:absolute;inset:0;width:170px;height:170px;overflow:visible;pointer-events:none}
+.radialSector{stroke:#080c11;stroke-width:2;cursor:pointer;pointer-events:auto;transition:filter .12s}.radialSector:hover{filter:brightness(1.35);stroke:#fff;stroke-width:3}
+.radialCenter{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:30px;height:30px;border-radius:50%;background:#101820;border:1px solid #607486;color:#dce9f6;display:flex;align-items:center;justify-content:center;font-size:8px;font-weight:700;pointer-events:none}
+.radialTip{position:absolute;left:50%;top:calc(100% + 4px);transform:translateX(-50%);padding:5px 8px;border:1px solid #445464;background:#101820;color:#e8f1f8;border-radius:4px;font-size:10px;white-space:nowrap;opacity:0;pointer-events:none}.radialTip.show{opacity:1}
+.radialSectorText{font-size:7px;font-weight:700;fill:#fff;pointer-events:none;text-anchor:middle;dominant-baseline:middle}
+.timeline{grid-column:1/4;height:255px;min-height:0;overflow:hidden;border-top:1px solid #27313b;background:#0c1117;display:grid;grid-template-rows:38px minmax(0,1fr)}
+.tlbar{display:flex;align-items:center;gap:7px;padding:5px 8px;border-bottom:1px solid #27313b}.timecode{margin-left:auto;font-family:monospace;color:#9fc5ff}.ctx{color:#778697}
+.scroll{position:relative;min-height:0;overflow:auto}.ruler{height:28px;position:relative;margin-left:82px;min-width:1300px;border-bottom:1px solid #27313b}.tracks{min-width:1300px}.tick{position:absolute;height:100%;top:0;border-left:1px solid #29343e;padding:4px 0 0 4px;color:#667789;font-size:10px}
+.row{height:36px;display:grid;grid-template-columns:82px 1fr;border-bottom:1px solid #1d2630}.label{padding:10px;border-right:1px solid #27313b;color:#95a4b4}.lane{position:relative}
+.clip{position:absolute;top:6px;height:24px;border:1px solid #55718b;background:#1b2c3c;border-radius:3px;padding:5px 7px;white-space:nowrap;overflow:hidden;user-select:none;cursor:grab}.clip.segment{background:#173246;border-color:#5f91b8}.clip.constraint{background:#20362e;border-color:#4d8a6b}.clip.sel{outline:2px solid #d6e9ff}.handle{position:absolute;top:0;width:7px;height:100%;cursor:ew-resize}.handle.l{left:0}.handle.r{right:0}.ph{position:absolute;top:0;bottom:0;width:2px;background:#67a7ff;left:82px;z-index:20;pointer-events:none}
+.title{font-size:20px;font-weight:700}.sub{color:#788796;margin:4px 0 10px}.field{border-top:1px solid #26313b;padding:9px 0}.lab{color:#788796;margin-bottom:6px}
+pre{white-space:pre-wrap;word-break:break-word;color:#8ca1b4;font-size:9px;line-height:1.35;max-height:300px;overflow:auto;margin:0}
+.hint{color:#6f8191;font-size:10px;line-height:1.5}.pill{display:inline-block;padding:3px 6px;border:1px solid #39536b;border-radius:10px;margin:2px 3px 2px 0;color:#bcd8f6}
+.epills{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px}
+.epill{padding:3px 7px;font-size:10px}
+.epill.on{border-color:#67a7ff;background:#18283a;color:#bcd8f6}
+#easeWrap{background:#0a1016;border:1px solid #26313b;border-radius:4px;touch-action:none}
+#easeWrap svg{display:block;width:100%;height:auto}
+.eread{font-family:Consolas,Menlo,monospace;color:#8ca1b4;font-size:9.5px;margin-top:7px;line-height:1.6;white-space:pre-line}
+</style>
+</head>
+<body>
+<div class="app">
+<header><div class="brand">DIRECTOR DESK <span>V1.20</span></div><div class="actions"><button id="play">▶ Play</button><button id="home">Home</button><button id="reset">Reset</button></div></header>
+<aside class="left"><div class="st">OBJECTS</div><div id="objectList"></div></aside>
+<main>
+<div class="viewbar"><div><b>DIRECTOR VIEW</b><small id="mode">SELECT</small></div><div class="zoomctl"><button id="zout" title="Zoom out">−</button><button id="zr" title="Reset to 100%">100%</button><button id="zin" title="Zoom in">+</button></div></div>
+<div class="canvasWrap"><canvas id="world"></canvas>
+<div id="radialRing" class="radialRing"><svg id="radialSvg" class="radialSvg" viewBox="0 0 170 170"></svg><div id="radialCore" class="radialCenter">INTENT</div><div id="radialTip" class="radialTip"></div></div>
+</div>
+</main>
+<aside class="right"><div class="st">INSPECTOR</div><div class="title" id="title">M17</div><div class="sub">Director State</div>
+<div class="field"><div class="lab">Current Intent</div><div id="intentInfo"></div></div>
+<div class="field"><div class="lab">Selected Timeline Item</div><div id="itemInfo"></div></div>
+<div class="field" id="easeField" style="display:none"><div class="lab">Speed Curve · cubic-bezier</div><div class="epills" id="easePresets"></div><div id="easeWrap"></div><div class="eread" id="easeRead"></div></div>
+<div class="field"><div class="lab">State Revision</div><div id="rev"></div></div>
+<div class="field"><div class="lab">Director State JSON</div><pre id="state"></pre></div>
+<div class="field"><div class="hint">Timeline is a view of Director State. Dragging a clip changes the underlying Segment/Constraint directly. Play reads the same state.</div></div>
+</aside>
+<div class="timeline"><div class="tlbar"><span class="ctx" id="ctx">Frame 2.0s · Track M17</span><span class="timecode" id="tc">00:02.0</span></div>
+<div class="scroll" id="scroll"><div class="ruler" id="ruler"></div><div class="ph" id="ph"></div><div class="tracks" id="tracks"></div></div></div>
+</div>
+<script>
+(()=>{"use strict";
+const $=id=>document.getElementById(id), c=$("world"), ctx=c.getContext("2d");
+let W=0,H=0,dpr=1,t=0,playing=false,zoom=1,selectedObj="M17",selectedItem=null,selectedPoint=null,hoverPath=null,drag=null,duration=12;
+const state={
+ revision:1,
+ objects:[
+  {id:"M17",type:"actor",x:-6,z:4,color:"#67a7ff"},
+  {id:"M18",type:"actor",x:-3,z:2,color:"#63d39b"},
+  {id:"M19",type:"actor",x:1,z:4,color:"#f0a35a"}
+ ],
+ segments:[
+  {id:"SEG_01",type:"MOVE",object:"M17",startX:-6,startZ:4,endX:.5,endZ:.5,points:[],timeStart:2,timeEnd:4.2,ease:[0,0,1,1]},
+  {id:"SEG_02",type:"MOVE",object:"M17",startX:.5,startZ:.5,endX:7,endZ:-5,points:[],timeStart:4.2,timeEnd:6.5,ease:[0,0,1,1]}
+ ],
+ constraints:[
+  {id:"FOLLOW_01",type:"FOLLOW",subject:"M18",target:"M17",timeStart:2.2,timeEnd:7.4,offset:null},
+  {id:"FOLLOW_02",type:"FOLLOW",subject:"M19",target:"M17",timeStart:2.5,timeEnd:7.8,offset:null}
+ ]
+};
+const timelineItems=[
+ {id:"clip_seg1",track:"M17",source:"SEG_01",kind:"segment",label:"SEG_01 · MOVE"},
+ {id:"clip_seg2",track:"M17",source:"SEG_02",kind:"segment",label:"SEG_02 · MOVE"},
+ {id:"clip_f1",track:"M18",source:"FOLLOW_01",kind:"constraint",label:"FOLLOW M17"},
+ {id:"clip_f2",track:"M19",source:"FOLLOW_02",kind:"constraint",label:"FOLLOW M17"}
+];
+function source(item){return item.kind==="segment"?state.segments.find(s=>s.id===item.source):state.constraints.find(q=>q.id===item.source)}
+function range(item){let s=source(item);return item.kind==="segment"?{start:s.timeStart,end:s.timeEnd}:{start:s.timeStart,end:s.timeEnd}}
+function touchState(){state.revision++;state.constraints.forEach(q=>{q.offset=null;q.offsetRevision=-1});}
+function obj(id){return state.objects.find(o=>o.id===id)}
+function pathChain(s){
+ const pts=Array.isArray(s.points)?s.points:[];
+ return [{x:s.startX,z:s.startZ,type:"endpoint"},...pts.map(p=>({x:p.x,z:p.z,type:p.type||"path",shape:p.shape||"LINE",id:p.id})),{x:s.endX,z:s.endZ,type:"endpoint"}];
+}
+function samplePath(s){
+ const ch=pathChain(s),out=[];
+ if(ch.length<2)return ch;
+
+ let i=0;
+ while(i<ch.length-1){
+   const a=ch[i],b=ch[i+1];
+
+   // b is an ARC control point: consume a -> b -> next as ONE quadratic
+   // curve. The following straight segment must NOT be emitted separately.
+   if(b.type==="path" && b.shape==="ARC" && i+2<ch.length){
+     const n=ch[i+2],steps=32;
+     for(let j=0;j<steps;j++){
+       const u=j/steps,v=1-u;
+       out.push({
+         x:v*v*a.x+2*v*u*b.x+u*u*n.x,
+         z:v*v*a.z+2*v*u*b.z+u*u*n.z
+       });
+     }
+     i+=2;
+     continue;
+   }
+
+   const steps=16;
+   for(let j=0;j<steps;j++){
+     const u=j/steps;
+     out.push({x:a.x+(b.x-a.x)*u,z:a.z+(b.z-a.z)*u});
+   }
+   i++;
+ }
+ out.push({x:ch[ch.length-1].x,z:ch[ch.length-1].z});
+ return out;
+}
+function segmentPosition(s,time){
+ if(time<=s.timeStart)return {x:s.startX,z:s.startZ};
+ if(time>=s.timeEnd)return {x:s.endX,z:s.endZ};
+ const p=samplePath(s);
+ let lens=[0];
+ for(let i=1;i<p.length;i++)lens[i]=lens[i-1]+Math.hypot(p[i].x-p[i-1].x,p[i].z-p[i-1].z);
+ const total=lens[lens.length-1]||1;
+ // Speed curve: normalized time runs through the segment's cubic-bezier
+ // easing BEFORE it is converted into distance travelled along the path.
+ const u=(time-s.timeStart)/(s.timeEnd-s.timeStart);
+ const target=easeVal(segEase(s),u)*total;
+ let i=1;while(i<lens.length&&lens[i]<target)i++;
+ // Eased values may exceed [0,1] (overshoot/anticipation). Beyond the end we
+ // extrapolate along the last sample step; before the start the loop above
+ // already yields a negative f, extrapolating backwards along the first step.
+ if(i>=lens.length){const n=p.length,a=p[n-2]||p[0],b=p[n-1],st=(lens[n-1]-lens[n-2])||1,f=1+(target-lens[n-1])/st;return {x:a.x+(b.x-a.x)*f,z:a.z+(b.z-a.z)*f}}
+ const f=(target-lens[i-1])/(lens[i]-lens[i-1]||1),a=p[i-1],b=p[i];
+ return {x:a.x+(b.x-a.x)*f,z:a.z+(b.z-a.z)*f};
+}
+function basePosition(o,time){
+ let ss=state.segments.filter(s=>s.object===o.id).sort((a,b)=>a.timeStart-b.timeStart);
+ if(!ss.length)return {x:o.x,z:o.z};
+ // Before the first Segment begins, the object stays at its authored origin.
+ if(time < ss[0].timeStart)return {x:o.x,z:o.z};
+ let active=ss.find(s=>time>=s.timeStart&&time<=s.timeEnd);
+ if(active)return segmentPosition(active,time);
+ let prev=[...ss].reverse().find(s=>time>s.timeEnd);
+ if(prev)return {x:prev.endX,z:prev.endZ};
+ let next=ss.find(s=>time<s.timeStart);
+ if(next)return {x:next.startX,z:next.startZ};
+ return {x:o.x,z:o.z};
+}
+const _capturing=new Set();
+function followOffset(q,stack){
+ // Lazily capture (or reuse) the offset a follower keeps from its target,
+ // measured at the constraint's start time.
+ if(q.offset!==null&&q.offsetRevision===state.revision)return q.offset;
+ if(_capturing.has(q.id))return null;
+ _capturing.add(q.id);
+ let off=null;
+ try{
+   const o=obj(q.subject),tgt=obj(q.target);
+   if(o&&tgt){
+     const a=position(o,q.timeStart,stack,q);
+     const b=position(tgt,q.timeStart,new Set([...stack,o.id]));
+     off={x:a.x-b.x,z:a.z-b.z};
+   }
+ }finally{_capturing.delete(q.id)}
+ if(off){q.offset=off;q.offsetRevision=state.revision}
+ return q.offset;
+}
+function position(o,time,stack=new Set(),skip=null){
+ if(stack.has(o.id))return basePosition(o,time);
+ const others=state.constraints.filter(q=>q.subject===o.id&&q!==skip);
+ const active=others.find(q=>time>=q.timeStart&&time<=q.timeEnd);
+ if(active){
+   const tgt=obj(active.target);
+   const off=tgt?followOffset(active,stack):null;
+   if(tgt&&off){
+     const b=position(tgt,time,new Set([...stack,o.id]));
+     return {x:b.x+off.x,z:b.z+off.z};
+   }
+   return basePosition(o,time);
+ }
+ // The object's own segment drives while active (active follow takes precedence).
+ if(state.segments.some(s=>s.object===o.id&&time>=s.timeStart&&time<=s.timeEnd))return basePosition(o,time);
+ // Nothing active: HOLD the pose of the most recently ended driver (segment
+ // OR follow) instead of snapping the follower back to its authored origin.
+ let hold=null;
+ state.segments.forEach(s=>{
+   if(s.object===o.id&&time>=s.timeEnd&&(!hold||s.timeEnd>hold.end))hold={end:s.timeEnd,pose:{x:s.endX,z:s.endZ}};
+ });
+ others.forEach(q=>{
+   if(time<=q.timeEnd)return;
+   if(hold&&q.timeEnd<=hold.end)return;
+   const tgt=obj(q.target);if(!tgt)return;
+   const off=followOffset(q,stack);if(!off)return;
+   const b=position(tgt,q.timeEnd,new Set([...stack,o.id]));
+   hold={end:q.timeEnd,pose:{x:b.x+off.x,z:b.z+off.z}};
+ });
+ if(hold)return hold.pose;
+ return basePosition(o,time);
+}
+function project(x,z){
+ const scale=Math.min(W,H)*.07*zoom;
+ return {x:W/2+x*scale,y:H*.55-z*scale*.72};
+}
+function draw(){
+ ctx.clearRect(0,0,W,H);
+ ctx.fillStyle="#0a1016";ctx.fillRect(0,0,W,H);
+ ctx.strokeStyle="#17222d";ctx.lineWidth=1;
+ for(let i=-12;i<=12;i++){let a=project(i,-9),b=project(i,9);ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke()}
+ for(let z=-8;z<=8;z++){let a=project(-12,z),b=project(12,z);ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke()}
+ state.segments.forEach(s=>{
+   const pts=samplePath(s);
+   if(pts.length>1){
+     ctx.save();
+     ctx.strokeStyle=s.object===selectedObj?"#67a7ff":"#35505f";
+     ctx.lineWidth=(s.object===selectedObj?3:1.5)*zoom;
+     ctx.beginPath();
+     pts.forEach((p,i)=>{const q=project(p.x,p.z);if(i===0)ctx.moveTo(q.x,q.y);else ctx.lineTo(q.x,q.y)});
+     ctx.stroke();ctx.restore();
+   }
+   if(s.object===selectedObj){
+     const startQ=project(s.startX,s.startZ),endQ=project(s.endX,s.endZ);
+     [[startQ,"START","#67a7ff"],[endQ,"END","#f0a35a"]].forEach(([q,label,fill])=>{
+       ctx.save();ctx.fillStyle=fill;ctx.strokeStyle="#eef6ff";ctx.lineWidth=2*zoom;
+       ctx.beginPath();ctx.arc(q.x,q.y,7*zoom,0,Math.PI*2);ctx.fill();ctx.stroke();
+       ctx.fillStyle="#dce6ee";ctx.font=(10*zoom)+"px Segoe UI,Arial";ctx.fillText(label,q.x+9*zoom,q.y-7*zoom);ctx.restore();
+     });
+     (Array.isArray(s.points)?s.points:[]).forEach(p=>{
+       const q=project(p.x,p.z);ctx.save();
+       if(p.shape==="ARC"){
+         const ch=pathChain(s),idx=ch.findIndex(v=>v.id===p.id),a=ch[idx-1],b=ch[idx+1];
+         if(a&&b){
+           const qa=project(a.x,a.z),qb=project(b.x,b.z);
+           ctx.strokeStyle="#63d39b88";ctx.lineWidth=zoom;ctx.setLineDash([5,5]);
+           ctx.beginPath();ctx.moveTo(qa.x,qa.y);ctx.lineTo(q.x,q.y);ctx.moveTo(q.x,q.y);ctx.lineTo(qb.x,qb.y);ctx.stroke();
+           ctx.setLineDash([]);
+         }
+         ctx.strokeStyle="#63d39b";ctx.lineWidth=2.5*zoom;ctx.setLineDash([3,3]);ctx.beginPath();ctx.arc(q.x,q.y,7*zoom,0,Math.PI*2);ctx.stroke();ctx.setLineDash([]);
+       }else{
+         ctx.fillStyle=p.id===selectedPoint?"#fff":"#55d88a";ctx.strokeStyle="#173f2c";ctx.lineWidth=2*zoom;
+         ctx.beginPath();ctx.arc(q.x,q.y,(p.id===selectedPoint?6:5)*zoom,0,Math.PI*2);ctx.fill();ctx.stroke();
+       }
+       ctx.fillStyle="#dce6ee";ctx.font=(10*zoom)+"px Segoe UI,Arial";ctx.fillText(p.id,q.x+8*zoom,q.y-6*zoom);
+       if(p.id===selectedPoint && curveToggleEligible(s,p)){
+         const label=p.shape==="ARC"?"━ LINE":"⌒ CURVE";
+         ctx.font="11px Segoe UI,Arial";
+         const bw=ctx.measureText(label).width+18,bh=24,bx=q.x+12*zoom,by=q.y-30*zoom;
+         ctx.fillStyle="#111b24";ctx.strokeStyle="#55d88a";ctx.lineWidth=1;
+         ctx.beginPath();ctx.roundRect(bx,by,bw,bh,6);ctx.fill();ctx.stroke();
+         ctx.fillStyle="#dfffea";ctx.fillText(label,bx+9,by+16);
+       }
+       ctx.restore();
+     });
+   }
+ });
+ if(drag?.newPathPoint && drag.current){
+   const q=project(drag.current.x,drag.current.z);ctx.save();
+   ctx.strokeStyle="#55d88a";ctx.lineWidth=2*zoom;ctx.setLineDash([4,4]);ctx.beginPath();ctx.arc(q.x,q.y,8*zoom,0,Math.PI*2);ctx.stroke();ctx.setLineDash([]);
+   ctx.fillStyle="#55d88a";ctx.font="10px Segoe UI,Arial";ctx.fillText("NEW POINT",q.x+10*zoom,q.y+4*zoom);ctx.restore();
+ }
+ state.constraints.forEach(q=>{
+   if(t<q.timeStart||t>q.timeEnd)return;
+   let a=project(position(obj(q.subject),t).x,position(obj(q.subject),t).z),b=project(position(obj(q.target),t).x,position(obj(q.target),t).z);
+   ctx.save();ctx.strokeStyle="#63d39b";ctx.setLineDash([5,4]);ctx.lineWidth=2*zoom;ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();ctx.restore();
+ });
+ state.objects.forEach(o=>{
+   let p=position(o,t),q=project(p.x,p.z);
+   ctx.save();ctx.fillStyle=o.color;ctx.beginPath();ctx.arc(q.x,q.y,7*zoom,0,Math.PI*2);ctx.fill();
+   if(o.id===selectedObj){ctx.strokeStyle="#fff";ctx.lineWidth=2*zoom;ctx.beginPath();ctx.arc(q.x,q.y,11*zoom,0,Math.PI*2);ctx.stroke()}
+   ctx.fillStyle="#cdd8e2";ctx.font=(11*zoom)+"px Arial";ctx.fillText(o.id,q.x+11*zoom,q.y-8*zoom);ctx.restore();
+ });
+}
+
+function curveToggleEligible(s,p){
+ const ps=s.points||[],i=ps.findIndex(x=>x.id===p.id);
+ if(i<0)return false;
+ // Only intermediate points can toggle. Adjacent ARC points are forbidden.
+ if(p.shape==="ARC")return true;
+ return !(ps[i-1]&&ps[i-1].shape==="ARC") && !(ps[i+1]&&ps[i+1].shape==="ARC");
+}
+function curveToggleHit(e){
+ const r=c.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top;
+ let best=null;
+ state.segments.filter(s=>s.object===selectedObj).forEach(s=>{
+   (s.points||[]).forEach(p=>{
+     if(p.id!==selectedPoint || !curveToggleEligible(s,p))return;
+     const q=project(p.x,p.z);
+     const label=p.shape==="ARC"?"━ LINE":"⌒ CURVE";
+     ctx.font="11px Segoe UI,Arial";
+     const w=ctx.measureText(label).width+18,h=24;
+     const x=q.x+12*zoom,y=q.y-30*zoom;
+     if(mx>=x&&mx<=x+w&&my>=y&&my<=y+h)best={segment:s,point:p};
+   });
+ });
+ return best;
+}
+function toggleCurve(hit){
+ const s=hit.segment,p=hit.point;
+ if(p.shape==="ARC"){
+   p.shape="LINE";
+ }else if(curveToggleEligible(s,p)){
+   p.shape="ARC";
+ }
+ normalizePathPointModes(s);
+ selectedItem=s.id;
+ selectedPoint=p.id;
+ touchState();
+ draw();renderInspector();
+}
+function pathPointHit(e){
+ const r=c.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top;
+ let best=null;
+ state.segments.filter(s=>s.object===selectedObj).forEach(s=>{
+   (s.points||[]).forEach(p=>{
+     const q=project(p.x,p.z),d=Math.hypot(mx-q.x,my-q.y);
+     if(d<Math.max(14,9*zoom)&&(!best||d<best.d))best={segment:s,point:p,d};
+   });
+ });
+ return best;
+}
+function nearPath(e){
+ const r=c.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top;
+ let best=null;
+ state.segments.filter(s=>s.object===selectedObj).forEach(s=>{
+   const pts=samplePath(s);
+   for(let i=0;i<pts.length-1;i++){
+     const a=project(pts[i].x,pts[i].z),b=project(pts[i+1].x,pts[i+1].z);
+     const vx=b.x-a.x,vy=b.y-a.y,wx=mx-a.x,wy=my-a.y;
+     const den=vx*vx+vy*vy||1;
+     const u=Math.max(0,Math.min(1,(wx*vx+wy*vy)/den));
+     const qx=a.x+u*vx,qy=a.y+u*vy,d=Math.hypot(mx-qx,my-qy);
+     if(!best||d<best.d){
+       best={d,x:pts[i].x+(pts[i+1].x-pts[i].x)*u,z:pts[i].z+(pts[i+1].z-pts[i].z)*u,segment:s};
+     }
+   }
+ });
+ return best;
+}
+function pathInsertIndex(s,x,z){
+ const ch=pathChain(s);
+ let best=null;
+ for(let i=0;i<ch.length-1;i++){
+   const a=ch[i],b=ch[i+1],vx=b.x-a.x,vz=b.z-a.z,den=vx*vx+vz*vz||1;
+   const u=Math.max(0,Math.min(1,((x-a.x)*vx+(z-a.z)*vz)/den));
+   const qx=a.x+u*vx,qz=a.z+u*vz,d=Math.hypot(x-qx,z-qz);
+   if(!best||d<best.d)best={d,i};
+ }
+ return best?Math.max(0,Math.min((s.points||[]).length,best.i)):0;
+}
+function normalizePathPointModes(s){
+ const ps=s.points||[];
+ ps.forEach((p,i)=>{
+   if(p.shape==="ARC" && ((ps[i-1]&&ps[i-1].shape==="ARC")||(ps[i+1]&&ps[i+1].shape==="ARC")))p.shape="LINE";
+ });
+}
+function beginPathPointDrag(e,hit){
+ const s=hit.segment;
+ selectedPoint=hit.point.id;
+ drag={pathPoint:hit.point,segment:s};
+ c.setPointerCapture?.(e.pointerId);
+}
+function beginNewPathPoint(e,hit){
+ const s=hit.segment;
+ selectedPoint=null;
+ drag={newPathPoint:true,segment:s,origin:{x:hit.x,z:hit.z},current:{x:hit.x,z:hit.z},moved:false};
+ c.setPointerCapture?.(e.pointerId);
+}
+function commitNewPathPoint(){
+ if(!drag?.newPathPoint)return;
+ const s=drag.segment,p=drag.current;
+ if(!p)return;
+ const moved=Math.hypot(p.x-drag.origin.x,p.z-drag.origin.z)>.12;
+ if(moved){
+   if(!Array.isArray(s.points))s.points=[];
+   const idx=pathInsertIndex(s,p.x,p.z);
+   const node={id:"P_"+Date.now()+"_"+Math.floor(Math.random()*1000),type:"path",shape:"LINE",x:p.x,z:p.z};
+   s.points.splice(idx,0,node);
+   normalizePathPointModes(s);
+   selectedItem=s.id;
+   selectedPoint=node.id;
+   touchState();
+ }
+}
+function hitObject(e){
+ const r=c.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top;
+ let best=null,bd=Math.max(16,11*zoom);
+ state.objects.forEach(o=>{let p=position(o,t),q=project(p.x,p.z),d=Math.hypot(q.x-mx,q.y-my);if(d<bd){bd=d;best=o}});
+ return best;
+}
+function ringActions(o){
+ const active=state.constraints.some(q=>q.subject===o.id&&t>=q.timeStart&&t<=q.timeEnd);
+ if(o.type==="actor")return active?["STOP","LOOK AT","CHANGE PATH","ADD ACTION"]:["MOVE","LOOK AT","FOLLOW","ACTION"];
+ return ["MOVE","TARGET","ACTION"];
+}
+function arcPath(cx,cy,r1,r2,a0,a1){
+ const p=(r,a)=>[cx+Math.cos(a)*r,cy+Math.sin(a)*r];
+ const A=p(r1,a0),B=p(r2,a0),C=p(r2,a1),D=p(r1,a1);
+ return `M ${A[0]} ${A[1]} L ${B[0]} ${B[1]} A ${r2} ${r2} 0 0 1 ${C[0]} ${C[1]} L ${D[0]} ${D[1]} A ${r1} ${r1} 0 0 0 ${A[0]} ${A[1]} Z`;
+}
+function closeRing(){radialOpen=false;$("radialRing").classList.remove("show");$("radialTip").classList.remove("show")}
+function openRing(o){
+ const r=c.getBoundingClientRect(),p=position(o,t),q=project(p.x,p.z);
+ const wrap=$("radialRing");wrap.style.left=q.x+"px";wrap.style.top=q.y+"px";wrap.classList.add("show");radialOpen=true;
+ $("radialCore").textContent=o.id;
+ const svg=$("radialSvg");svg.innerHTML="";
+ const acts=ringActions(o),cx=85,cy=85,r1=25,r2=77,step=Math.PI*2/acts.length;
+ acts.forEach((a,i)=>{
+   const a0=-Math.PI/2+i*step+.025,a1=-Math.PI/2+(i+1)*step-.025;
+   const ns=document.createElementNS("http://www.w3.org/2000/svg","path");
+   ns.setAttribute("d",arcPath(cx,cy,r1,r2,a0,a1));
+   ns.setAttribute("class","radialSector");ns.style.fill=["#285f86","#2d765f","#735c2b","#6a3d68","#65402e"][i%5];
+   ns.addEventListener("mouseenter",()=>{$("radialTip").textContent=tipFor(a);$("radialTip").classList.add("show")});
+   ns.addEventListener("mouseleave",()=>{$("radialTip").classList.remove("show")});
+   ns.addEventListener("click",ev=>{ev.stopPropagation();executeAction(o,a);});
+   svg.append(ns);
+   const tx= cx+Math.cos((a0+a1)/2)*51,ty=cy+Math.sin((a0+a1)/2)*51;
+   const text=document.createElementNS("http://www.w3.org/2000/svg","text");text.setAttribute("x",tx);text.setAttribute("y",ty);text.setAttribute("class","radialSectorText");text.textContent=a;svg.append(text);
+ });
+}
+function tipFor(a){return ({MOVE:"Create a MOVE intent.",FOLLOW:"Create FOLLOW against a target.",LOOK:"Create a LOOK AT intent.",ACTION:"Create an action intent.",STOP:"Stop the current behavior.",["CHANGE PATH"]:"Edit the current movement path.",["ADD ACTION"]:"Insert an action at this time.",TARGET:"Set a target."}[a]||a)}
+function executeAction(o,a){
+ if(a==="FOLLOW"&&o.type==="actor"){
+   const target=state.objects.find(v=>v.id!==o.id&&v.type==="actor");if(!target)return;
+   const id="FOLLOW_"+String(state.constraints.length+1).padStart(2,"0");
+   state.constraints.push({id,type:"FOLLOW",subject:o.id,target:target.id,timeStart:t,timeEnd:Math.min(duration,t+5),offset:null,offsetRevision:-1});
+   timelineItems.push({id:"clip_"+id,track:o.id,source:id,kind:"constraint",label:"FOLLOW "+target.id});
+   touchState();selectedObj=o.id;selectedItem=id;closeRing();render();return;
+ }
+ selectedItem=a;closeRing();render();
+}
+function renderObjects(){
+ const box=$("objectList");box.innerHTML="";
+ state.objects.forEach(o=>{let b=document.createElement("button");b.className="obj"+(o.id===selectedObj?" sel":"");b.textContent=o.id+" · "+o.type.toUpperCase();b.onclick=()=>{selectedObj=o.id;render()};box.append(b)})
+}
+function renderTimeline(){
+ const ruler=$("ruler");ruler.innerHTML="";for(let i=0;i<=duration;i++){let d=document.createElement("div");d.className="tick";d.style.left=i*100+"px";d.textContent=i+"s";ruler.append(d)}
+ const tracks=$("tracks");tracks.innerHTML="";
+ const ids=["M17","M18","M19"];
+ ids.forEach(id=>{let row=document.createElement("div");row.className="row";row.innerHTML=`<div class="label">${id}</div><div class="lane" data-track="${id}"></div>`;tracks.append(row)});
+ timelineItems.forEach(item=>{
+   const lane=document.querySelector(`.lane[data-track="${item.track}"]`),r=range(item);if(!lane||!r)return;
+   let e=document.createElement("div");e.className="clip "+item.kind+(selectedItem===item.source?" sel":"");e.style.left=r.start*100+"px";e.style.width=Math.max(28,(r.end-r.start)*100)+"px";e.textContent=item.label;
+   if(item.kind==="segment"&&(r.end-r.start)>=.9){const sc=source(item);e.style.backgroundImage=easeSpark(sc);e.style.backgroundRepeat="no-repeat";e.style.backgroundPosition="right 4px center";e.style.backgroundSize="38px 12px"}
+   let l=document.createElement("span"),rr=document.createElement("span");l.className="handle l";rr.className="handle r";e.append(l,rr);
+   e.onpointerdown=ev=>{ev.stopPropagation();selectedItem=item.source;selectedObj=item.track;let rr=range(item);drag={item,start:rr.start,end:rr.end,x:ev.clientX,mode:ev.target.classList.contains("l")?"l":ev.target.classList.contains("r")?"r":"m"};e.setPointerCapture?.(ev.pointerId);renderTimeline()};
+   lane.append(e);
+ });
+ $("ph").style.left=(82+t*100)+"px";
+}
+function renderInspector(){
+ const o=obj(selectedObj);$("title").textContent=selectedObj;
+ const q=state.constraints.find(x=>x.id===selectedItem),s=state.segments.find(x=>x.id===selectedItem);
+ $("intentInfo").innerHTML=q?`<span class="pill">FOLLOW</span> ${q.subject} → ${q.target} · ${q.timeStart.toFixed(1)}–${q.timeEnd.toFixed(1)}s`:s?`<span class="pill">MOVE</span> ${s.object} · ${s.timeStart.toFixed(1)}–${s.timeEnd.toFixed(1)}s`:"No timeline intent selected.";
+ $("itemInfo").textContent=selectedItem||"—";
+ const ps=s?(Array.isArray(s.points)?s.points.length:0):0;
+ if(s)$("itemInfo").textContent+=" · "+ps+" path point"+(ps===1?"":"s");
+ if(s&&selectedPoint){
+   const pp=(s.points||[]).find(p=>p.id===selectedPoint);
+   if(pp)$("itemInfo").textContent+=" · "+pp.shape;
+ }
+ $("rev").textContent=String(state.revision);
+ $("state").textContent=JSON.stringify(state,null,2);
+ $("ctx").textContent=`Frame ${t.toFixed(1)}s · Track ${selectedObj}`;$("tc").textContent="00:"+t.toFixed(1).padStart(4,"0");
+ renderEaseEditor();
+}
+// ---------- Speed curve (per-segment cubic-bezier easing) ----------
+const EASE_PRESETS=[["LINEAR",[0,0,1,1]],["EASE-IN",[.42,0,1,1]],["EASE-OUT",[0,0,.58,1]],["EASE-IN-OUT",[.42,0,.58,1]]];
+const EASE_YMIN=-.25,EASE_YMAX=1.25,EX0=24,EX1=240,EY0=16,EY1=128;
+const ex=u=>EX0+u*(EX1-EX0), ey=v=>EY1-(v-EASE_YMIN)/(EASE_YMAX-EASE_YMIN)*(EY1-EY0);
+function segEase(s){return Array.isArray(s.ease)?s.ease:[0,0,1,1]}
+function easeVal(a,u){
+ if(u<=0)return 0;if(u>=1)return 1;
+ const x1=a[0],y1=a[1],x2=a[2],y2=a[3];
+ if(x1===0&&y1===0&&x2===1&&y2===1)return u;
+ const cx=3*x1,bx=3*(x2-x1)-cx,ax=1-cx-bx,cy=3*y1,by=3*(y2-y1)-cy,ay=1-cy-by;
+ const fx=q=>((ax*q+bx)*q+cx)*q,dfx=q=>(3*ax*q+2*bx)*q+cx;
+ let q=u;
+ for(let i=0;i<6;i++){const err=fx(q)-u;if(Math.abs(err)<1e-5)break;const d=dfx(q);if(Math.abs(d)<1e-6)break;q-=err/d}
+ if(q<0||q>1||Math.abs(fx(q)-u)>1e-5){let lo=0,hi=1;q=u;for(let i=0;i<30;i++){const v=fx(q);if(Math.abs(v-u)<1e-6)break;if(v<u)lo=q;else hi=q;q=(lo+hi)/2}}
+ q=Math.max(0,Math.min(1,q));
+ return ((ay*q+by)*q+cy)*q;
+}
+let easeKey="";
+function easeSeg(){return state.segments.find(x=>x.id===selectedItem)}
+function speedBars(a){
+ const N=44,step=(EX1-EX0)/N,w=step*.6,vals=[];
+ for(let i=0;i<N;i++){const u=(i+.5)/N,h=.008;vals.push((easeVal(a,Math.min(1,u+h))-easeVal(a,Math.max(0,u-h)))/(2*h))}
+ const mx=Math.max(1,...vals);
+ return vals.map((v,i)=>{const hh=Math.max(1,Math.min(24,v/mx*24));return `<rect x="${(EX0+i*step+step*.2).toFixed(1)}" y="${(164-hh).toFixed(1)}" width="${w.toFixed(1)}" height="${hh.toFixed(1)}" fill="${v>1.02?"#f0a35a":"#3f6fa8"}"/>`}).join("");
+}
+function buildEaseEditor(s){
+ const a=segEase(s);
+ const ps=$("easePresets");ps.innerHTML="";
+ EASE_PRESETS.forEach(([n,v])=>{
+   const b=document.createElement("button");b.className="epill"+(v.join()===a.join()?" on":"");b.textContent=n;
+   b.onclick=()=>{s.ease=v.slice();touchState();renderInspector();draw();renderTimeline()};
+   ps.append(b);
+ });
+ let grid="";
+ [0,.5,1].forEach(v=>grid+=`<line x1="${EX0}" y1="${ey(v).toFixed(1)}" x2="${EX1}" y2="${ey(v).toFixed(1)}" stroke="#1c2933"/>`);
+ [0,.5,1].forEach(u=>grid+=`<line x1="${ex(u).toFixed(1)}" y1="${EY0}" x2="${ex(u).toFixed(1)}" y2="${EY1}" stroke="#1c2933"/>`);
+ let d="";for(let i=0;i<=60;i++)d+=(i?"L":"M")+ex(i/60).toFixed(1)+" "+ey(easeVal(a,i/60)).toFixed(1);
+ const c1x=ex(a[0]).toFixed(1),c1y=ey(a[1]).toFixed(1),c2x=ex(a[2]).toFixed(1),c2y=ey(a[3]).toFixed(1);
+ $("easeWrap").innerHTML=`<svg viewBox="0 0 250 172" xmlns="http://www.w3.org/2000/svg">
+<rect x="${EX0}" y="${EY0}" width="${EX1-EX0}" height="${EY1-EY0}" fill="#0a1016" stroke="#22303d"/>
+${grid}
+<line x1="${ex(0)}" y1="${ey(0).toFixed(1)}" x2="${ex(1)}" y2="${ey(1).toFixed(1)}" stroke="#2b3d4d" stroke-dasharray="4 4"/>
+<line x1="${ex(0)}" y1="${ey(0).toFixed(1)}" x2="${c1x}" y2="${c1y}" stroke="#67a7ff55" stroke-dasharray="3 3"/>
+<line x1="${ex(1)}" y1="${ey(1).toFixed(1)}" x2="${c2x}" y2="${c2y}" stroke="#f0a35a55" stroke-dasharray="3 3"/>
+<path d="${d}" fill="none" stroke="#67a7ff" stroke-width="2"/>
+<circle data-h="1" cx="${c1x}" cy="${c1y}" r="6" fill="#67a7ff" stroke="#0a1016" stroke-width="2" style="cursor:grab"/>
+<circle data-h="2" cx="${c2x}" cy="${c2y}" r="6" fill="#f0a35a" stroke="#0a1016" stroke-width="2" style="cursor:grab"/>
+<line id="ehLine" x1="0" y1="${EY0}" x2="0" y2="${EY1}" stroke="#ffffff26" visibility="hidden"/>
+<circle id="ehDot" r="3.5" fill="#fff" visibility="hidden"/>
+<text x="19" y="${(ey(0)+3).toFixed(1)}" fill="#55646f" font-size="8" text-anchor="end">0</text>
+<text x="19" y="${(ey(1)+3).toFixed(1)}" fill="#55646f" font-size="8" text-anchor="end">1</text>
+<text x="6" y="149" fill="#55646f" font-size="7" letter-spacing="1">SPD</text>
+${speedBars(a)}</svg>`;
+}
+function updateEasePlayhead(s){
+ const svg=$("easeWrap").firstElementChild;if(!svg)return;
+ const line=svg.querySelector("#ehLine"),dot=svg.querySelector("#ehDot");
+ const inside=t>=s.timeStart&&t<=s.timeEnd&&s.timeEnd>s.timeStart;
+ if(line&&dot){
+  if(inside){const u=(t-s.timeStart)/(s.timeEnd-s.timeStart),v=easeVal(segEase(s),u);
+   line.setAttribute("x1",ex(u));line.setAttribute("x2",ex(u));line.setAttribute("visibility","visible");
+   dot.setAttribute("cx",ex(u));dot.setAttribute("cy",ey(v));dot.setAttribute("visibility","visible");
+  }else{line.setAttribute("visibility","hidden");dot.setAttribute("visibility","hidden")}
+ }
+ const a=segEase(s);
+ $("easeRead").textContent=`${s.id} · cubic-bezier(${a.map(v=>v.toFixed(2)).join(", ")})`+"\n"+(inside?
+  `t ${t.toFixed(1)}s · time ${Math.round((t-s.timeStart)/(s.timeEnd-s.timeStart)*100)}% → path ${Math.round(easeVal(a,(t-s.timeStart)/(s.timeEnd-s.timeStart))*100)}%`:
+  `playhead outside ${s.timeStart.toFixed(1)}–${s.timeEnd.toFixed(1)}s`);
+}
+function renderEaseEditor(){
+ const s=easeSeg(),f=$("easeField");
+ if(!s){f.style.display="none";easeKey="";return}
+ f.style.display="";
+ const k=selectedItem+"|"+segEase(s).join();
+ if(k!==easeKey){easeKey=k;buildEaseEditor(s)}
+ updateEasePlayhead(s);
+}
+$("easeWrap").addEventListener("pointerdown",e=>{
+ const h=e.target.closest&&e.target.closest("[data-h]");if(!h)return;
+ e.preventDefault();$("easeWrap").setPointerCapture?.(e.pointerId);
+ drag={easeHandle:+h.getAttribute("data-h"),easeSeg:selectedItem};
+});
+$("easeWrap").addEventListener("pointermove",e=>{
+ if(!drag||!drag.easeHandle)return;
+ const s=state.segments.find(x=>x.id===drag.easeSeg);if(!s)return;
+ const r=$("easeWrap").getBoundingClientRect(),k=250/r.width;
+ const px=(e.clientX-r.left)*k,py=(e.clientY-r.top)*k;
+ const u=(px-EX0)/(EX1-EX0),v=EASE_YMIN+(EY1-py)/(EY1-EY0)*(EASE_YMAX-EASE_YMIN);
+ const arr=segEase(s).slice(),i=drag.easeHandle;
+ arr[i===1?0:2]=Math.round(Math.max(0,Math.min(1,u))*1000)/1000;
+ arr[i===1?1:3]=Math.round(Math.max(EASE_YMIN,Math.min(EASE_YMAX,v))*1000)/1000;
+ s.ease=arr;
+ touchState();renderInspector();draw();
+});
+$("easeWrap").addEventListener("pointerup",()=>{if(drag&&drag.easeHandle){drag=null;renderTimeline()}});
+function easeSpark(s){
+ const a=segEase(s);let d="";
+ for(let i=0;i<=16;i++){const u=i/16,v=Math.max(0,Math.min(1,easeVal(a,u)));d+=(i?"L":"M")+(1+u*38).toFixed(1)+" "+(12.5-v*11).toFixed(1)}
+ const svg=`<svg xmlns='http://www.w3.org/2000/svg' width='40' height='14' viewBox='0 0 40 14'><path d='M1 12.5L39 1.5' stroke='#ffffff14' fill='none'/><path d='${d}' stroke='#9fc5ffaa' fill='none' stroke-width='1.5'/></svg>`;
+ return `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
+}
+function render(){renderObjects();renderTimeline();renderInspector();draw()}
+function setTime(v){t=Math.max(0,Math.min(duration,v));renderInspector();renderTimeline();draw()}
+function commitDrag(){
+ if(!drag)return;
+ const item=drag.item, src=source(item), delta=(drag.currentX-drag.x)/100,len=drag.end-drag.start;
+ let ns=drag.start,ne=drag.end;
+ if(drag.mode==="m"){ns=Math.max(0,Math.min(duration-len,drag.start+delta));ne=ns+len}
+ else if(drag.mode==="l"){ns=Math.max(0,Math.min(drag.end-.1,drag.start+delta));ne=drag.end}
+ else {ns=drag.start;ne=Math.max(ns+.1,Math.min(duration,drag.end+delta))}
+ src.timeStart=Math.round(ns*10)/10;src.timeEnd=Math.round(ne*10)/10;
+ touchState();render();
+}
+let radialOpen=false;
+c.addEventListener("pointerdown",e=>{
+ if(radialOpen){closeRing();return}
+ const o=hitObject(e);
+ if(o){
+   selectedObj=o.id;selectedItem=null;selectedPoint=null;
+   drag={object:o,startX:e.clientX,startY:e.clientY,moved:false};
+   c.setPointerCapture?.(e.pointerId);
+   renderObjects();renderInspector();draw();return;
+ }
+ const ct=curveToggleHit(e);
+ if(ct){toggleCurve(ct);return}
+ const ph=pathPointHit(e);
+ if(ph){selectedItem=ph.segment.id;beginPathPointDrag(e,ph);renderInspector();draw();return}
+ const nh=nearPath(e);
+ if(nh&&nh.d<16){selectedItem=nh.segment.id;beginNewPathPoint(e,nh);draw();return}
+});
+c.addEventListener("pointermove",e=>{
+ if(drag?.object){
+   const d=Math.hypot(e.clientX-drag.startX,e.clientY-drag.startY);if(d>4)drag.moved=true;
+   if(drag.moved){
+     const r=c.getBoundingClientRect(),scale=Math.min(W,H)*.07*zoom;
+     drag.object.x=(e.clientX-r.left-W/2)/scale;
+     drag.object.z=(H*.55-e.clientY+r.top)/(scale*.72);
+     renderInspector();draw();
+   }
+   return;
+ }
+ if(drag?.pathPoint){
+   const r=c.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top;
+   const scale=Math.min(W,H)*.07*zoom;
+   drag.pathPoint.x=(mx-W/2)/scale;
+   drag.pathPoint.z=(H*.55-my)/(scale*.72);
+   normalizePathPointModes(drag.segment);touchState();draw();return;
+ }
+ if(drag?.newPathPoint){
+   const r=c.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top,scale=Math.min(W,H)*.07*zoom;
+   drag.current={x:(mx-W/2)/scale,z:(H*.55-my)/(scale*.72)};
+   draw();
+ }
+});
+c.addEventListener("pointerup",e=>{
+ if(drag?.object){
+   const o=drag.object,moved=drag.moved;drag=null;
+   if(moved){touchState();renderObjects();renderInspector();draw()}else openRing(o);
+   return;
+ }
+ if(drag?.pathPoint){drag=null;renderInspector();draw();return}
+ if(drag?.newPathPoint){commitNewPathPoint();drag=null;hoverPath=null;renderInspector();draw();return}
+});
+c.addEventListener("dblclick",e=>{const o=hitObject(e);if(o){selectedObj=o.id;openRing(o)}});
+window.addEventListener("pointermove",e=>{
+ if(!drag)return;
+ if(drag.item){drag.currentX=e.clientX;const item=drag.item,src=source(item),delta=(e.clientX-drag.x)/100,len=drag.end-drag.start;let ns=drag.start,ne=drag.end;if(drag.mode==="m"){ns=Math.max(0,Math.min(duration-len,drag.start+delta));ne=ns+len}else if(drag.mode==="l"){ns=Math.max(0,Math.min(drag.end-.1,drag.start+delta));ne=drag.end}else{ns=drag.start;ne=Math.max(ns+.1,Math.min(duration,drag.end+delta))}src.timeStart=Math.round(ns*10)/10;src.timeEnd=Math.round(ne*10)/10;touchState();renderTimeline();renderInspector();draw();}
+});
+window.addEventListener("pointerup",()=>{drag=null});
+$("scroll").addEventListener("pointerdown",e=>{if(e.target.closest(".clip"))return;const r=$("scroll").getBoundingClientRect();setTime((e.clientX-r.left+$("scroll").scrollLeft)/100)});
+$("home").onclick=()=>setTime(0);
+$("reset").onclick=()=>location.reload();
+function setZoom(z){zoom=Math.max(.5,Math.min(2,Math.round(z*10)/10));$("zr").textContent=Math.round(zoom*100)+"%";draw()}
+$("zin").onclick=()=>setZoom(zoom+.1);$("zout").onclick=()=>setZoom(zoom-.1);$("zr").onclick=()=>setZoom(1);
+$("play").onclick=()=>{
+ playing=!playing;$("play").textContent=playing?"❚❚ Pause":"▶ Play";
+ if(playing){let last=performance.now();const loop=now=>{if(!playing)return;let dt=Math.min(.05,(now-last)/1000);last=now;t+=dt;if(t>=duration){t=duration;playing=false;$("play").textContent="▶ Play"}renderInspector();renderTimeline();draw();if(playing)requestAnimationFrame(loop)};requestAnimationFrame(loop)}
+};
+function resize(){let r=c.getBoundingClientRect();W=r.width;H=r.height;dpr=devicePixelRatio||1;c.width=W*dpr;c.height=H*dpr;ctx.setTransform(dpr,0,0,dpr,0,0);draw()}
+window.addEventListener("resize",resize);render();resize();
+})();
+</script>
+</body></html>

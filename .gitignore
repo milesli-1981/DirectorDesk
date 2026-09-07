@@ -1,0 +1,11 @@
+node_modules
+dist
+*.tsbuildinfo
+
+# tsc -b 为 vite.config.ts 生成的产物
+vite.config.js
+vite.config.d.ts
+
+.DS_Store
+Thumbs.db
+*.log
