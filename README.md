@@ -60,6 +60,9 @@
 - 场景持久化
   - 每张场景页独立 localStorage key（由片场 manifest 索引），切换不丢页；旧的 v2 单场景存档首次启动自动迁移为「一个场景页的片场」。
   - 顶栏 Export / Import 改为整片场（manifest + 全部场景页 JSON）；旧的单个场景文件仍可导入（当作当前场景页替换）。自动保存由「场景页内容 revision + 片场结构」任一变化触发。
+- 视频导出（Previs）
+  - 顶栏 `Render Video`：对当前场景逐台相机渲染其 POV（Camera View），用 `canvas.captureStream` + MediaRecorder 实时录制，每台相机输出一条 WebM（`<场景名>_<相机名>.webm`，对齐 Baseline §1352 多机位批量）。
+  - 实时录制：总耗时 ≈ 各相机内容时长之和；确定性离线渲染（WebCodecs / MP4 + 精确画幅遮幅）为后续升级方向。
 - 运动求解
   - 位置 = Segment（路径里程 × 速度曲线）
   - 路径被静态环境（set 资产）阻挡时自动绕行：拐角可见图 + Dijkstra；端点落在障碍内会推到外边缘

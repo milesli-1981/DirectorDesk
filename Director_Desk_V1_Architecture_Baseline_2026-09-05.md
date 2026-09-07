@@ -3227,3 +3227,18 @@ PREVIS
 - tab：单击切换、双击内联重命名、HTML5 拖拽排序；行内 `⧉` 复制、`×` 删除；末尾 `＋` 新建。
 - `.app` grid 由 3 行扩为 4 行（场景栏 / header / 主区 / Timeline），各面板显式 `grid-row`，避免自动布局错位。
 - 顶栏 Export / Import 改为整片场（`exportProject` / `importProject`：导出 `{ manifest, scenes }`；导入时若含 `scenes` 走整片场恢复，否则兼容旧单场景文件、当作当前场景页替换）。
+
+---
+
+## 74. Previs 视频导出（2026-09-07 实现落地）
+
+> 对齐 Baseline §1352（多机位批量输出）；测试见 `Director_Desk_Automation_Test_Cases_V1.md` §23。
+
+- **范围（首版）**：多机位批量——对当前场景每台相机各渲染一条视频（对齐 §1352 的 `SHOT_05_CAM_A.mp4 …`），而非单镜头连续成片或多镜头剪辑 reel。
+- **视角**：录制 active 相机 POV（Camera View，即「透过机位看到的片子」）；`CameraRig` 在 `viewMode==="camera"` 时把渲染相机驱动到解算机位，`OrbitControls` 在相机视图下禁用，天然适合录制。
+- **路线**：MediaRecorder 实时录制（复用现有渲染，最快跑通管线）；确定性离线渲染（WebCodecs + muxer、MP4、精确画幅遮幅）作为后续升级。
+- **实现**（`src/engine/videoExport.ts`）：
+  - `CaptureBridge`（WorldView 内、`<Canvas>` 子组件）用 `useThree` 取 `gl.domElement` 写入模块级 `captureCanvas`。
+  - `exportMultiCamVideos`：逐相机 `setState({ viewMode:"camera", activeCameraId, currentTime:0, playing:false })` → 等一帧 → `canvas.captureStream(fps)` → `MediaRecorder` 录制 → `setState({ playing:true })` 与录制同步开播 → 播放到 `contentEndTime` 自动停止后 `recorder.stop()` → 下载 `<场景名>_<相机名>.webm`；导出结束恢复进入前视图。
+  - 码率 `videoBitsPerSecond: 12_000_000`；mime 优先 `vp9` → `vp8` → `webm`。
+- **已知限制（首版）**：实时录制，总耗时 ≈ Σ 各相机内容时长；输出分辨率为画布实际像素（含 dpr），画幅遮幅（信箱条）是 2D DOM 叠层、不烤进 WebM——精确画幅需待 WebCodecs 离线渲染路径。

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Canvas, ThreeEvent, useFrame, useThree } from "@react-three/fiber";
+import { setCaptureCanvas } from "../engine/videoExport";
 import { Html, Line, OrbitControls, PerspectiveCamera } from "@react-three/drei";
 import * as THREE from "three";
 import { useDirectorStore } from "../state/directorStore";
@@ -802,6 +803,16 @@ function CameraPaths() {
 }
 
 /** 相机视图：把渲染相机驱动到导演相机的解算结果上。 */
+/** 把渲染画布暴露给视频导出模块（供 canvas.captureStream 录制）。 */
+function CaptureBridge() {
+  const gl = useThree((state) => state.gl);
+  useEffect(() => {
+    setCaptureCanvas(gl.domElement as HTMLCanvasElement);
+    return () => setCaptureCanvas(null);
+  }, [gl]);
+  return null;
+}
+
 function CameraRig() {
   const { camera, size } = useThree();
 
@@ -1289,6 +1300,7 @@ export function WorldView() {
         <Canvas dpr={[1, 2]} gl={{ antialias: true }}>
           <color attach="background" args={["#0a1016"]} />
           <WorldScene />
+          <CaptureBridge />
         </Canvas>
         {viewMode === "camera" ? <FramingOverlay /> : null}
       </div>

@@ -1,10 +1,11 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Inspector } from "../components/Inspector";
 import { ObjectList } from "../components/ObjectList";
 import { SceneTabs } from "../components/SceneTabs";
 import { Timeline } from "../components/Timeline";
 import { WorldView } from "../components/WorldView";
 import { contentEndTime } from "../engine/timeline";
+import { exportMultiCamVideos } from "../engine/videoExport";
 import { useDirectorStore } from "../state/directorStore";
 
 export function App() {
@@ -57,6 +58,24 @@ export function App() {
       reader.readAsText(file);
     };
     input.click();
+  };
+
+  const [exportStatus, setExportStatus] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+
+  const handleRenderVideo = async () => {
+    if (exporting) return;
+    setExporting(true);
+    setExportStatus("准备中…");
+    try {
+      await exportMultiCamVideos({ fps: 24, onProgress: setExportStatus });
+      setExportStatus("✓ 完成：已下载各相机 WebM");
+    } catch (error) {
+      setExportStatus("✗ " + (error instanceof Error ? error.message : String(error)));
+    } finally {
+      setExporting(false);
+      setTimeout(() => setExportStatus(null), 4000);
+    }
   };
 
   useEffect(() => {
@@ -129,6 +148,10 @@ export function App() {
           <button type="button" id="import" onClick={handleImport}>
             Import
           </button>
+          <button type="button" id="render" onClick={handleRenderVideo} disabled={exporting}>
+            {exporting ? "Rendering…" : "Render Video"}
+          </button>
+          {exportStatus && <span className="render-status">{exportStatus}</span>}
         </div>
       </header>
 

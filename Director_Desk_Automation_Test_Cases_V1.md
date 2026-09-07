@@ -1337,3 +1337,19 @@ This should become the first full regression test.
 ## TC-STAGE-008 — Persistence across reload
 **Steps:** Add two pages, edit each, reload the app (or Export then Import the stage JSON).
 **Expected:** The manifest + both scene pages round-trip; active page and edits survive. A legacy v2 single-scene localStorage is migrated into a one-page stage on first load.
+
+---
+
+# 23. Previs video export (multi-cam batch) tests
+
+## TC-VIDEO-001 — Per-camera WebM is produced
+**Steps:** With a scene containing two cameras, click `Render Video`.
+**Expected:** Two `.webm` files download, named `<scene>_<CAM_A>.webm` and `<scene>_<CAM_B>.webm`; each plays the timeline from that camera's POV.
+
+## TC-VIDEO-002 — Footage spans t=0 to content end
+**Steps:** Render a camera whose content ends at T; open the resulting WebM.
+**Expected:** The clip begins at the t=0 frame and runs until ~T (real-time capture), then stops; the app view returns to its pre-export state.
+
+## TC-VIDEO-003 — No cameras is handled gracefully
+**Steps:** On a scene with no cameras, click `Render Video`.
+**Expected:** A clear message ("当前场景没有相机，无法导出视频") and no crash or partial download.

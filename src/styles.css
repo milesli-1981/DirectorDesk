@@ -58,6 +58,16 @@ header {
 .actions {
   display: flex;
   gap: 6px;
+  align-items: center;
+}
+
+.render-status {
+  font-size: 11px;
+  color: #8ad1ff;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* —— 片场 / 场景页 tab 栏 —— */
