@@ -905,3 +905,149 @@ This should become the first full regression test.
 24. Assert all invariants.
 
 **Pass condition:** Director intent, spatial topology, path editing, timeline timing, curve semantics, playback, and serialized state all remain mutually consistent.
+
+---
+
+# 20. Segment / Leg & Handoff tests
+
+> 对应需求文档 §68 与设计文档 §7。覆盖：timebar 加腿（append）、View 中 stub 表现、停留腿、Handoff 三模式、多段端点同步。
+
+## TC-LEG-001 — Add leg via timebar append
+
+**Given:** An actor M17 with one existing Move Segment (leg A) ending at node N1.
+
+**When:** User clicks 「+ 加腿」on M17's track.
+
+**Expected:**
+- A new leg B is appended after leg A.
+- `legB.startNode === legA.endNode` (shared handoff point).
+- `handoff.mode === 'stop'` by default.
+- `legB` has a default duration placeholder > 0.
+- `legB` path default = short straight stub from shared point along leg A's end tangent.
+- `legB` is auto-selected; its path is highlighted in Director View.
+
+**Automation:** Click + button; assert Director State has new segment with `startNode == prev endNode` and a 2-point stub.
+
+---
+
+## TC-LEG-002 — New leg appears as short stub in Director View
+
+**Given:** After TC-LEG-001, leg B exists with a stub.
+
+**Expected:**
+- Director View renders leg B as a straight line between the sharedPoint and a stub end offset by a small distance along leg A's end tangent.
+- The stub end is draggable; dragging it reshapes leg B only.
+- No extra global path is created for other legs.
+
+**Automation:** Assert canvas contains a new line anchored at sharedPoint; drag its end and assert only `legB.points` changed.
+
+---
+
+## TC-LEG-003 — Stub dragged onto start becomes dwell/hold leg
+
+**Given:** A newly added leg B with a stub.
+
+**When:** User drags leg B's stub end point back onto the sharedPoint (coincident).
+
+**Expected:**
+- `legB` becomes zero-length (dwell): object stays at sharedPoint for `legB.duration`.
+- Director View shows a hold ring marker at sharedPoint instead of a line.
+- Playback: object pauses at sharedPoint during leg B, then continues with the next leg.
+
+**Automation:** Drag end onto start; assert `legB` is degenerate (start == end) and a hold marker is rendered.
+
+---
+
+## TC-HANDOFF-001 — Default handoff mode is stop
+
+**Given:** Two consecutive legs A→B sharing a handoff.
+
+**Expected:**
+- `handoff.mode === 'stop'` by default.
+- Playback velocity at junction: leg A eases to ~0 at end; leg B eases from 0 at start (object pauses).
+
+**Automation:** Solve at times around the junction; assert speed dips near zero.
+
+---
+
+## TC-HANDOFF-002 — smooth mode links tangents and keeps velocity continuous
+
+**Given:** Handoff between A and B, mode set to `smooth`.
+
+**When:** User drags the shared tangent handle in Director View.
+
+**Expected:**
+- The tangent handle rotates both leg A's outgoing tangent and leg B's incoming tangent together (linked).
+- Playback speed at junction stays continuous (no pause).
+
+**Automation:** Set mode `smooth`; drag handle; assert tangents of both legs are symmetric and speed is continuous.
+
+---
+
+## TC-HANDOFF-003 — cut mode decouples next leg start
+
+**Given:** Handoff between A and B, mode set to `cut`.
+
+**When:** User moves leg A's end point.
+
+**Expected:**
+- `legB`'s start point does NOT move (decoupled).
+- A dashed connector indicates discontinuity; object may teleport at junction.
+
+**Automation:** Move A end; assert `legB.startNode` position unchanged.
+
+---
+
+## TC-SYNC-001 — Dragging shared endpoint updates both legs
+
+**Given:** Consecutive legs A→B sharing handoff point H.
+
+**When:** User drags H in Director View.
+
+**Expected:**
+- `legA`'s last point and `legB`'s first point both move to the new position (single source of truth).
+- No desync between A end and B start.
+
+**Automation:** Read `A.end` and `B.start` before/after drag; assert both equal the new H position.
+
+---
+
+## TC-SYNC-002 — Only shared point moves; other points stay
+
+**Given:** TC-SYNC-001 precondition.
+
+**When:** Drag H by delta.
+
+**Expected:**
+- `legA`'s points before H and `legB`'s points after H retain their original absolute positions (only the shared point changed; legs may stretch at junction).
+- (Modifier) rigid-translate-downstream moves all of `legB`'s remaining points by delta.
+
+**Automation:** Record all non-shared points; assert unchanged except the shared point (and downstream points only under the modifier).
+
+---
+
+## TC-SYNC-003 — smooth tangent linkage
+
+**Given:** Handoff mode `smooth`.
+
+**When:** Rotate the tangent handle.
+
+**Expected:**
+- `legA` outgoing tangent angle == `legB` incoming tangent angle (linked).
+- Switching to `stop` unlinks them (each independent).
+
+**Automation:** Set `smooth`, rotate, assert equality; set `stop`, assert the two can differ.
+
+---
+
+## TC-SYNC-004 — cut decoupling cross-check
+
+**Given:** Handoff mode `cut`.
+
+**When:** Drag H.
+
+**Expected:**
+- `legA` end moves; `legB` start stays (cross-check of TC-HANDOFF-003).
+- Invariant `A.end == B.start` is NOT enforced under `cut`.
+
+**Automation:** Assert no equality constraint is enforced between A end and B start.

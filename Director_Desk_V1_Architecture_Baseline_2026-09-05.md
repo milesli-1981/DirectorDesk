@@ -3053,3 +3053,53 @@ PREVIS
 7. Timeline
 8. 跑通 M17 Killer Test
 ```
+
+---
+
+# 68. Segment / Leg 与 Handoff（2026-09-07 更新）
+
+> 本节将 V1.20 还原后的"加腿 / 多段连接"交互规则上升为需求。对应设计文档 `Director_Desk_Camera_Archetypes_Design_2026-09-07.md` §7，测试用例见 `Director_Desk_Automation_Test_Cases_V1.md` §20。
+
+## 68.1 加 Leg：仅 append 一种入口
+
+- timebar 每条对象轨道末尾提供「+ 加腿」入口，点击 = append 一条新 leg。
+- **取消**"在播放头拆分 / 中间插入"的复杂操作（易破坏空间连续）；中间插入如需，后续单独实现为简单的 split 当前腿。
+- 新 leg 默认：
+  - 起点锚定前腿终点（共享 handoff 点）；
+  - handoff 模式默认 `stop`；
+  - 默认时长占位（如 2s）；
+  - 路径在 Director View 中为一段短直线 stub。
+
+## 68.2 新 Leg 在 Director View 的表现
+
+- 默认一段短直线 stub：起点 = 共享 handoff 点，终点 = 前腿终点沿原方向偏移一小段。
+- 点「+」后 stub 立即出现并自动选中；用户拖终点 / 加折点塑形（与编辑任何已有 leg 一致）。
+- 终点拖回起点 = 停留腿（hold）：object 在原地待 `time` 秒，View 用环标记表示，不画线。
+
+## 68.3 timebar ↔ View 选中联动
+
+- timebar 每条 leg ↔ Director View 一条 path，一一对应。
+- 点 timebar 的 leg → View 高亮对应 path；点 View 的 path → timebar 选中对应 leg。
+- 新加的 leg 默认处于双向选中态。
+
+## 68.4 Handoff 三模式
+
+- `stop`（默认）：前腿速度降到 0，后腿从 0 起步（停顿再走）。
+- `smooth`：出入切线联动、速度连续（一镜到底）。
+- `cut`：允许位置不连续（瞬移 / 跳切）。
+- **mode 本质是 Speed Curve 边界的便捷配置，不另写物理**：`stop` → 前腿 ease-out + 后腿 ease-in；`smooth` → 边界两端 linear / 互补并锁定切线联动；`cut` → 后腿起点自由。
+
+## 68.5 多段 Leg 端点同步规则（核心需求）
+
+- 交接点 = 前腿终点 === 后腿起点 === **同一份 `sharedPoint`** → 拖任一侧，另一侧自动同步（除非 `cut`）。
+- `cut` 模式下一段起点解耦，拖前腿尾点**不**动后腿头点（允许瞬移）。
+- 仅移动该共享点；两段各自其它点保持原位（可在交接处被拉伸）。修饰键可刚性平移下游整腿（保持形状只换位置）。
+- `smooth` 下交接切线联动（转它则前腿出射 + 后腿入射一起转）；`stop` 下两条切线独立。
+- 中段折点只影响本 leg，无需跨段同步。
+
+## 68.6 验收
+
+- 加腿后 View 立即出现 stub 且双向选中。
+- 拖交接点，前后两段端点始终一致（非 cut）。
+- `cut` 时前后端点可分离，并有不连续提示。
+- `smooth` 切线联动、`stop` 切线独立。
