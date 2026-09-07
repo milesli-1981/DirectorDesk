@@ -3122,6 +3122,17 @@ PREVIS
 - **`Inspector.tsx`**（此前已实现，现可由选中驱动）：选中相机 clip 后可编辑 motion 类型、段级 target / framing / view / side / lens 覆盖、ORBIT / DOLLY / CRANE 参数滑杆、缓动曲线与删除。
 - 验证：`tsc --noEmit` 0 错误、`read_lints` 0 错误、`npm run build` 通过；`.clip.camera` 有可见紫色样式（`#2c2340` + `#8b6fc4`）。
 
+### 69.3 无人机镜头（DRONE）
+
+- **`schema.ts`**：`CameraMotionType` 新增 `DRONE`；`CameraObject` 新增可选 `kind: "ground" | "drone"`（默认 ground，旧存档缺省视为地面机）。
+- **`cameraSolver.ts` `resolveMove`**：`DRONE` 同时应用 `orbitDeg`（绕圈）+ `dollyScale`（推拉）+ `craneHeight`（升降），补上原 motion 缺的「自由空中飞行」（此前 ORBIT / DOLLY / CRANE 各自只动一个自由度）。
+- **`cameraSolver.ts` `placeCamera`**：`kind === "drone"` 的相机叠加 `DRONE_BASE_ALTITUDE`（6m）基础飞行高度，使其不贴地、不受地面约束。
+- **`Inspector.tsx`**：`MOTION_TYPES` 加入 `DRONE`（「默认运镜」下拉与「Add Camera Move」按钮自动包含）；选中 DRONE 段时 Orbit / Dolly / Crane **三个滑杆同时出现**。相机区新增 `Kind`（Ground / Drone）下拉（`updateCamera` patch 增加 `kind`）。
+- **`WorldView.tsx` `CameraProxy`**：`kind === "drone"` 用四旋翼代理（机身 + 四臂 + 旋翼 + 飞行高度指示环）区别于地面机方盒 + 镜头；视锥 / 标签不变。
+- **`directorStore.ts`**：新增 `addDroneCamera`——一键生成航拍机（view=high、lensMm=24、motion=DRONE、kind=drone，并附一段 0–duration/2 的 DRONE 运镜：orbit 180° / dolly ×1.4 / crane +8m）；`addCamera` 显式 `kind: "ground"`。
+- **`ObjectList.tsx`**：Scene Tree 的 CAMERAS 区新增 `＋ DRONE` 按钮（调 `addDroneCamera`）。
+- **`demoShot.ts`**：预置 `CAM_DRONE`（drone 平台）+ 一条 0–12s 的 DRONE 运镜，开箱即见航拍自由飞行。
+
 ---
 
 ## 70. 资产（Asset）模型（2026-09-07 实现落地）

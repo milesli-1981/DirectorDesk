@@ -18,7 +18,7 @@ import {
 } from "../domain/schema";
 import { EaseEditor } from "./EaseEditor";
 
-const MOTION_TYPES: CameraMotionType[] = ["STATIC", "FOLLOW", "ORBIT", "DOLLY", "CRANE"];
+const MOTION_TYPES: CameraMotionType[] = ["STATIC", "FOLLOW", "ORBIT", "DOLLY", "CRANE", "DRONE"];
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -338,6 +338,17 @@ export function Inspector() {
                 ))}
               </select>
             </Field>
+            <Field label="Kind">
+              <select
+                value={camera.kind ?? "ground"}
+                onChange={(event) =>
+                  updateCamera(camera.id, { kind: event.target.value as "ground" | "drone" })
+                }
+              >
+                <option value="ground">Ground</option>
+                <option value="drone">Drone</option>
+              </select>
+            </Field>
             <Field label="Default Motion">
               <select
                 value={camera.motion}
@@ -478,7 +489,7 @@ export function Inspector() {
             </select>
           </Field>
 
-          {move.type === "ORBIT" ? (
+          {move.type === "ORBIT" || move.type === "DRONE" ? (
             <Field label={`Orbit ${move.orbitDeg.toFixed(0)}°`}>
               <input
                 type="range"
@@ -491,7 +502,7 @@ export function Inspector() {
             </Field>
           ) : null}
 
-          {move.type === "DOLLY" ? (
+          {move.type === "DOLLY" || move.type === "DRONE" ? (
             <Field label={`Dolly ×${move.dollyScale.toFixed(2)}`}>
               <input
                 type="range"
@@ -506,7 +517,7 @@ export function Inspector() {
             </Field>
           ) : null}
 
-          {move.type === "CRANE" ? (
+          {move.type === "CRANE" || move.type === "DRONE" ? (
             <Field label={`Crane +${move.craneHeight.toFixed(1)}m`}>
               <input
                 type="range"

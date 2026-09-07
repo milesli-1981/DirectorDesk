@@ -1277,3 +1277,27 @@ This should become the first full regression test.
 ## TC-LOCK-006 — Director View shows LOCKED badge
 **Steps:** Lock an asset and view it in Director View; switch to Camera View.
 **Expected:** A `LOCKED` badge is rendered above the asset in Director View, and is NOT shown in Camera View (helpers are hidden there).
+
+---
+
+# 22. Drone camera (aerial) tests
+
+## TC-DRONE-001 — DRONE move combines orbit + dolly + crane
+**Steps:** Select a camera, set its move type to `DRONE`; set Orbit to 180°, Dolly to ×1.4, Crane to +8m; play or scrub through the move.
+**Expected:** Over the move the camera simultaneously rotates around the target, pulls back (distance ×1.4) and rises (+8m) — all three at once (not one-at-a-time as in ORBIT/DOLLY/CRANE).
+
+## TC-DRONE-002 — Drone platform lifts the camera off the ground
+**Steps:** Create a drone camera (or set a camera's `Kind` to Drone); give it `view: eye_level` (which would put a ground camera at 1.7m).
+**Expected:** The resolved camera position is ~6m above the target (DRONE_BASE_ALTITUDE), not at eye level — it flies.
+
+## TC-DRONE-003 — Add Drone via Scene Tree button
+**Steps:** In Scene Tree CAMERAS section click `＋ DRONE`.
+**Expected:** A new `drone` camera is added (view=high, lens 24mm, motion DRONE) with one DRONE CameraMove pre-filled; it becomes selected and active.
+
+## TC-DRONE-004 — Drone proxy renders as a quadcopter
+**Steps:** In Director View, look at a drone-kind camera proxy.
+**Expected:** It renders as a quadcopter (body + four arms + rotors + a faint altitude ring) rather than the box-and-lens ground proxy; frustum and name label still show.
+
+## TC-DRONE-005 — Switch a ground camera to Drone platform
+**Steps:** Select a ground camera; in Inspector set `Kind` to Drone.
+**Expected:** `camera.kind` becomes `drone`; its proxy switches to the quadcopter rig and its base height lifts (per TC-DRONE-002). Setting it back to Ground restores the box proxy and ground height.

@@ -31,7 +31,8 @@
 - Camera（多机位）
   - 可任意增加机位：`＋ CAMERA`
   - Camera Intent：Target / Framing / View / Side / Lens / 默认 Motion
-  - 每台相机拥有自己的 Camera Track：`STATIC / FOLLOW / ORBIT / DOLLY / CRANE`
+  - 每台相机拥有自己的 Camera Track：`STATIC / FOLLOW / ORBIT / DOLLY / CRANE / DRONE`（DRONE = 同时绕圈 + 升降 + 推拉的自由空中飞行）
+  - 无人机机位：Scene Tree 的 `＋ DRONE` 一键生成航拍机（默认 high 机位 / 24mm / DRONE 运镜）；也可在 Inspector 把任意相机切到 Drone 平台（自带基础飞行高度、不受地面约束），Director View 以四旋翼代理显示
     片段在 Timeline 上拖动改时间、边缘修剪时长、可单独编辑速度曲线
   - 运镜参数：ORBIT 角度、DOLLY 距离系数、CRANE 高度
   - Director View 显示相机代理、视锥与整段运镜轨迹

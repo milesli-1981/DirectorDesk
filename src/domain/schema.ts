@@ -128,7 +128,7 @@ export type CameraView = "eye_level" | "low" | "high" | "ground" | "overhead";
 
 export type CameraSide = "front" | "front_3_4" | "side" | "back_3_4" | "back";
 
-export type CameraMotionType = "STATIC" | "FOLLOW" | "ORBIT" | "DOLLY" | "CRANE";
+export type CameraMotionType = "STATIC" | "FOLLOW" | "ORBIT" | "DOLLY" | "CRANE" | "DRONE";
 
 /** Camera 是真正的独立 3D Object：FRAMING / VIEW / LENS / MOTION / TARGET。 */
 export interface CameraObject {
@@ -142,6 +142,8 @@ export interface CameraObject {
   lensMm: number;
   /** 没有 Camera Move Clip 时使用的默认运镜。 */
   motion: CameraMotionType;
+  /** 相机平台：ground = 地面机（默认）；drone = 无人机，自带基础飞行高度、不受地面约束。 */
+  kind?: "ground" | "drone";
 }
 
 /**
@@ -245,6 +247,7 @@ export const MOTION_LABELS: Record<CameraMotionType, string> = {
   ORBIT: "ORBIT",
   DOLLY: "DOLLY",
   CRANE: "CRANE",
+  DRONE: "DRONE",
 };
 
 export const MOTION_HINTS: Record<CameraMotionType, string> = {
@@ -253,6 +256,7 @@ export const MOTION_HINTS: Record<CameraMotionType, string> = {
   ORBIT: "跟随并绕目标旋转。",
   DOLLY: "推拉：改变与目标的距离。",
   CRANE: "升降：改变机位高度。",
+  DRONE: "无人机自由飞行：同时绕圈 + 升降 + 推拉。",
 };
 
 export const LENS_OPTIONS = [24, 35, 50, 85];

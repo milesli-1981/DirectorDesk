@@ -168,6 +168,7 @@ interface ShotTemplate {
 | `vertigo` | 眩晕推拉 | DOLLY_ZOOM | MS | OBJECT | 推拉 + 反向变焦 |
 | `product_turntable` | 产品转盘 | ORBIT | EYE / CU | OBJECT | 环绕静物特写 |
 | `establishing` | 环境建立 | CRANE / ORBIT | EWS / OVERHEAD | LOCATION | 拉开看全貌 |
+| `aerial_drone` | 无人机自由飞行 | DRONE | WIDE / HIGH / ARC | OBJECT | 边绕边升边拉的一镜自由飞行（代码已实现 `DRONE` motion） |
 
 ### 3.3 模板示例（完整字段）
 ```json

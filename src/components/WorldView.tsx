@@ -637,6 +637,59 @@ function CameraFrustum({ cameraId }: { cameraId: string }) {
   );
 }
 
+function DroneRig({
+  color,
+  selected,
+  active,
+  onSelect,
+}: {
+  color: string;
+  selected: boolean;
+  active: boolean;
+  onSelect: () => void;
+}) {
+  const rotors: Array<[number, number, number]> = [
+    [0.34, 0.12, 0.34],
+    [0.34, 0.12, -0.34],
+    [-0.34, 0.12, 0.34],
+    [-0.34, 0.12, -0.34],
+  ];
+  return (
+    <group>
+      <mesh
+        onPointerDown={(event) => {
+          event.stopPropagation();
+          onSelect();
+        }}
+      >
+        <boxGeometry args={[0.3, 0.16, 0.3]} />
+        <meshStandardMaterial
+          color={selected ? "#ffffff" : color}
+          emissive={color}
+          emissiveIntensity={active ? 0.35 : 0.12}
+        />
+      </mesh>
+      {rotors.map((pos, index) => (
+        <group key={index} position={pos}>
+          <mesh rotation={[0, 0, Math.PI / 2]}>
+            <cylinderGeometry args={[0.02, 0.02, 0.5, 8]} />
+            <meshStandardMaterial color="#3a4654" />
+          </mesh>
+          <mesh position={[0, 0.08, 0]}>
+            <cylinderGeometry args={[0.13, 0.13, 0.04, 12]} />
+            <meshStandardMaterial color="#cfd8e3" />
+          </mesh>
+        </group>
+      ))}
+      {/* 飞行高度指示环 */}
+      <mesh position={[0, -0.35, 0]} rotation={[Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[0.34, 0.46, 24]} />
+        <meshBasicMaterial color={color} transparent opacity={0.3} />
+      </mesh>
+    </group>
+  );
+}
+
 function CameraProxy({ cameraId }: { cameraId: string }) {
   const camera = useDirectorStore((s) => s.state.cameras.find((c) => c.id === cameraId));
   const isSelected = useDirectorStore(
@@ -662,24 +715,35 @@ function CameraProxy({ cameraId }: { cameraId: string }) {
 
   return (
     <group ref={groupRef}>
-      <mesh
-        onPointerDown={(event) => {
-          event.stopPropagation();
-          selectCamera(cameraId);
-        }}
-      >
-        <boxGeometry args={[0.55, 0.38, 0.72]} />
-        <meshStandardMaterial
-          color={isSelected ? "#ffffff" : camera.color}
-          emissive={camera.color}
-          emissiveIntensity={isActive ? 0.35 : 0.12}
+      {camera.kind === "drone" ? (
+        <DroneRig
+          color={camera.color}
+          selected={isSelected}
+          active={isActive}
+          onSelect={() => selectCamera(cameraId)}
         />
-      </mesh>
-      {/* 镜头朝向本地 +Z（普通对象的 lookAt 约定） */}
-      <mesh position={[0, 0, 0.52]} rotation={[Math.PI / 2, 0, 0]}>
-        <cylinderGeometry args={[0.17, 0.21, 0.34, 16]} />
-        <meshStandardMaterial color="#1b2531" roughness={0.4} metalness={0.4} />
-      </mesh>
+      ) : (
+        <>
+          <mesh
+            onPointerDown={(event) => {
+              event.stopPropagation();
+              selectCamera(cameraId);
+            }}
+          >
+            <boxGeometry args={[0.55, 0.38, 0.72]} />
+            <meshStandardMaterial
+              color={isSelected ? "#ffffff" : camera.color}
+              emissive={camera.color}
+              emissiveIntensity={isActive ? 0.35 : 0.12}
+            />
+          </mesh>
+          {/* 镜头朝向本地 +Z（普通对象的 lookAt 约定） */}
+          <mesh position={[0, 0, 0.52]} rotation={[Math.PI / 2, 0, 0]}>
+            <cylinderGeometry args={[0.17, 0.21, 0.34, 16]} />
+            <meshStandardMaterial color="#1b2531" roughness={0.4} metalness={0.4} />
+          </mesh>
+        </>
+      )}
       <CameraFrustum cameraId={cameraId} />
       <Html position={[0, 0.62, 0]} center style={{ pointerEvents: "none" }} zIndexRange={[22, 0]}>
         <span className="obj-label" style={{ color: camera.color }}>

@@ -35,6 +35,9 @@ const VIEW_HEIGHT: Record<CameraView, number> = {
   overhead: 0,
 };
 
+/** 无人机平台相对基准机位叠加的基础飞行高度（米）。 */
+const DRONE_BASE_ALTITUDE = 6;
+
 /** 相对目标朝向的机位方位角：0 = 正前方，180 = 正后方。 */
 const SIDE_ANGLE: Record<CameraSide, number> = {
   front: 0,
@@ -97,11 +100,12 @@ function placeCamera(
   const baseDistance = FRAMING_DISTANCE[framing] * (options.distanceScale ?? 1);
   const yaw = facing + ((SIDE_ANGLE[side] + (options.orbitDeg ?? 0)) * Math.PI) / 180;
 
+  const droneLift = camera.kind === "drone" ? DRONE_BASE_ALTITUDE : 0;
   let horizontal = baseDistance;
-  let height = VIEW_HEIGHT[view] + (options.craneHeight ?? 0);
+  let height = VIEW_HEIGHT[view] + droneLift + (options.craneHeight ?? 0);
   if (view === "overhead") {
     horizontal = baseDistance * 0.3;
-    height = baseDistance + 4 + (options.craneHeight ?? 0);
+    height = baseDistance + 4 + droneLift + (options.craneHeight ?? 0);
   }
 
   const position: Vec3 = [
@@ -143,9 +147,9 @@ function resolveMove(
     view: move.view,
     side: move.side,
     lensMm: move.lensMm,
-    orbitDeg: move.type === "ORBIT" ? move.orbitDeg * progress : 0,
-    distanceScale: move.type === "DOLLY" ? 1 + (move.dollyScale - 1) * progress : 1,
-    craneHeight: move.type === "CRANE" ? move.craneHeight * progress : 0,
+    orbitDeg: move.type === "ORBIT" || move.type === "DRONE" ? move.orbitDeg * progress : 0,
+    distanceScale: move.type === "DOLLY" || move.type === "DRONE" ? 1 + (move.dollyScale - 1) * progress : 1,
+    craneHeight: move.type === "CRANE" || move.type === "DRONE" ? move.craneHeight * progress : 0,
   });
 
   return { position, target, lensMm, fovDeg, move };

@@ -115,9 +115,10 @@ interface DirectorStore {
   setSegmentEase: (segmentId: string, ease: EaseCurve) => void;
 
   addCamera: () => void;
+  addDroneCamera: () => void;
   updateCamera: (
     cameraId: string,
-    patch: Partial<Pick<CameraObject, "targetId" | "framing" | "view" | "side" | "lensMm" | "motion" | "name">>,
+    patch: Partial<Pick<CameraObject, "targetId" | "framing" | "view" | "side" | "lensMm" | "motion" | "name" | "kind">>,
   ) => void;
   addCameraMove: (cameraId: string, type: CameraMotionType) => void;
   setCameraMoveTime: (moveId: string, start: number, end: number) => void;
@@ -766,6 +767,7 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
         side: "back_3_4",
         lensMm: 50,
         motion: "FOLLOW",
+        kind: "ground",
       };
       set({
         state: {
@@ -775,6 +777,51 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
         },
         selectedKind: "camera",
         selectedId: id,
+        activeCameraId: store.activeCameraId ?? id,
+      });
+    },
+
+    addDroneCamera: () => {
+      const store = get();
+      const { state } = store;
+      const id = nextCameraId(state);
+      const camera: CameraObject = {
+        id,
+        name: id,
+        color: CAMERA_COLORS[state.cameras.length % CAMERA_COLORS.length],
+        targetId: state.objects.find((object) => object.type === "actor")?.id ?? state.objects[0]?.id ?? "",
+        framing: "wide",
+        view: "high",
+        side: "back_3_4",
+        lensMm: 24,
+        motion: "DRONE",
+        kind: "drone",
+      };
+      const start = 0;
+      const end = round1(Math.min(state.duration, start + Math.max(2, state.duration * 0.5)));
+      const move: CameraMove = {
+        id: nextCameraMoveId(state, id),
+        camera: id,
+        type: "DRONE",
+        timeStart: start,
+        timeEnd: end,
+        orbitDeg: 180,
+        dollyScale: 1.4,
+        craneHeight: 8,
+        ease: [0.42, 0, 0.58, 1],
+      };
+      const cameraMoves = [...state.cameraMoves, move];
+      set({
+        state: {
+          ...state,
+          revision: state.revision + 1,
+          cameras: [...state.cameras, camera],
+          cameraMoves,
+          cameraJunctions: reconcileCameraJunctions(cameraMoves, state.cameraJunctions),
+        },
+        selectedKind: "camera",
+        selectedId: id,
+        selectedItem: move.id,
         activeCameraId: store.activeCameraId ?? id,
       });
     },

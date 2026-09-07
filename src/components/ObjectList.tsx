@@ -10,6 +10,7 @@ export function ObjectList() {
   const selectObject = useDirectorStore((s) => s.selectObject);
   const selectCamera = useDirectorStore((s) => s.selectCamera);
   const addCamera = useDirectorStore((s) => s.addCamera);
+  const addDroneCamera = useDirectorStore((s) => s.addDroneCamera);
   const addAsset = useDirectorStore((s) => s.addAsset);
   const updateAsset = useDirectorStore((s) => s.updateAsset);
 
@@ -55,6 +56,9 @@ export function ObjectList() {
       <div className="st cam-st">CAMERAS</div>
       <button type="button" className="obj addobj" onClick={addCamera}>
         ＋ CAMERA
+      </button>
+      <button type="button" className="obj addobj" onClick={addDroneCamera}>
+        ＋ DRONE
       </button>
       <div id="cameraList">
         {cameras.map((camera) => (
