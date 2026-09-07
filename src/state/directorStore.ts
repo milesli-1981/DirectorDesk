@@ -16,10 +16,11 @@ import {
   IntentAction,
   MoveSegment,
   PathPoint,
+  StageManifest,
   Vec2,
   ViewMode,
 } from "../domain/schema";
-import { createDemoState } from "../engine/demoShot";
+import { createBlankState, createDemoState } from "../engine/demoShot";
 import { normalizePathPointModes, pathInsertIndex } from "../engine/path";
 import { contentEndTime } from "../engine/timeline";
 import { ASSET_PRESETS } from "../engine/assetPresets";
@@ -28,13 +29,34 @@ import { AssetCategory, DirectorObject } from "../domain/schema";
 
 const CAMERA_COLORS = ["#c792ea", "#67a7ff", "#63d39b", "#f0a35a", "#ff7b91", "#8ad1ff"];
 
-// v2：v1 中保存的场景把 framing / view / side / lens 写死在 CameraMove 上（demo 旧数据），
-// 会静默屏蔽相机级 Intent。升版以放弃这些旧存档，让修正后的 demo 生效。
-const STORAGE_KEY = "director-desk-scene-v2";
+// 持久化 v3：每张场景页独立 localStorage key，由片场 manifest 索引。
+const MANIFEST_KEY = "director-desk-manifest-v3";
+const sceneKey = (id: string) => `director-desk-scene-${id}-v3`;
+const LEGACY_KEY = "director-desk-scene-v2";
 
-function loadScene(): DirectorState | null {
+function loadManifest(): StageManifest | null {
   try {
-    const raw = typeof localStorage !== "undefined" ? localStorage.getItem(STORAGE_KEY) : null;
+    const raw = typeof localStorage !== "undefined" ? localStorage.getItem(MANIFEST_KEY) : null;
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as StageManifest;
+    if (!parsed || !Array.isArray(parsed.order) || !parsed.activeSceneId) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function saveManifest(manifest: StageManifest): void {
+  try {
+    if (typeof localStorage !== "undefined") localStorage.setItem(MANIFEST_KEY, JSON.stringify(manifest));
+  } catch {
+    /* ignore */
+  }
+}
+
+function loadSceneState(id: string): DirectorState | null {
+  try {
+    const raw = typeof localStorage !== "undefined" ? localStorage.getItem(sceneKey(id)) : null;
     if (!raw) return null;
     const parsed = JSON.parse(raw) as DirectorState;
     if (!parsed || !Array.isArray(parsed.objects) || !Array.isArray(parsed.cameraMoves)) return null;
@@ -44,20 +66,75 @@ function loadScene(): DirectorState | null {
   }
 }
 
-function saveScene(state: DirectorState): void {
+function saveSceneState(id: string, state: DirectorState): void {
   try {
-    if (typeof localStorage !== "undefined") {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    }
+    if (typeof localStorage !== "undefined") localStorage.setItem(sceneKey(id), JSON.stringify(state));
   } catch {
-    /* ignore quota / serialization errors */
+    /* ignore */
   }
+}
+
+function removeSceneState(id: string): void {
+  try {
+    if (typeof localStorage !== "undefined") localStorage.removeItem(sceneKey(id));
+  } catch {
+    /* ignore */
+  }
+}
+
+function genSceneId(): string {
+  return `SCN_${Date.now().toString(36)}_${Math.floor(Math.random() * 1000)}`;
+}
+
+/**
+ * 启动时装配片场：优先读 manifest；否则迁移旧 v2 单场景，或落一个 demo 场景。
+ * 返回的 activeState 直接作为 store 顶层 `state`（= 当前激活场景页的引用）。
+ */
+function initStage(): { manifest: StageManifest; activeState: DirectorState } {
+  const manifest = loadManifest();
+  if (manifest && manifest.order.length > 0) {
+    const activeId =
+      manifest.activeSceneId && manifest.order.some((t) => t.id === manifest.activeSceneId)
+        ? manifest.activeSceneId
+        : manifest.order[0].id;
+    const activeState = loadSceneState(activeId) ?? createBlankState();
+    return { manifest: { ...manifest, activeSceneId: activeId }, activeState };
+  }
+
+  let state: DirectorState;
+  const legacy =
+    typeof localStorage !== "undefined" ? localStorage.getItem(LEGACY_KEY) : null;
+  if (legacy) {
+    try {
+      const parsed = JSON.parse(legacy) as DirectorState;
+      state =
+        parsed && Array.isArray(parsed.objects) && Array.isArray(parsed.cameraMoves)
+          ? parsed
+          : createDemoState();
+    } catch {
+      state = createDemoState();
+    }
+  } else {
+    state = createDemoState();
+  }
+
+  const id = genSceneId();
+  saveSceneState(id, state);
+  const newManifest: StageManifest = {
+    name: "未命名片场",
+    order: [{ id, name: "场景 1" }],
+    activeSceneId: id,
+  };
+  saveManifest(newManifest);
+  return { manifest: newManifest, activeState: state };
 }
 
 export type SelectionKind = "object" | "camera";
 
 interface DirectorStore {
   state: DirectorState;
+  /** 片场 manifest：场景页索引 + 片场名（数据各自独立存储）。 */
+  manifest: StageManifest;
   currentTime: number;
   playing: boolean;
   zoom: number;
@@ -100,6 +177,16 @@ interface DirectorStore {
   exportScene: () => string;
   importScene: (json: string) => void;
   persist: () => void;
+  // —— 片场 / 场景页管理 ——
+  addScene: () => void;
+  switchScene: (id: string) => void;
+  renameScene: (id: string, name: string) => void;
+  renameStage: (name: string) => void;
+  removeScene: (id: string) => void;
+  duplicateScene: (id: string) => void;
+  reorderScene: (fromId: string, toId: string) => void;
+  exportProject: () => string;
+  importProject: (json: string) => void;
   addPathPoint: (segmentId: string, x: number, z: number) => string | null;
   movePathPoint: (segmentId: string, pointId: string, x: number, z: number) => void;
   moveEndpoint: (segmentId: string, which: "start" | "end", x: number, z: number) => void;
@@ -288,8 +375,10 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
       };
     });
 
+  const init = initStage();
   return {
-    state: loadScene() ?? createDemoState(),
+    state: init.activeState,
+    manifest: init.manifest,
     currentTime: 0,
     playing: false,
     zoom: 1,
@@ -524,6 +613,8 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
         if (!parsed || !Array.isArray(parsed.objects) || !Array.isArray(parsed.cameraMoves)) {
           throw new Error("invalid scene");
         }
+        const activeId = get().manifest.activeSceneId;
+        saveSceneState(activeId, parsed);
         set({
           state: { ...parsed, revision: (parsed.revision ?? 0) + 1 },
           currentTime: 0,
@@ -532,13 +623,215 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
           selectedId: parsed.objects[0]?.id ?? "",
           selectedItem: null,
           selectedPoint: null,
+          radialObjectId: null,
+          activeCameraId: parsed.cameras[0]?.id ?? null,
         });
       } catch (error) {
         console.error("importScene failed", error);
       }
     },
 
-    persist: () => saveScene(get().state),
+    exportProject: () => {
+      const store = get();
+      const scenes: Record<string, DirectorState> = {};
+      for (const tab of store.manifest.order) {
+        scenes[tab.id] =
+          tab.id === store.manifest.activeSceneId
+            ? store.state
+            : loadSceneState(tab.id) ?? createBlankState();
+      }
+      return JSON.stringify({ manifest: store.manifest, scenes }, null, 2);
+    },
+
+    importProject: (json) => {
+      try {
+        const parsed = JSON.parse(json) as {
+          manifest?: StageManifest;
+          scenes?: Record<string, DirectorState>;
+        };
+        if (parsed.manifest && parsed.scenes) {
+          const manifest = parsed.manifest;
+          for (const tab of manifest.order) {
+            const st = parsed.scenes[tab.id];
+            if (st) saveSceneState(tab.id, st);
+          }
+          saveManifest(manifest);
+          const active = loadSceneState(manifest.activeSceneId) ?? createBlankState();
+          set({
+            manifest,
+            state: active,
+            currentTime: 0,
+            playing: false,
+            selectedKind: "object",
+            selectedId: active.objects[0]?.id ?? "",
+            selectedItem: null,
+            selectedPoint: null,
+            radialObjectId: null,
+            activeCameraId: active.cameras[0]?.id ?? null,
+          });
+          return;
+        }
+        // 兼容旧的单场景文件：当作当前场景页的内容替换。
+        const single = parsed as unknown as DirectorState;
+        if (!single || !Array.isArray(single.objects) || !Array.isArray(single.cameraMoves)) {
+          throw new Error("invalid scene");
+        }
+        const activeId = get().manifest.activeSceneId;
+        saveSceneState(activeId, single);
+        set({
+          state: { ...single, revision: (single.revision ?? 0) + 1 },
+          currentTime: 0,
+          playing: false,
+          selectedKind: "object",
+          selectedId: single.objects[0]?.id ?? "",
+          selectedItem: null,
+          selectedPoint: null,
+          radialObjectId: null,
+          activeCameraId: single.cameras[0]?.id ?? null,
+        });
+      } catch (error) {
+        console.error("importProject failed", error);
+      }
+    },
+
+    persist: () => {
+      const store = get();
+      saveSceneState(store.manifest.activeSceneId, store.state);
+      saveManifest(store.manifest);
+    },
+
+    addScene: () => {
+      const store = get();
+      const id = genSceneId();
+      const blank = createBlankState();
+      saveSceneState(id, blank);
+      const manifest: StageManifest = {
+        ...store.manifest,
+        order: [...store.manifest.order, { id, name: `场景 ${store.manifest.order.length + 1}` }],
+        activeSceneId: id,
+      };
+      saveManifest(manifest);
+      set({
+        manifest,
+        state: blank,
+        currentTime: 0,
+        playing: false,
+        selectedKind: "object",
+        selectedId: "",
+        selectedItem: null,
+        selectedPoint: null,
+        radialObjectId: null,
+        viewMode: "director",
+        activeCameraId: null,
+      });
+    },
+
+    switchScene: (id) => {
+      const store = get();
+      if (id === store.manifest.activeSceneId) return;
+      const state = loadSceneState(id);
+      if (!state) return;
+      const manifest: StageManifest = { ...store.manifest, activeSceneId: id };
+      saveManifest(manifest);
+      set({
+        manifest,
+        state,
+        currentTime: 0,
+        playing: false,
+        selectedKind: "object",
+        selectedId: state.objects[0]?.id ?? "",
+        selectedItem: null,
+        selectedPoint: null,
+        radialObjectId: null,
+        activeCameraId: state.cameras[0]?.id ?? null,
+      });
+    },
+
+    renameScene: (id, name) => {
+      const store = get();
+      const manifest: StageManifest = {
+        ...store.manifest,
+        order: store.manifest.order.map((t) => (t.id === id ? { ...t, name } : t)),
+      };
+      saveManifest(manifest);
+      set({ manifest });
+    },
+
+    renameStage: (name) => {
+      const store = get();
+      const manifest: StageManifest = { ...store.manifest, name };
+      saveManifest(manifest);
+      set({ manifest });
+    },
+
+    removeScene: (id) => {
+      const store = get();
+      if (store.manifest.order.length <= 1) return; // 至少保留一个场景页
+      const remaining = store.manifest.order.filter((t) => t.id !== id);
+      removeSceneState(id);
+      let state = store.state;
+      let activeSceneId = store.manifest.activeSceneId;
+      if (id === store.manifest.activeSceneId) {
+        activeSceneId = remaining[0].id;
+        state = loadSceneState(activeSceneId) ?? createBlankState();
+      }
+      const manifest: StageManifest = { ...store.manifest, order: remaining, activeSceneId };
+      saveManifest(manifest);
+      if (id === store.manifest.activeSceneId) {
+        set({
+          manifest,
+          state,
+          selectedKind: "object",
+          selectedId: state.objects[0]?.id ?? "",
+          selectedItem: null,
+          selectedPoint: null,
+          radialObjectId: null,
+          activeCameraId: state.cameras[0]?.id ?? null,
+        });
+      } else {
+        set({ manifest });
+      }
+    },
+
+    duplicateScene: (id) => {
+      const store = get();
+      const src =
+        id === store.manifest.activeSceneId ? store.state : loadSceneState(id) ?? store.state;
+      const newId = genSceneId();
+      const copy: DirectorState = { ...src, revision: (src.revision ?? 0) + 1 };
+      saveSceneState(newId, copy);
+      const idx = store.manifest.order.findIndex((t) => t.id === id);
+      const tab = store.manifest.order[idx];
+      const newTab = { id: newId, name: `${tab?.name ?? "场景"} 副本` };
+      const order = [...store.manifest.order];
+      order.splice(idx + 1, 0, newTab);
+      const manifest: StageManifest = { ...store.manifest, order, activeSceneId: newId };
+      saveManifest(manifest);
+      set({
+        manifest,
+        state: copy,
+        selectedKind: "object",
+        selectedId: copy.objects[0]?.id ?? "",
+        selectedItem: null,
+        selectedPoint: null,
+        radialObjectId: null,
+        activeCameraId: copy.cameras[0]?.id ?? null,
+      });
+    },
+
+    reorderScene: (fromId, toId) => {
+      if (fromId === toId) return;
+      const store = get();
+      const order = [...store.manifest.order];
+      const fromIdx = order.findIndex((t) => t.id === fromId);
+      const toIdx = order.findIndex((t) => t.id === toId);
+      if (fromIdx < 0 || toIdx < 0) return;
+      const [moved] = order.splice(fromIdx, 1);
+      order.splice(toIdx, 0, moved);
+      const manifest: StageManifest = { ...store.manifest, order };
+      saveManifest(manifest);
+      set({ manifest });
+    },
 
     addPathPoint: (segmentId, x, z) => {
       const store = get();
@@ -1002,8 +1295,8 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
     },
 
     reset: () =>
-      set({
-        state: createDemoState(),
+      set((store) => ({
+        state: { ...createDemoState(), revision: store.state.revision + 1 },
         currentTime: 0,
         playing: false,
         zoom: 1,
@@ -1016,6 +1309,6 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
         activeCameraId: "CAM_A",
         viewLocked: false,
         dragging: false,
-      }),
+      })),
   };
 });

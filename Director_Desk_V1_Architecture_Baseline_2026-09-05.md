@@ -3197,3 +3197,33 @@ PREVIS
 - `addCameraMove` 不复制相机级值，新段默认继承。
 - **已修问题**：demo 旧数据把四项写死在 `CameraMove` 上，使相机级 `Framing / View / Side / Lens` 在整条时间轴上静默失效。现 `MOVE_CAM_A_01` 全部留空、`MOVE_CAM_A_02` 仅保留 `framing: "close_up"`。
 - `STORAGE_KEY` 由 `director-desk-scene-v1` 升为 `director-desk-scene-v2`：旧存档含写死的段级值会屏蔽上述修复，升版以放弃旧存档（如需保留请先 `Export`）。
+
+---
+
+## 73. 片场 / 场景页（多场景）+ 持久化（2026-09-07 实现落地）
+
+> 测试见 `Director_Desk_Automation_Test_Cases_V1.md` §22。
+
+### 73.1 数据模型
+- 单层结构：**片场（Stage）只是工程统称 + 场景页索引（manifest），不持有场景数据**；**场景页（Scene Page） = 一个独立的 `DirectorState`**。
+- `StageManifest { name: string; order: SceneTab[]; activeSceneId: string }`，`SceneTab { id: string; name: string }`。
+- **兼容性技巧**：store 顶层 `state` 仍是「当前激活场景页的 `DirectorState` 引用」。所有既有组件 / 动作都不改——切场景时只把 `state` 指向另一张场景页的对象即可。因此新增多场景**没有改动 40 多个既有动作**。
+
+### 73.2 持久化（每页独立 key）
+- 持久化 v3：每张场景页独立写 `localStorage`（`director-desk-scene-<id>-v3`），由 manifest（`director-desk-manifest-v3`）索引。
+- 启动 `initStage()`：优先读 manifest；无则迁移旧 v2 单场景存档（`director-desk-scene-v2`）为「一个场景页的片场」；再无则落一个 demo 场景。
+- 自动保存：订阅监听「`state.revision`（场景页内容）+ manifest 签名（片场名 / 激活 id / 各 tab 的 id:name）」任一变化 → `persist()` 同时写当前场景页 key 与 manifest。**隔离保证**：编辑某场景页只写它自己的 key；切走前其编辑已随 revision 变化落盘，不会丢。
+
+### 73.3 场景页操作（store 动作）
+- `addScene`：新建空白 `DirectorState`（`createBlankState`），追加到 manifest 末尾并激活。
+- `switchScene(id)`：从对应 key 载入 `state`、重置选择（避免悬空引用）、写 manifest。
+- `renameScene(id, name)` / `renameStage(name)`：仅改 manifest（名字），各自写盘。
+- `removeScene(id)`：删 key；若删的是激活页则激活余下第一页；**至少保留一个**。
+- `duplicateScene(id)`：深拷贝当前/目标场景页（`revision+1`），插入到其后并激活。
+- `reorderScene(fromId, toId)`：manifest `order` 数组移动。
+
+### 73.4 UI（`SceneTabs.tsx`）
+- 顶部 30px 栏：左侧可编辑片场名输入框 + 右侧横向 tab 条。
+- tab：单击切换、双击内联重命名、HTML5 拖拽排序；行内 `⧉` 复制、`×` 删除；末尾 `＋` 新建。
+- `.app` grid 由 3 行扩为 4 行（场景栏 / header / 主区 / Timeline），各面板显式 `grid-row`，避免自动布局错位。
+- 顶栏 Export / Import 改为整片场（`exportProject` / `importProject`：导出 `{ manifest, scenes }`；导入时若含 `scenes` 走整片场恢复，否则兼容旧单场景文件、当作当前场景页替换）。

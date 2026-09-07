@@ -54,7 +54,42 @@ function TimelineReadout() {
 
 function Playhead() {
   const currentTime = useDirectorStore((s) => s.currentTime);
-  return <div className="ph" style={{ left: LABEL_WIDTH + currentTime * PX_PER_SEC }} />;
+  const setTime = useDirectorStore((s) => s.setTime);
+  const duration = useDirectorStore((s) => s.state.duration);
+  const gripRef = useRef<HTMLDivElement>(null);
+
+  // 把屏幕 x 换算成时间，并正确计入横向滚动（scrollLeft）。
+  const scrubToClientX = (clientX: number) => {
+    const scrollEl = gripRef.current?.closest(".scroll") as HTMLElement | null;
+    if (!scrollEl) return;
+    const rect = scrollEl.getBoundingClientRect();
+    const x = clientX - rect.left + scrollEl.scrollLeft - LABEL_WIDTH;
+    setTime(clamp(x / PX_PER_SEC, 0, duration));
+  };
+
+  // 可拖动的抓手：按下后捕获指针，移动即定位播放头。
+  const onGripDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    event.stopPropagation();
+    event.preventDefault();
+    const grip = event.currentTarget;
+    grip.setPointerCapture?.(event.pointerId);
+    const move = (next: PointerEvent) => scrubToClientX(next.clientX);
+    const up = () => {
+      grip.removeEventListener("pointermove", move);
+      grip.removeEventListener("pointerup", up);
+      grip.removeEventListener("pointercancel", up);
+    };
+    grip.addEventListener("pointermove", move);
+    grip.addEventListener("pointerup", up);
+    grip.addEventListener("pointercancel", up);
+  };
+
+  return (
+    <div className="ph" style={{ left: LABEL_WIDTH + currentTime * PX_PER_SEC }}>
+      <div className="ph-hit" ref={gripRef} onPointerDown={onGripDown} title="拖动以定位播放头" />
+      <div className="ph-grip" />
+    </div>
+  );
 }
 
 export function Timeline() {

@@ -1301,3 +1301,39 @@ This should become the first full regression test.
 ## TC-DRONE-005 — Switch a ground camera to Drone platform
 **Steps:** Select a ground camera; in Inspector set `Kind` to Drone.
 **Expected:** `camera.kind` becomes `drone`; its proxy switches to the quadcopter rig and its base height lifts (per TC-DRONE-002). Setting it back to Ground restores the box proxy and ground height.
+
+---
+
+# 22. Stage / Scene-page (multi-scene) tests
+
+## TC-STAGE-001 — Add scene page starts blank
+**Steps:** In the scene-tab bar click `＋`.
+**Expected:** A new tab appears (named `场景 N`), becomes active, and the World / Timeline / Inspector are empty (a fresh `DirectorState` from `createBlankState`).
+
+## TC-STAGE-002 — Switch scene page preserves each page
+**Steps:** On page A, add an asset and move it; switch to page B (blank), then back to A.
+**Expected:** A still shows the asset at its moved position — each page is stored under its own localStorage key and is not overwritten by B.
+
+## TC-STAGE-003 — Rename scene page
+**Steps:** Double-click the active tab, type a new name, press Enter.
+**Expected:** The tab label updates; `renameScene` wrote the new name into the manifest.
+
+## TC-STAGE-004 — Rename stage (片场名)
+**Steps:** Edit the stage-name input on the left of the tab bar.
+**Expected:** The field reflects the new name; `renameStage` persists it to the manifest.
+
+## TC-STAGE-005 — Delete keeps at least one page
+**Steps:** With a single page, click its `×`; then with multiple pages, delete the active one.
+**Expected:** Single-page delete is ignored (at least one remains). Multi-page delete removes the key and activates another page.
+
+## TC-STAGE-006 — Duplicate scene page
+**Steps:** Click `⧉` on a page that has assets.
+**Expected:** A copy (`<name> 副本`) is inserted right after and becomes active; editing the copy does not change the original.
+
+## TC-STAGE-007 — Drag to reorder tabs
+**Steps:** Drag one tab onto another.
+**Expected:** `reorderScene` reorders `manifest.order`; the new order persists across reload.
+
+## TC-STAGE-008 — Persistence across reload
+**Steps:** Add two pages, edit each, reload the app (or Export then Import the stage JSON).
+**Expected:** The manifest + both scene pages round-trip; active page and edits survive. A legacy v2 single-scene localStorage is migrated into a one-page stage on first load.

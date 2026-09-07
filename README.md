@@ -54,8 +54,12 @@
   - 摆放碰撞：set ↔ set 重叠时沿最小穿透轴自动分离到刚好不碰（agent 不参与）。
   - demo 预置 `BLD_A`（楼）、`TBL_01`（桌）演示环境，以及 `BLD_B`（刻意挡在 CAM_A → M17 视线上）演示遮挡。
   - 资产可锁定：Scene Tree 行内或 Inspector 一键 `Lock`，锁定后不可拖拽移动（防误触），仍可点选解锁；Director View 中显示 `LOCKED` 标记。
+- 片场 / 场景页（多场景）
+  - 顶部 tab 栏管理「场景页」：新建（空白）/ 切换 / 双击重命名 / × 删除（保留至少一个）/ ⧉ 复制 / 拖动排序。
+  - 片场名可在 tab 栏左侧编辑（仅作工程统称，不另成层）。
 - 场景持久化
-  - localStorage 自动保存（revision 触发）+ 顶栏 Export / Import JSON。
+  - 每张场景页独立 localStorage key（由片场 manifest 索引），切换不丢页；旧的 v2 单场景存档首次启动自动迁移为「一个场景页的片场」。
+  - 顶栏 Export / Import 改为整片场（manifest + 全部场景页 JSON）；旧的单个场景文件仍可导入（当作当前场景页替换）。自动保存由「场景页内容 revision + 片场结构」任一变化触发。
 - 运动求解
   - 位置 = Segment（路径里程 × 速度曲线）
   - 路径被静态环境（set 资产）阻挡时自动绕行：拐角可见图 + Dijkstra；端点落在障碍内会推到外边缘

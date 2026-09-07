@@ -194,6 +194,24 @@ export interface DirectorState {
   cameraJunctions: CameraJunction[];
 }
 
+/* ------------------------------------------------------ Stage / Scenes */
+
+/** 场景页（tab）：一个独立 DirectorState 的索引项。 */
+export interface SceneTab {
+  id: string;
+  name: string;
+}
+
+/**
+ * 片场 = 工程统称 + 场景页索引。
+ * 数据不在此持有，每张场景页各自独立存储（见 directorStore 的 per-page key）。
+ */
+export interface StageManifest {
+  name: string;
+  order: SceneTab[];
+  activeSceneId: string;
+}
+
 export type TimelineKind = "segment" | "constraint" | "camera";
 
 export interface TimelineItem {

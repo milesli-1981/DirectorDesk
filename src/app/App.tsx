@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { Inspector } from "../components/Inspector";
 import { ObjectList } from "../components/ObjectList";
+import { SceneTabs } from "../components/SceneTabs";
 import { Timeline } from "../components/Timeline";
 import { WorldView } from "../components/WorldView";
 import { contentEndTime } from "../engine/timeline";
@@ -11,28 +12,35 @@ export function App() {
   const togglePlay = useDirectorStore((s) => s.togglePlay);
   const setTime = useDirectorStore((s) => s.setTime);
   const reset = useDirectorStore((s) => s.reset);
-  const exportScene = useDirectorStore((s) => s.exportScene);
-  const importScene = useDirectorStore((s) => s.importScene);
+  const exportProject = useDirectorStore((s) => s.exportProject);
+  const importProject = useDirectorStore((s) => s.importProject);
   const persist = useDirectorStore((s) => s.persist);
 
-  // 场景自动保存：仅在 revision 变化（即编辑意图变更）时写入 localStorage。
+  // 场景自动保存：场景页内容（revision）或片场结构（manifest）任一变化即落盘。
   useEffect(() => {
-    let last = useDirectorStore.getState().state.revision;
-    return useDirectorStore.subscribe((s) => {
-      if (s.state.revision !== last) {
-        last = s.state.revision;
+    const signature = () => {
+      const s = useDirectorStore.getState();
+      return `${s.state.revision}#${s.manifest.name}|${s.manifest.activeSceneId}|${s.manifest.order
+        .map((t) => `${t.id}:${t.name}`)
+        .join(",")}`;
+    };
+    let last = signature();
+    return useDirectorStore.subscribe(() => {
+      const now = signature();
+      if (now !== last) {
+        last = now;
         persist();
       }
     });
   }, [persist]);
 
   const handleExport = () => {
-    const json = exportScene();
+    const json = exportProject();
     const blob = new Blob([json], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "director-desk-scene.json";
+    a.download = "director-desk-stage.json";
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -45,7 +53,7 @@ export function App() {
       const file = input.files?.[0];
       if (!file) return;
       const reader = new FileReader();
-      reader.onload = () => importScene(String(reader.result));
+      reader.onload = () => importProject(String(reader.result));
       reader.readAsText(file);
     };
     input.click();
@@ -123,6 +131,8 @@ export function App() {
           </button>
         </div>
       </header>
+
+      <SceneTabs />
 
       <ObjectList />
       <WorldView />

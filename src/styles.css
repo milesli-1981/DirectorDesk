@@ -31,11 +31,12 @@ button:hover {
   height: 100vh;
   display: grid;
   grid-template-columns: 155px minmax(500px, 1fr) 295px;
-  grid-template-rows: 46px minmax(0, 1fr) 255px;
+  grid-template-rows: 30px 46px minmax(0, 1fr) 255px;
 }
 
 header {
   grid-column: 1 / 4;
+  grid-row: 2;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -59,11 +60,100 @@ header {
   gap: 6px;
 }
 
+/* —— 片场 / 场景页 tab 栏 —— */
+.scene-tabs {
+  grid-column: 1 / 4;
+  grid-row: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 13px;
+  border-bottom: 1px solid #27313b;
+  background: #0b1016;
+}
+
+.stage-name {
+  background: #11181f;
+  color: #d8e1ea;
+  border: 1px solid #303c49;
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 11px;
+  width: 140px;
+}
+.stage-name:focus {
+  border-color: #67a7ff;
+}
+
+.tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  background: #11181f;
+  border: 1px solid #2a343f;
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 11px;
+  color: #cbd7e3;
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+}
+.tab.active {
+  border-color: #67a7ff;
+  background: #16273a;
+  color: #fff;
+}
+.tab-label {
+  padding: 0 2px;
+}
+.tab-rename {
+  width: 84px;
+  background: #0c1117;
+  color: #d8e1ea;
+  border: 1px solid #67a7ff;
+  border-radius: 3px;
+  font-size: 11px;
+  padding: 1px 3px;
+}
+.tab-dup,
+.tab-del {
+  padding: 0 4px;
+  font-size: 10px;
+  line-height: 1;
+  background: transparent;
+  border: none;
+  color: #738394;
+}
+.tab-dup:hover,
+.tab-del:hover {
+  color: #ff7b91;
+  background: transparent;
+  border: none;
+}
+.tab-add {
+  padding: 2px 9px;
+  font-size: 13px;
+  line-height: 1;
+}
+
 .left,
 .right {
   background: #0c1117;
   overflow: auto;
   padding: 11px;
+}
+
+.left,
+.right {
+  grid-row: 3;
 }
 
 .left {
@@ -174,6 +264,7 @@ header {
 
 main {
   grid-column: 2;
+  grid-row: 3;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -385,6 +476,7 @@ canvas {
 
 .timeline {
   grid-column: 1 / 4;
+  grid-row: 4;
   height: 255px;
   min-height: 0;
   overflow: hidden;
@@ -420,10 +512,13 @@ canvas {
 
 .ruler {
   height: 28px;
-  position: relative;
+  position: sticky;
+  top: 0;
   margin-left: 96px;
   min-width: 1300px;
   border-bottom: 1px solid #27313b;
+  background: #0c1117;
+  z-index: 4;
 }
 
 .tracks {
@@ -457,6 +552,11 @@ canvas {
   white-space: nowrap;
   cursor: grab;
   user-select: none;
+  /* 横向滚动时轨道名常驻左侧，保持与帧指示器的对齐参考 */
+  position: sticky;
+  left: 0;
+  z-index: 3;
+  background: #0c1117;
 }
 
 .label:active {
@@ -600,6 +700,42 @@ canvas {
   left: 96px;
   z-index: 20;
   pointer-events: none;
+}
+
+/* 可拖动的播放头抓手：整条线都是可抓取区（.ph-hit），顶部三角为视觉把手（.ph-grip）。
+   命中区贯穿整条线高度，纵向滚动后仍能从可见处抓取。 */
+.ph-hit {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -6px;
+  width: 12px;
+  cursor: ew-resize;
+  pointer-events: auto;
+  z-index: 21;
+}
+
+.ph-grip {
+  position: absolute;
+  top: 0;
+  left: -6px;
+  width: 12px;
+  height: 16px;
+  background: #67a7ff;
+  border-radius: 3px 3px 2px 2px;
+  pointer-events: none;
+  box-shadow: 0 0 0 1px #0c1117;
+}
+
+.ph-grip::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 5px solid #67a7ff;
 }
 
 /* ---------------------------------------------------------- Inspector */

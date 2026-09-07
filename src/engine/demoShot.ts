@@ -154,3 +154,19 @@ export function createDemoState(): DirectorState {
     ],
   };
 }
+
+/** 空白场景页：用于「新建场景页」时给一个干净起点。 */
+export function createBlankState(): DirectorState {
+  return {
+    revision: 1,
+    duration: 12,
+    aspectRatio: "16:9",
+    objects: [],
+    segments: [],
+    handoffs: [],
+    constraints: [],
+    cameras: [],
+    cameraMoves: [],
+    cameraJunctions: [],
+  };
+}
