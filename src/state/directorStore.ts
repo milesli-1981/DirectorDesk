@@ -23,19 +23,19 @@ import {
   Vec2,
   ViewMode,
 } from "../domain/schema";
-import { createBlankState, createCommuteState, createDemoState } from "../engine/demoShot";
+import { createBlankState, createDemoState } from "../engine/demoShot";
 import { normalizePathPointModes, pathInsertIndex } from "../engine/path";
 import { contentEndTime } from "../engine/timeline";
 import { ASSET_PRESETS } from "../engine/assetPresets";
 import { separateSetAsset } from "../engine/collision";
 import { AssetCategory, DirectorObject } from "../domain/schema";
+import { findTemplate } from "../domain/templates";
 
 const CAMERA_COLORS = ["#c792ea", "#67a7ff", "#63d39b", "#f0a35a", "#ff7b91", "#8ad1ff"];
 
 // 持久化 v3：每张场景页独立 localStorage key，由片场 manifest 索引。
 const MANIFEST_KEY = "director-desk-manifest-v3";
 const sceneKey = (id: string) => `director-desk-scene-${id}-v3`;
-const LEGACY_KEY = "director-desk-scene-v2";
 
 function loadManifest(): StageManifest | null {
   try {
@@ -90,83 +90,86 @@ function genSceneId(): string {
 }
 
 /**
- * 内建种子场景：启动时在片场中补齐缺失的项（追加 tab + 落盘 state），不破坏现有场景页。
- * 只播种「通勤偶遇」，避免与用户已有的 demo 场景重复。
+ * 内建示例片场：打包 scene_examples/ 下的所有 JSON（整片场导出格式 {manifest, scenes}）。
+ * 作为首屏默认片场，不再读取 _scene.json，也不再代码生成 demo 场景。
  */
-const SEED_SCENES: { id: string; name: string; build: () => DirectorState }[] = [
-  { id: "SCN_COMMUTE", name: "通勤偶遇", build: createCommuteState },
-];
+const exampleModules = import.meta.glob("../../scene_examples/*.json", {
+  eager: true,
+  import: "default",
+}) as Record<string, { manifest?: StageManifest; scenes?: Record<string, DirectorState> }>;
 
-/** 在已有 manifest 中补齐缺失的内建场景，不改写现有场景页。 */
-function ensureSeedScenes(manifest: StageManifest): StageManifest {
-  let order = [...manifest.order];
-  let changed = false;
-  for (const seed of SEED_SCENES) {
-    if (!order.some((tab) => tab.id === seed.id)) {
-      order = [...order, { id: seed.id, name: seed.name }];
-      changed = true;
-    }
-    // 种子场景始终按最新代码重建（不缓存），方便迭代生成的 demo，无需手动清 localStorage。
-    // 注意：对种子场景页的手动编辑会在刷新后丢失，需要保留请先「复制场景」到非种子页。
-    if (typeof localStorage !== "undefined") {
-      saveSceneState(seed.id, seed.build());
+/** 收集 scene_examples 下所有示例（按 scene id 去重），用于合并进默认片场。 */
+function collectExamples(): {
+  order: StageManifest["order"];
+  scenes: Record<string, DirectorState>;
+} {
+  const scenes: Record<string, DirectorState> = {};
+  const order: StageManifest["order"] = [];
+  for (const mod of Object.values(exampleModules)) {
+    if (!mod || !mod.manifest || !mod.scenes) continue;
+    for (const tab of mod.manifest.order) {
+      const st = mod.scenes[tab.id];
+      if (!st || scenes[tab.id]) continue;
+      scenes[tab.id] = st;
+      order.push({ id: tab.id, name: tab.name });
     }
   }
-  if (!changed) return manifest;
-  const updated: StageManifest = { ...manifest, order };
-  saveManifest(updated);
-  return updated;
+  return { order, scenes };
 }
 
 /**
- * 启动时装配片场：优先读 manifest（并补齐缺失内建场景）；否则迁移旧 v2 单场景，
- * 或落一个全新片场（首屏 demo/迁移场景 + 通勤偶遇种子场景）。
+ * 启动时装配片场：
+ * - 已有 manifest（用户继续编辑）→ 保留现状，仅补齐缺失的示例场景 tab，不覆盖用户已有项。
+ * - 首屏（无 manifest）→ 以 scene_examples 目录下所有示例片场作为默认片场。
  * 返回的 activeState 直接作为 store 顶层 `state`（= 当前激活场景页的引用）。
  */
 function initStage(): { manifest: StageManifest; activeState: DirectorState } {
+  const built = collectExamples();
   const manifest = loadManifest();
+
   if (manifest && manifest.order.length > 0) {
-    const ensured = ensureSeedScenes(manifest);
-    const activeId =
-      ensured.activeSceneId && ensured.order.some((t) => t.id === ensured.activeSceneId)
-        ? ensured.activeSceneId
-        : ensured.order[0].id;
-    const activeState = loadSceneState(activeId) ?? createBlankState();
-    return { manifest: ensured, activeState };
-  }
-
-  // 无 manifest：迁移旧 v2，或全新片场（首屏用 demo，再附上其余种子场景）。
-  let state: DirectorState = createDemoState();
-  let initialTab = { id: "SCN_DEMO", name: "M17 Killer Test" };
-  const legacy =
-    typeof localStorage !== "undefined" ? localStorage.getItem(LEGACY_KEY) : null;
-  if (legacy) {
-    try {
-      const parsed = JSON.parse(legacy) as DirectorState;
-      if (parsed && Array.isArray(parsed.objects) && Array.isArray(parsed.cameraMoves)) {
-        state = parsed;
-        initialTab = { id: "SCN_LEGACY", name: "导入 v2 场景" };
-      }
-    } catch {
-      // 解析失败则退回 demo
+    // 保留用户片场，仅把缺失的示例场景 tab 追加进来。
+    const existing = new Set(manifest.order.map((t) => t.id));
+    const added = built.order.filter((t) => !existing.has(t.id));
+    const nextManifest =
+      added.length > 0 ? { ...manifest, order: [...manifest.order, ...added] } : manifest;
+    for (const tab of added) {
+      const st = built.scenes[tab.id];
+      if (st) saveSceneState(tab.id, st);
     }
+    if (added.length > 0) saveManifest(nextManifest);
+    const activeId =
+      nextManifest.activeSceneId && nextManifest.order.some((t) => t.id === nextManifest.activeSceneId)
+        ? nextManifest.activeSceneId
+        : nextManifest.order[0].id;
+    const activeState = loadSceneState(activeId) ?? createBlankState();
+    return { manifest: nextManifest, activeState };
   }
 
-  const order = [
-    initialTab,
-    ...SEED_SCENES.filter((s) => s.id !== initialTab.id).map((s) => ({ id: s.id, name: s.name })),
-  ];
-  saveSceneState(initialTab.id, state);
-  for (const seed of SEED_SCENES) {
-    if (!loadSceneState(seed.id)) saveSceneState(seed.id, seed.build());
+  // 首屏：以 scene_examples 全部示例作为默认片场。
+  if (built.order.length === 0) {
+    const blank = createBlankState();
+    const id = "SCN_BLANK";
+    saveSceneState(id, blank);
+    const newManifest: StageManifest = {
+      name: "空白片场",
+      order: [{ id, name: "空白场景" }],
+      activeSceneId: id,
+    };
+    saveManifest(newManifest);
+    return { manifest: newManifest, activeState: blank };
+  }
+  for (const tab of built.order) {
+    const st = built.scenes[tab.id];
+    if (st) saveSceneState(tab.id, st);
   }
   const newManifest: StageManifest = {
-    name: "未命名片场",
-    order,
-    activeSceneId: initialTab.id,
+    name: "示例片场",
+    order: built.order,
+    activeSceneId: built.order[0].id,
   };
   saveManifest(newManifest);
-  return { manifest: newManifest, activeState: state };
+  return { manifest: newManifest, activeState: built.scenes[newManifest.activeSceneId] };
 }
 
 export type SelectionKind = "object" | "camera";
@@ -211,7 +214,7 @@ interface DirectorStore {
   reorderObject: (dragId: string, targetId: string) => void;
   /** 锁定 / 解锁资产：锁定后不可通过拖拽移动位置（防误触），仍可点选以便解锁。 */
   toggleLock: (id: string) => void;
-  addAsset: (category: AssetCategory) => void;
+  addAsset: (category: AssetCategory, at?: { x: number; z: number }) => void;
   updateAsset: (id: string, patch: Partial<DirectorObject>) => void;
   removeAsset: (id: string) => void;
   exportScene: () => string;
@@ -248,6 +251,7 @@ interface DirectorStore {
 
   addCamera: () => void;
   addDroneCamera: () => void;
+  addCameraFromTemplate: (templateId: string) => void;
   removeCamera: (cameraId: string) => void;
   updateCamera: (
     cameraId: string,
@@ -266,6 +270,14 @@ interface DirectorStore {
         | "shoulderId"
         | "otsSide"
         | "otsOffset"
+        | "altitude"
+        | "templateId"
+        | "prompt"
+        | "targetType"
+        | "groupIds"
+        | "panDeg"
+        | "tiltDeg"
+        | "truckDist"
       >
     >,
   ) => void;
@@ -616,7 +628,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         };
       }),
 
-    addAsset: (category) => {
+    addAsset: (category, at) => {
       const store = get();
       const { state } = store;
       const preset = ASSET_PRESETS[category];
@@ -626,10 +638,17 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         count += 1;
         id = `AST_${category.toUpperCase()}_${String(count).padStart(2, "0")}`;
       }
-      const angle = (state.objects.length * 137.5 * Math.PI) / 180;
-      const radius = 2 + state.objects.length * 0.6;
-      const spawnX = Math.round(Math.cos(angle) * radius * 10) / 10;
-      const spawnZ = Math.round(Math.sin(angle) * radius * 10) / 10;
+      // 拖拽落点优先；否则沿用原有「黄金角螺旋」散布，避免默认全堆在原点。
+      const spiral = (() => {
+        const angle = (state.objects.length * 137.5 * Math.PI) / 180;
+        const radius = 2 + state.objects.length * 0.6;
+        return {
+          x: Math.round(Math.cos(angle) * radius * 10) / 10,
+          z: Math.round(Math.sin(angle) * radius * 10) / 10,
+        };
+      })();
+      const spawnX = at ? Math.round(at.x * 10) / 10 : spiral.x;
+      const spawnZ = at ? Math.round(at.z * 10) / 10 : spiral.z;
       const asset: DirectorObject = {
         id,
         type: preset.role === "agent" ? "actor" : "prop",
@@ -1207,6 +1226,75 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         orbitDeg: 180,
         dollyScale: 1.4,
         craneHeight: 8,
+        ease: [0.42, 0, 0.58, 1],
+      };
+      const cameraMoves = [...state.cameraMoves, move];
+      set({
+        state: {
+          ...state,
+          revision: state.revision + 1,
+          cameras: [...state.cameras, camera],
+          cameraMoves,
+          cameraJunctions: reconcileCameraJunctions(cameraMoves, state.cameraJunctions),
+        },
+        selectedKind: "camera",
+        selectedId: id,
+        selectedItem: move.id,
+        activeCameraId: store.activeCameraId ?? id,
+      });
+    },
+
+    addCameraFromTemplate: (templateId) => {
+      const store = get();
+      const { state } = store;
+      const template = findTemplate(templateId);
+      if (!template) return;
+      const id = nextCameraId(state);
+      const actors = state.objects.filter((object) => object.role === "agent" || object.type === "actor");
+      const pick = (refId?: string): string => {
+        if (refId && state.objects.some((object) => object.id === refId)) return refId;
+        return actors[0]?.id ?? state.objects[0]?.id ?? "";
+      };
+      const isOts = template.target.type === "OTS";
+      // OTS：ref = [前景演员(shoulder), 主体(subject)]
+      const shoulderId = isOts ? pick(template.target.ref[0]) : undefined;
+      // 求解器需要参照点：LOCATION（环境 / 转场）无显式目标也锚到首个对象，避免空 targetId 崩溃。
+      const targetId = pick(isOts ? template.target.ref[1] : template.target.ref[0]);
+      const camera: CameraObject = {
+        id,
+        name: id,
+        color: CAMERA_COLORS[state.cameras.length % CAMERA_COLORS.length],
+        targetId,
+        framing: template.framing,
+        view: template.view,
+        side: template.side,
+        lensMm: template.lens,
+        motion: template.motion,
+        kind: template.kind ?? "ground",
+        altitude: template.altitude,
+        templateId: template.id,
+        prompt: template.prompt,
+        targetType: template.target.type,
+        groupIds: template.target.type === "GROUP" ? [...template.target.ref] : undefined,
+        roll: template.roll,
+        otsSide: isOts ? "R" : undefined,
+        otsOffset: isOts ? (template.otsOffset ?? 0.35) : undefined,
+        shoulderId,
+      };
+      const duration = state.duration;
+      const end = round1(Math.min(duration, Math.max(2, template.duration)));
+      const move: CameraMove = {
+        id: nextCameraMoveId(state, id),
+        camera: id,
+        type: template.motion,
+        timeStart: 0,
+        timeEnd: end,
+        orbitDeg: template.orbitDeg ?? 0,
+        dollyScale: template.dollyScale ?? 1,
+        craneHeight: template.craneHeight ?? 0,
+        panDeg: template.panDeg ?? 0,
+        tiltDeg: template.tiltDeg ?? 0,
+        truckDist: template.truckDist ?? 0,
         ease: [0.42, 0, 0.58, 1],
       };
       const cameraMoves = [...state.cameraMoves, move];

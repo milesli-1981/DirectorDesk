@@ -45,11 +45,14 @@ export interface ExportVideoOptions {
 }
 
 /**
- * 逐台相机导出 POV 视频。
- * 录制为实时：每台相机按内容时长以正常速度播放并采集画布，因此总耗时 ≈ Σ(各相机内容时长)。
+ * 录制单台相机的 POV 视频，返回 Blob（不触发下载）。
+ * 这是无头渲染 / MCP 导出与多机位下载共同复用的核心。
  */
-export async function exportMultiCamVideos(options: ExportVideoOptions = {}): Promise<void> {
-  const fps = options.fps ?? 24;
+export async function recordCameraPov(
+  cameraId: string,
+  fps = 24,
+  onProgress?: (message: string) => void,
+): Promise<Blob> {
   const canvas = getCaptureCanvas();
   if (!canvas) throw new Error("渲染画布尚未就绪，请稍候重试");
 
@@ -61,6 +64,58 @@ export async function exportMultiCamVideos(options: ExportVideoOptions = {}): Pr
   }
 
   const { cameras } = useDirectorStore.getState().state;
+  if (!cameras.some((c) => c.id === cameraId)) {
+    throw new Error(`场景中没有相机 ${cameraId}`);
+  }
+
+  // 切到该机位的 POV 视角，停在第一帧先渲染一帧。
+  useDirectorStore.setState({
+    viewMode: "camera",
+    activeCameraId: cameraId,
+    currentTime: 0,
+    playing: false,
+  });
+  // 等待 r3f 切换到该机位并完成一帧渲染（captureStream 需画布已有内容）。
+  await delay(250);
+
+  const stream = capture.call(canvas, fps);
+  const mime = pickMime();
+  const recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 12_000_000 });
+  const chunks: BlobPart[] = [];
+  recorder.ondataavailable = (event: BlobEvent) => {
+    if (event.data && event.data.size > 0) chunks.push(event.data);
+  };
+  const stopped = new Promise<void>((resolve) => {
+    recorder.onstop = () => resolve();
+  });
+
+  recorder.start();
+  // 与录制同步开始播放，确保从 t=0 采起。
+  useDirectorStore.setState({ playing: true });
+
+  // 等到播放结束（App 播放循环到达内容末尾会停止并把播放头归零）。
+  await new Promise<void>((resolve) => {
+    const check = () => {
+      if (!useDirectorStore.getState().playing) return resolve();
+      setTimeout(check, 80);
+    };
+    check();
+  });
+
+  recorder.stop();
+  await stopped;
+  stream.getTracks().forEach((track) => track.stop());
+  onProgress?.(`已录制：${cameraId}`);
+  return new Blob(chunks, { type: mime });
+}
+
+/**
+ * 逐台相机导出 POV 视频（浏览器内下载）。
+ * 录制为实时：每台相机按内容时长以正常速度播放并采集画布，因此总耗时 ≈ Σ(各相机内容时长)。
+ */
+export async function exportMultiCamVideos(options: ExportVideoOptions = {}): Promise<void> {
+  const fps = options.fps ?? 24;
+  const { cameras } = useDirectorStore.getState().state;
   if (cameras.length === 0) throw new Error("当前场景没有相机，无法导出视频");
 
   const sceneName = currentSceneName();
@@ -68,53 +123,13 @@ export async function exportMultiCamVideos(options: ExportVideoOptions = {}): Pr
 
   for (const cam of cameras) {
     options.onProgress?.(`录制中：${cam.name} …`);
-
-    // 切到该机位的 POV 视角，停在第一帧先渲染一帧。
-    useDirectorStore.setState({
-      viewMode: "camera",
-      activeCameraId: cam.id,
-      currentTime: 0,
-      playing: false,
-    });
-    // 等待 r3f 切换到该机位并完成一帧渲染（captureStream 需画布已有内容）。
-    await delay(200);
-
-    const stream = capture.call(canvas, fps);
-    const mime = pickMime();
-    const recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 12_000_000 });
-    const chunks: BlobPart[] = [];
-    recorder.ondataavailable = (event: BlobEvent) => {
-      if (event.data && event.data.size > 0) chunks.push(event.data);
-    };
-    const stopped = new Promise<void>((resolve) => {
-      recorder.onstop = () => resolve();
-    });
-
-    recorder.start();
-    // 与录制同步开始播放，确保从 t=0 采起。
-    useDirectorStore.setState({ playing: true });
-
-    // 等到播放结束（App 播放循环到达内容末尾会停止并把播放头归零）。
-    await new Promise<void>((resolve) => {
-      const check = () => {
-        if (!useDirectorStore.getState().playing) return resolve();
-        setTimeout(check, 80);
-      };
-      check();
-    });
-
-    recorder.stop();
-    await stopped;
-    stream.getTracks().forEach((track) => track.stop());
-
-    const blob = new Blob(chunks, { type: mime });
+    const blob = await recordCameraPov(cam.id, fps, options.onProgress);
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
     a.download = `${sceneName}_${cam.name}.webm`;
     a.click();
     URL.revokeObjectURL(url);
-
     options.onProgress?.(`已下载：${sceneName}_${cam.name}.webm`);
   }
 

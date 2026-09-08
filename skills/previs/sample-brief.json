@@ -1,0 +1,20 @@
+{
+  "duration": 5,
+  "actors": [
+    { "id": "WALKER", "color": "#3aa6ff", "x": 0, "z": 0, "path": [[0, 0], [0, -3]] },
+    { "id": "GREETER", "color": "#ff9a3a", "x": 1, "z": -1 }
+  ],
+  "cameras": [
+    {
+      "id": "CAM_A",
+      "target": "WALKER",
+      "framing": "medium",
+      "lens": 35,
+      "moves": [
+        { "type": "FOLLOW", "start": 0, "end": 2 },
+        { "type": "ORBIT", "orbitDeg": -90, "start": 2, "end": 3 },
+        { "type": "OTS", "target": "GREETER", "shoulderId": "WALKER", "otsSide": "R", "otsOffset": 0.35, "start": 3, "end": 5 }
+      ]
+    }
+  ]
+}

@@ -344,10 +344,11 @@ main {
   min-height: 0;
   overflow: hidden;
   display: grid;
-  grid-template-rows: 38px minmax(0, 1fr);
+  grid-template-rows: 38px auto minmax(0, 1fr);
 }
 
 .viewbar {
+  grid-row: 1;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -386,6 +387,7 @@ main {
 }
 
 .canvasWrap {
+  grid-row: 3;
   min-height: 0;
   position: relative;
 }
@@ -911,6 +913,135 @@ pre {
 }
 .btn-pair .addobj {
   margin: 0;
+}
+
+/* 画布上方：可拖拽的 add icon 工具条 */
+.addbar {
+  grid-row: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--ap-surface-1);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.addbar-hint {
+  font-size: 11px;
+  color: var(--ap-text-3);
+  margin-right: 2px;
+  white-space: nowrap;
+}
+.add-icon {
+  font-size: 12px;
+  padding: 4px 9px;
+  border-radius: var(--ap-r-sm);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--ap-text);
+  cursor: grab;
+  white-space: nowrap;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.add-icon:hover {
+  background: var(--ap-surface-2);
+  border-color: var(--ap-blue);
+  color: #fff;
+}
+.add-icon:active {
+  cursor: grabbing;
+}
+.add-icon.tpl-btn {
+  border-style: dashed;
+  border-color: rgba(255, 212, 121, 0.5);
+  color: #ffd479;
+}
+.add-icon.tpl-btn:hover {
+  background: rgba(255, 212, 121, 0.12);
+}
+.tpl-picker {
+  flex-basis: 100%;
+}
+
+/* 从模板新建机位：分类选择器 */
+.tpl-open {
+  width: 100%;
+  margin: 0 0 6px;
+  color: #ffd479;
+  border: 1px dashed rgba(255, 212, 121, 0.5);
+}
+.tpl-open:hover {
+  background: rgba(255, 212, 121, 0.12);
+}
+.tpl-picker {
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--ap-r-sm);
+  padding: 6px;
+  margin-bottom: 8px;
+  background: rgba(0, 0, 0, 0.2);
+}
+.tpl-cat {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ap-text-3);
+  margin: 6px 0 3px;
+}
+.tpl-cat:first-child {
+  margin-top: 0;
+}
+.tpl-item {
+  width: 100%;
+  text-align: left;
+  font-size: 12px;
+  padding: 4px 6px;
+  margin: 2px 0;
+  color: var(--ap-text);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--ap-r-sm);
+}
+.tpl-item:hover {
+  background: var(--ap-surface-2);
+  color: #fff;
+}
+
+/* Inspector 相机面板：prompt 编辑框 */
+.prompt-box {
+  width: 100%;
+  min-height: 84px;
+  resize: vertical;
+  box-sizing: border-box;
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--ap-text);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: var(--ap-r-sm);
+  padding: 6px 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  font-family: var(--ap-font);
+}
+
+/* GROUP 成员多选 chips */
+.grp-ids {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.grp-ids .chip {
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: transparent;
+  color: var(--ap-text-2);
+}
+.grp-ids .chip.on {
+  border-color: var(--ap-blue);
+  background: rgba(10, 132, 255, 0.22);
+  color: #fff;
 }
 
 .dot {

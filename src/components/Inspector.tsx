@@ -6,6 +6,7 @@ import {
   CameraFraming,
   CameraMotionType,
   CameraSide,
+  CameraTargetType,
   CameraView,
   EaseCurve,
   HandoffMode,
@@ -19,6 +20,7 @@ import {
   OtsSide,
   OTS_SIDE_LABELS,
   SIDE_LABELS,
+  TARGET_TYPE_LABELS,
   VIEW_LABELS,
 } from "../domain/schema";
 import { EaseEditor } from "./EaseEditor";
@@ -513,6 +515,44 @@ export function Inspector() {
                   ))}
                 </select>
               </Field>
+              <Field label="Target 类型">
+                <select
+                  value={camera.targetType ?? "OBJECT"}
+                  onChange={(event) =>
+                    updateCamera(camera.id, { targetType: event.target.value as CameraTargetType })
+                  }
+                >
+                  {(Object.keys(TARGET_TYPE_LABELS) as CameraTargetType[]).map((value) => (
+                    <option key={value} value={value}>
+                      {TARGET_TYPE_LABELS[value]}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              {camera.targetType === "GROUP" ? (
+                <Field label="Group 成员（自动框住）">
+                  <div className="grp-ids">
+                    {state.objects.map((item) => {
+                      const on = camera.groupIds?.includes(item.id) ?? false;
+                      return (
+                        <button
+                          key={item.id}
+                          type="button"
+                          className={`chip ${on ? "on" : ""}`}
+                          onClick={() => {
+                            const set = new Set(camera.groupIds ?? []);
+                            if (set.has(item.id)) set.delete(item.id);
+                            else set.add(item.id);
+                            updateCamera(camera.id, { groupIds: [...set] });
+                          }}
+                        >
+                          {item.id}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </Field>
+              ) : null}
               <Field label="Framing">
                 <select
                   value={camera.framing}
@@ -569,6 +609,71 @@ export function Inspector() {
                   ))}
                 </select>
               </Field>
+              <Field label={`Altitude ${camera.altitude ?? 0}m（基准高度）`}>
+                <input
+                  type="range"
+                  min={0}
+                  max={30}
+                  step={1}
+                  value={camera.altitude ?? 0}
+                  onChange={(event) => updateCamera(camera.id, { altitude: Number(event.target.value) })}
+                />
+              </Field>
+              {camera.motion === "PAN" ? (
+                <Field label={`Pan ${camera.panDeg ?? 0}°（原地水平摇）`}>
+                  <input
+                    type="range"
+                    min={-180}
+                    max={180}
+                    step={5}
+                    value={camera.panDeg ?? 0}
+                    onChange={(event) => updateCamera(camera.id, { panDeg: Number(event.target.value) })}
+                  />
+                </Field>
+              ) : null}
+              {camera.motion === "TILT" ? (
+                <Field label={`Tilt ${camera.tiltDeg ?? 0}°（原地俯仰）`}>
+                  <input
+                    type="range"
+                    min={-60}
+                    max={60}
+                    step={5}
+                    value={camera.tiltDeg ?? 0}
+                    onChange={(event) => updateCamera(camera.id, { tiltDeg: Number(event.target.value) })}
+                  />
+                </Field>
+              ) : null}
+              {camera.motion === "TRUCK" ? (
+                <Field label={`Truck ${camera.truckDist ?? 0}m（横向平移）`}>
+                  <input
+                    type="range"
+                    min={-20}
+                    max={20}
+                    step={1}
+                    value={camera.truckDist ?? 0}
+                    onChange={(event) => updateCamera(camera.id, { truckDist: Number(event.target.value) })}
+                  />
+                </Field>
+              ) : null}
+            </SubGroup>
+
+            <SubGroup
+              title="Prompt（喂给视频模型）"
+              hint="模板自带的自然语言描述，可编辑后复制；与结构化 spec 一起喂给 MiniMax / Kling / Runway 等视频模型。"
+            >
+              <textarea
+                className="prompt-box"
+                rows={5}
+                value={camera.prompt ?? ""}
+                onChange={(event) => updateCamera(camera.id, { prompt: event.target.value })}
+              />
+              <button
+                type="button"
+                className="obj"
+                onClick={() => navigator.clipboard?.writeText(camera.prompt ?? "")}
+              >
+                复制 prompt
+              </button>
             </SubGroup>
 
             {cameraOts ? (

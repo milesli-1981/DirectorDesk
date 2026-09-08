@@ -5,6 +5,7 @@ import {
   CameraObject,
   CameraSide,
   CameraView,
+  DirectorObject,
   DirectorState,
   OtsSide,
   Vec3,
@@ -81,6 +82,14 @@ function focusPoint(state: DirectorState, targetId: string, time: number): Vec3 
   return [position.x, height, position.z];
 }
 
+/** 场景中心（所有对象的质心），供 LOCATION 固定环境机位作锚点。 */
+function sceneCenter(state: DirectorState): Vec3 {
+  if (!state.objects.length) return [0, 1.3, 0];
+  const cx = state.objects.reduce((sum, object) => sum + object.x, 0) / state.objects.length;
+  const cz = state.objects.reduce((sum, object) => sum + object.z, 0) / state.objects.length;
+  return [cx, 1.3, cz];
+}
+
 interface Placement {
   targetId?: string;
   /** OTS：本段所越过的前景演员。 */
@@ -94,11 +103,48 @@ interface Placement {
   orbitDeg?: number;
   distanceScale?: number;
   craneHeight?: number;
+  /** PAN：原地水平旋转角度（度）。 */
+  panDeg?: number;
+  /** TILT：原地俯仰角度（度）。 */
+  tiltDeg?: number;
+  /** TRUCK：横向平移距离（米，正负=左右）。 */
+  truckDist?: number;
+  /** HANDHELD：叠加手持微晃。 */
+  handheld?: boolean;
   /** 段级覆盖（framing/view/side/lens），为空沿用 CameraObject 默认。 */
   framing?: CameraFraming;
   view?: CameraView;
   side?: CameraSide;
   lensMm?: number;
+}
+
+/** 基础机位：由「目标 + 方位 + 景别 + 绕飞/推拉/升降」反推（不含 PAN/TILT/TRUCK/HANDHELD）。 */
+function placeStandard(
+  state: DirectorState,
+  camera: CameraObject,
+  options: Placement,
+  framing: CameraFraming,
+  view: CameraView,
+  side: CameraSide,
+  target: Vec3,
+  facing: number,
+  droneLift: number,
+  altitude: number,
+): { position: Vec3; target: Vec3 } {
+  const baseDistance = FRAMING_DISTANCE[framing] * (options.distanceScale ?? 1);
+  const yaw = facing + ((SIDE_ANGLE[side] + (options.orbitDeg ?? 0)) * Math.PI) / 180;
+  let horizontal = baseDistance;
+  let height = VIEW_HEIGHT[view] + droneLift + altitude + (options.craneHeight ?? 0);
+  if (view === "overhead") {
+    horizontal = baseDistance * 0.3;
+    height = baseDistance + 4 + droneLift + altitude + (options.craneHeight ?? 0);
+  }
+  const position: Vec3 = [
+    target[0] + Math.sin(yaw) * horizontal,
+    target[1] + height,
+    target[2] + Math.cos(yaw) * horizontal,
+  ];
+  return { position, target };
 }
 
 function placeCamera(
@@ -111,73 +157,170 @@ function placeCamera(
   const framing = options.framing ?? camera.framing;
   const view = options.view ?? camera.view;
   const side = options.side ?? camera.side;
-  const target = focusPoint(state, targetId, time);
-  const facing = objectFacing(state, targetId, time);
+  const targetType = camera.targetType ?? "OBJECT";
+  const droneLift = camera.kind === "drone" ? DRONE_BASE_ALTITUDE : 0;
+  const altitude = camera.altitude ?? 0;
 
-  // 过肩镜头（OTS）：机位置于前景演员 A 的斜后方，越过其肩膀拍主体 B。
-  // 两人各自移动时机位自动跟随，始终保持过肩关系（肩在前景一侧、不挡住主体）。
-  const isOts = options.ots ?? camera.motion === "OTS";
-  const shoulderId = options.shoulderId ?? camera.shoulderId;
-  if (isOts && shoulderId && targetId && shoulderId !== targetId) {
-    const a = objectPosition(state, shoulderId, time);
-    const b = objectPosition(state, targetId, time);
-    const dx = b.x - a.x;
-    const dz = b.z - a.z;
-    const distAB = Math.hypot(dx, dz);
-    if (distAB > 1e-3) {
-      const fx = dx / distAB;
-      const fz = dz / distAB;
-      // 右向量 = cross(前向, up) 在 XZ 平面上的投影 → (-fz, 0, fx)
-      const rx = -fz;
-      const rz = fx;
-      const sign: number = (options.otsSide ?? camera.otsSide ?? "R") === "R" ? 1 : -1;
-      // 退到 A 身后的距离 / 横向拉开的距离都随两人间距自适应：
-      // 贴得够近、偏得够开，前景才会被视差推到画面一侧，而不是糊在主体脸上。
-      const back = Math.min(2.4, Math.max(0.95, distAB * 0.38));
-      const lateral = Math.min(1.6, Math.max(0.8, distAB * 0.4)) * sign;
-      const eye = 1.55; // 前景演员的肩 / 眼高
-      const cx = a.x - fx * back + rx * lateral;
-      const cz = a.z - fz * back + rz * lateral;
+  let position: Vec3;
+  let target: Vec3;
 
-      // 错位构图：注视点朝「远离前景」的一侧横向偏开，把主体推到画面另一侧，
-      // 前景因此只露出一部分肩膀——这正是过肩区别于「正对双人」的关键。
-      const vx = b.x - cx;
-      const vz = b.z - cz;
-      const vLen = Math.hypot(vx, vz) || 1;
-      // 视线右向量（XZ 平面），注视点沿它偏移。
-      const rgx = -vz / vLen;
-      const rgz = vx / vLen;
+  // ---- 多参照取景：POV / GROUP ----
+  // POV：机位 = 某角色的视线（眼高），看向其朝向正前方。
+  if (targetType === "POV" && targetId) {
+    const p = objectPosition(state, targetId, time);
+    const yaw = (objectFacing(state, targetId, time) * Math.PI) / 180;
+    const eye = 1.55;
+    const look = 6;
+    position = [p.x, eye, p.z];
+    target = [p.x + Math.sin(yaw) * look, eye, p.z + Math.cos(yaw) * look];
+  } else if (targetType === "GROUP" && camera.groupIds?.length) {
+    // GROUP：框住一组对象（双人同框 / 群像）；机位锚到群体质心，距离按群体跨度自适应放大。
+    const members = camera.groupIds
+      .map((id) => state.objects.find((object) => object.id === id))
+      .filter((object): object is DirectorObject => !!object)
+      .map((object) => objectPosition(state, object.id, time));
+    if (members.length) {
+      const cx = members.reduce((sum, point) => sum + point.x, 0) / members.length;
+      const cz = members.reduce((sum, point) => sum + point.z, 0) / members.length;
+      const radius = Math.max(1, ...members.map((point) => Math.hypot(point.x - cx, point.z - cz)));
       const lens = options.lensMm ?? camera.lensMm;
-      // 该距离上的画面半宽（由焦距与画幅决定），把「比例」换算成世界距离。
-      const halfWidthTan =
-        Math.tan((lensFovDeg(lens) * Math.PI) / 360) * aspectValue(state.aspectRatio);
-      const offset = options.otsOffset ?? camera.otsOffset ?? 0.35;
-      // 主体落在画面的 +sign 侧（与前景相反），故注视点朝 -sign 侧偏。
-      const shift = -sign * offset * vLen * halfWidthTan;
+      const vfov = (lensFovDeg(lens) * Math.PI) / 180;
+      const hfovH = 2 * Math.atan(Math.tan(vfov / 2) * aspectValue(state.aspectRatio));
+      const fitDist = (radius + 2) / Math.tan(hfovH / 2);
+      const baseDistance = FRAMING_DISTANCE[framing] * (options.distanceScale ?? 1);
+      const horizontal = Math.max(baseDistance, fitDist);
+      const yaw = ((objectFacing(state, targetId, time) + SIDE_ANGLE[side]) * Math.PI) / 180;
+      const groupTarget: Vec3 = [cx, 1.3, cz];
+      if (view === "overhead") {
+        const h = FRAMING_DISTANCE[framing] + 4 + droneLift + altitude + (options.craneHeight ?? 0);
+        position = [cx, h, cz + 0.001];
+        target = groupTarget;
+      } else {
+        const height = VIEW_HEIGHT[view] + droneLift + altitude + (options.craneHeight ?? 0);
+        position = [
+          groupTarget[0] + Math.sin(yaw) * horizontal,
+          groupTarget[1] + height,
+          groupTarget[2] + Math.cos(yaw) * horizontal,
+        ];
+        target = groupTarget;
+      }
+    } else {
+      const t = focusPoint(state, targetId, time);
+      const facing = objectFacing(state, targetId, time);
+      ({ position, target } = placeStandard(
+        state, camera, options, framing, view, side, t, facing, droneLift, altitude,
+      ));
+    }
+  } else {
+    const t = targetType === "LOCATION" ? sceneCenter(state) : focusPoint(state, targetId, time);
+    const facing = targetType === "LOCATION" ? 0 : objectFacing(state, targetId, time);
 
-      return {
-        position: [cx, eye, cz],
-        target: [b.x + rgx * shift, 1.55, b.z + rgz * shift],
-      };
+    // 过肩镜头（OTS）：机位置于前景演员 A 的斜后方，越过其肩膀拍主体 B。
+    // 两人各自移动时机位自动跟随，始终保持过肩关系（肩在前景一侧、不挡住主体）。
+    const isOts = options.ots ?? (camera.targetType === "OTS" || camera.motion === "OTS");
+    const shoulderId = options.shoulderId ?? camera.shoulderId;
+    if (isOts && shoulderId && targetId && shoulderId !== targetId) {
+      const a = objectPosition(state, shoulderId, time);
+      const b = objectPosition(state, targetId, time);
+      const dx = b.x - a.x;
+      const dz = b.z - a.z;
+      const distAB = Math.hypot(dx, dz);
+      if (distAB > 1e-3) {
+        const fx = dx / distAB;
+        const fz = dz / distAB;
+        const rx = -fz;
+        const rz = fx;
+        const sign: number = (options.otsSide ?? camera.otsSide ?? "R") === "R" ? 1 : -1;
+        const back = Math.min(2.4, Math.max(0.95, distAB * 0.38));
+        const lateral = Math.min(1.6, Math.max(0.8, distAB * 0.4)) * sign;
+        const eye = 1.55;
+        const cx = a.x - fx * back + rx * lateral;
+        const cz = a.z - fz * back + rz * lateral;
+
+        const vx = b.x - cx;
+        const vz = b.z - cz;
+        const vLen = Math.hypot(vx, vz) || 1;
+        const rgx = -vz / vLen;
+        const rgz = vx / vLen;
+        const lens = options.lensMm ?? camera.lensMm;
+        const halfWidthTan =
+          Math.tan((lensFovDeg(lens) * Math.PI) / 360) * aspectValue(state.aspectRatio);
+        const offset = options.otsOffset ?? camera.otsOffset ?? 0.35;
+        const shift = -sign * offset * vLen * halfWidthTan;
+
+        position = [cx, eye, cz];
+        target = [b.x + rgx * shift, 1.55, b.z + rgz * shift];
+      } else {
+        ({ position, target } = placeStandard(
+          state, camera, options, framing, view, side, t, facing, droneLift, altitude,
+        ));
+      }
+    } else {
+      ({ position, target } = placeStandard(
+        state, camera, options, framing, view, side, t, facing, droneLift, altitude,
+      ));
     }
   }
 
-  const baseDistance = FRAMING_DISTANCE[framing] * (options.distanceScale ?? 1);
-  const yaw = facing + ((SIDE_ANGLE[side] + (options.orbitDeg ?? 0)) * Math.PI) / 180;
-
-  const droneLift = camera.kind === "drone" ? DRONE_BASE_ALTITUDE : 0;
-  let horizontal = baseDistance;
-  let height = VIEW_HEIGHT[view] + droneLift + (options.craneHeight ?? 0);
-  if (view === "overhead") {
-    horizontal = baseDistance * 0.3;
-    height = baseDistance + 4 + droneLift + (options.craneHeight ?? 0);
+  // ---- PAN / TILT / TRUCK：原地旋转 / 横移（相对基础机位）----
+  const panDeg = options.panDeg ?? camera.panDeg ?? 0;
+  const tiltDeg = options.tiltDeg ?? camera.tiltDeg ?? 0;
+  const truckDist = options.truckDist ?? camera.truckDist ?? 0;
+  if (panDeg || tiltDeg) {
+    const ox = position[0];
+    const oy = position[1];
+    const oz = position[2];
+    let dx = target[0] - ox;
+    let dy = target[1] - oy;
+    let dz = target[2] - oz;
+    const dist = Math.hypot(dx, dy, dz) || 1;
+    dx /= dist;
+    dy /= dist;
+    dz /= dist;
+    if (panDeg) {
+      const a = (panDeg * Math.PI) / 180;
+      const c = Math.cos(a);
+      const s = Math.sin(a);
+      const nx = dx * c + dz * s;
+      const nz = -dx * s + dz * c;
+      dx = nx;
+      dz = nz;
+    }
+    if (tiltDeg) {
+      const a = (tiltDeg * Math.PI) / 180;
+      const c = Math.cos(a);
+      const s = Math.sin(a);
+      const rx = -dz;
+      const ry = 0;
+      const rz = dx;
+      dx = dx * c + rx * s;
+      dy = dy * c + ry * s;
+      dz = dz * c + rz * s;
+    }
+    target = [ox + dx * dist, oy + dy * dist, oz + dz * dist];
+  }
+  if (truckDist) {
+    // 沿视线右向量平行横移机位与目标，保持相对几何（= 轨道横移）。
+    let fdx = target[0] - position[0];
+    let fdz = target[2] - position[2];
+    const fl = Math.hypot(fdx, fdz) || 1;
+    fdx /= fl;
+    fdz /= fl;
+    const rx = -fdz;
+    const rz = fdx;
+    position = [position[0] + rx * truckDist, position[1], position[2] + rz * truckDist];
+    target = [target[0] + rx * truckDist, target[1], target[2] + rz * truckDist];
   }
 
-  const position: Vec3 = [
-    target[0] + Math.sin(yaw) * horizontal,
-    target[1] + height,
-    target[2] + Math.cos(yaw) * horizontal,
-  ];
+  // ---- HANDHELD：手持微晃（叠加细微正弦抖动）----
+  const isHandheld = options.handheld ?? camera.motion === "HANDHELD";
+  if (isHandheld) {
+    const jx = Math.sin(time * 7.3) * 0.06 + Math.sin(time * 3.1) * 0.04;
+    const jy = Math.sin(time * 5.7 + 1.3) * 0.05;
+    const jz = Math.cos(time * 6.1) * 0.06 + Math.sin(time * 2.7) * 0.03;
+    position = [position[0] + jx, position[1] + jy, position[2] + jz];
+  }
+
   return { position, target };
 }
 
@@ -234,6 +377,10 @@ function resolveMove(
     orbitDeg: move.type === "ORBIT" || move.type === "DRONE" ? move.orbitDeg * progress : 0,
     distanceScale: dollyNow,
     craneHeight: move.type === "CRANE" || move.type === "DRONE" ? move.craneHeight * progress : 0,
+    panDeg: move.type === "PAN" ? (move.panDeg ?? 0) * progress : 0,
+    tiltDeg: move.type === "TILT" ? (move.tiltDeg ?? 0) * progress : 0,
+    truckDist: move.type === "TRUCK" ? (move.truckDist ?? 0) * progress : 0,
+    handheld: move.type === "HANDHELD",
   });
 
   return { position, target, lensMm, fovDeg: lensFovDeg(lensMm), roll, move };
@@ -254,7 +401,9 @@ export function solveCamera(
 
   const move = activeCameraMove(state, cameraId, time);
   if (!move) {
-    const { position, target } = placeCamera(state, camera, time, {});
+    const { position, target } = placeCamera(state, camera, time, {
+      handheld: camera.motion === "HANDHELD",
+    });
     return {
       position,
       target,

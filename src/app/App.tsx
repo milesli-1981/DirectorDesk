@@ -6,6 +6,7 @@ import { Timeline } from "../components/Timeline";
 import { WorldView } from "../components/WorldView";
 import { contentEndTime } from "../engine/timeline";
 import { exportMultiCamVideos } from "../engine/videoExport";
+import { installHeadlessApi } from "../engine/headlessApi";
 import { useDirectorStore } from "../state/directorStore";
 
 export function App() {
@@ -38,6 +39,13 @@ export function App() {
       }
     });
   }, [persist]);
+
+  // 无头渲染模式：?headless=1 时挂载 window.previsRender，供 MCP / Playwright 调用。
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("headless") === "1") {
+      installHeadlessApi();
+    }
+  }, []);
 
   const handleExport = () => {
     const json = exportProject();
