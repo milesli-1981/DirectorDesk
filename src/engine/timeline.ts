@@ -38,6 +38,17 @@ export function buildTimelineItems(state: DirectorState): TimelineItem[] {
     });
   });
 
+  // 动作片段：与 segments / constraints 同挂在该演员的对象轨道上。
+  (state.actions ?? []).forEach((clip) => {
+    items.push({
+      id: `clip_${clip.id}`,
+      track: clip.object,
+      source: clip.id,
+      kind: "action",
+      label: `${clip.kind} · ${Math.round(clip.intensity * 100)}%`,
+    });
+  });
+
   return items;
 }
 
@@ -62,7 +73,9 @@ export function itemRange(
     return constraint ? { start: constraint.timeStart, end: constraint.timeEnd } : null;
   }
   const move = state.cameraMoves.find((m) => m.id === item.source);
-  return move ? { start: move.timeStart, end: move.timeEnd } : null;
+  if (move) return { start: move.timeStart, end: move.timeEnd };
+  const action = state.actions?.find((a) => a.id === item.source);
+  return action ? { start: action.timeStart, end: action.timeEnd } : null;
 }
 
 export function roundTime(value: number): number {

@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { Fragment, useMemo, useRef, useState } from "react";
 import { useDirectorStore } from "../state/directorStore";
 import { EaseCurve, HandoffMode, TimelineItem } from "../domain/schema";
 import { buildTimelineItems, itemRange } from "../engine/timeline";
@@ -104,6 +104,8 @@ export function Timeline() {
   const setCameraMoveTime = useDirectorStore((s) => s.setCameraMoveTime);
   const addSegment = useDirectorStore((s) => s.addSegment);
   const addCameraMove = useDirectorStore((s) => s.addCameraMove);
+  const addAction = useDirectorStore((s) => s.addAction);
+  const setActionTime = useDirectorStore((s) => s.setActionTime);
   const setCameraJunctionMode = useDirectorStore((s) => s.setCameraJunctionMode);
   const reorderObject = useDirectorStore((s) => s.reorderObject);
 
@@ -160,6 +162,7 @@ export function Timeline() {
 
     if (drag.item.kind === "segment") setSegmentTime(drag.item.source, nextStart, nextEnd);
     else if (drag.item.kind === "constraint") setConstraintTime(drag.item.source, nextStart, nextEnd);
+    else if (drag.item.kind === "action") setActionTime(drag.item.source, nextStart, nextEnd);
     else setCameraMoveTime(drag.item.source, nextStart, nextEnd);
   };
 
@@ -234,31 +237,60 @@ export function Timeline() {
         </div>
         <Playhead />
         <div className="tracks" id="tracks">
-          {state.objects.map((object) => (
-            <div key={object.id} className={`row ${dragRowId === object.id ? "row-dragging" : ""}`}>
-              <div
-                className="label"
-                title={object.id}
-                draggable
-                onDragStart={handleRowDragStart(object.id)}
-                onDragOver={handleRowDragOver(object.id)}
-                onDragEnd={handleRowDragEnd}
-              >
-                {object.id}
+          {state.objects
+            .filter((object) => object.role === "agent" || items.some((item) => item.track === object.id))
+            .map((object) => (
+            <Fragment key={object.id}>
+              <div className={`row ${dragRowId === object.id ? "row-dragging" : ""}`}>
+                <div
+                  className="label"
+                  title={object.id}
+                  draggable
+                  onDragStart={handleRowDragStart(object.id)}
+                  onDragOver={handleRowDragOver(object.id)}
+                  onDragEnd={handleRowDragEnd}
+                >
+                  {object.id}
+                </div>
+                {/* 运动轨道：只放 MOVE / Constraint，动作片段单独一行避免重叠。 */}
+                <div className="lane" data-track={object.id}>
+                  {items
+                    .filter((item) => item.track === object.id && item.kind !== "action")
+                    .map(renderClip)}
+                </div>
+                <button
+                  type="button"
+                  className="add-leg"
+                  title="Add leg (append a new MOVE segment anchored to the last leg's end)"
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={() => addSegment(object.id)}
+                >
+                  ＋
+                </button>
               </div>
-              <div className="lane" data-track={object.id}>
-                {items.filter((item) => item.track === object.id).map(renderClip)}
-              </div>
-              <button
-                type="button"
-                className="add-leg"
-                title="Add leg (append a new MOVE segment anchored to the last leg's end)"
-                onPointerDown={(event) => event.stopPropagation()}
-                onClick={() => addSegment(object.id)}
-              >
-                ＋
-              </button>
-            </div>
+              {/* 动作轨道：仅 human 类资产有（车辆 / 建筑等没有关节，不提供动作）。 */}
+              {object.category === "human" ? (
+                <div className="row action-row">
+                  <div className="label act-label" title={`${object.id} 动作`}>
+                    {object.id} 动作
+                  </div>
+                  <div className="lane" data-track={object.id}>
+                    {items
+                      .filter((item) => item.track === object.id && item.kind === "action")
+                      .map(renderClip)}
+                  </div>
+                  <button
+                    type="button"
+                    className="add-leg"
+                    title="Add action clip (pose / gesture / gait)"
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={() => addAction(object.id)}
+                  >
+                    ＋A
+                  </button>
+                </div>
+              ) : null}
+            </Fragment>
           ))}
 
           {state.cameras.map((camera) => (

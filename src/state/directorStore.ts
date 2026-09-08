@@ -15,12 +15,15 @@ import {
   HandoffMode,
   IntentAction,
   MoveSegment,
+  OtsSide,
   PathPoint,
   StageManifest,
+  ActionClip,
+  ActionKind,
   Vec2,
   ViewMode,
 } from "../domain/schema";
-import { createBlankState, createDemoState } from "../engine/demoShot";
+import { createBlankState, createCommuteState, createDemoState } from "../engine/demoShot";
 import { normalizePathPointModes, pathInsertIndex } from "../engine/path";
 import { contentEndTime } from "../engine/timeline";
 import { ASSET_PRESETS } from "../engine/assetPresets";
@@ -60,7 +63,7 @@ function loadSceneState(id: string): DirectorState | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as DirectorState;
     if (!parsed || !Array.isArray(parsed.objects) || !Array.isArray(parsed.cameraMoves)) return null;
-    return parsed;
+    return { ...parsed, actions: parsed.actions ?? [] };
   } catch {
     return null;
   }
@@ -87,43 +90,80 @@ function genSceneId(): string {
 }
 
 /**
- * 启动时装配片场：优先读 manifest；否则迁移旧 v2 单场景，或落一个 demo 场景。
+ * 内建种子场景：启动时在片场中补齐缺失的项（追加 tab + 落盘 state），不破坏现有场景页。
+ * 只播种「通勤偶遇」，避免与用户已有的 demo 场景重复。
+ */
+const SEED_SCENES: { id: string; name: string; build: () => DirectorState }[] = [
+  { id: "SCN_COMMUTE", name: "通勤偶遇", build: createCommuteState },
+];
+
+/** 在已有 manifest 中补齐缺失的内建场景，不改写现有场景页。 */
+function ensureSeedScenes(manifest: StageManifest): StageManifest {
+  let order = [...manifest.order];
+  let changed = false;
+  for (const seed of SEED_SCENES) {
+    if (!order.some((tab) => tab.id === seed.id)) {
+      order = [...order, { id: seed.id, name: seed.name }];
+      changed = true;
+    }
+    // 种子场景始终按最新代码重建（不缓存），方便迭代生成的 demo，无需手动清 localStorage。
+    // 注意：对种子场景页的手动编辑会在刷新后丢失，需要保留请先「复制场景」到非种子页。
+    if (typeof localStorage !== "undefined") {
+      saveSceneState(seed.id, seed.build());
+    }
+  }
+  if (!changed) return manifest;
+  const updated: StageManifest = { ...manifest, order };
+  saveManifest(updated);
+  return updated;
+}
+
+/**
+ * 启动时装配片场：优先读 manifest（并补齐缺失内建场景）；否则迁移旧 v2 单场景，
+ * 或落一个全新片场（首屏 demo/迁移场景 + 通勤偶遇种子场景）。
  * 返回的 activeState 直接作为 store 顶层 `state`（= 当前激活场景页的引用）。
  */
 function initStage(): { manifest: StageManifest; activeState: DirectorState } {
   const manifest = loadManifest();
   if (manifest && manifest.order.length > 0) {
+    const ensured = ensureSeedScenes(manifest);
     const activeId =
-      manifest.activeSceneId && manifest.order.some((t) => t.id === manifest.activeSceneId)
-        ? manifest.activeSceneId
-        : manifest.order[0].id;
+      ensured.activeSceneId && ensured.order.some((t) => t.id === ensured.activeSceneId)
+        ? ensured.activeSceneId
+        : ensured.order[0].id;
     const activeState = loadSceneState(activeId) ?? createBlankState();
-    return { manifest: { ...manifest, activeSceneId: activeId }, activeState };
+    return { manifest: ensured, activeState };
   }
 
-  let state: DirectorState;
+  // 无 manifest：迁移旧 v2，或全新片场（首屏用 demo，再附上其余种子场景）。
+  let state: DirectorState = createDemoState();
+  let initialTab = { id: "SCN_DEMO", name: "M17 Killer Test" };
   const legacy =
     typeof localStorage !== "undefined" ? localStorage.getItem(LEGACY_KEY) : null;
   if (legacy) {
     try {
       const parsed = JSON.parse(legacy) as DirectorState;
-      state =
-        parsed && Array.isArray(parsed.objects) && Array.isArray(parsed.cameraMoves)
-          ? parsed
-          : createDemoState();
+      if (parsed && Array.isArray(parsed.objects) && Array.isArray(parsed.cameraMoves)) {
+        state = parsed;
+        initialTab = { id: "SCN_LEGACY", name: "导入 v2 场景" };
+      }
     } catch {
-      state = createDemoState();
+      // 解析失败则退回 demo
     }
-  } else {
-    state = createDemoState();
   }
 
-  const id = genSceneId();
-  saveSceneState(id, state);
+  const order = [
+    initialTab,
+    ...SEED_SCENES.filter((s) => s.id !== initialTab.id).map((s) => ({ id: s.id, name: s.name })),
+  ];
+  saveSceneState(initialTab.id, state);
+  for (const seed of SEED_SCENES) {
+    if (!loadSceneState(seed.id)) saveSceneState(seed.id, seed.build());
+  }
   const newManifest: StageManifest = {
     name: "未命名片场",
-    order: [{ id, name: "场景 1" }],
-    activeSceneId: id,
+    order,
+    activeSceneId: initialTab.id,
   };
   saveManifest(newManifest);
   return { manifest: newManifest, activeState: state };
@@ -196,6 +236,11 @@ interface DirectorStore {
   setHandoffMode: (handoffId: string, mode: HandoffMode) => void;
   setCameraJunctionMode: (junctionId: string, mode: HandoffMode) => void;
   deleteSegment: (segmentId: string) => void;
+  // —— 动作片段（ActionClip）管理 ——
+  addAction: (objectId: string, time?: number) => void;
+  setActionTime: (actionId: string, start: number, end: number) => void;
+  updateAction: (actionId: string, patch: Partial<ActionClip>) => void;
+  deleteAction: (actionId: string) => void;
 
   setSegmentTime: (segmentId: string, start: number, end: number) => void;
   setConstraintTime: (constraintId: string, start: number, end: number) => void;
@@ -203,23 +248,57 @@ interface DirectorStore {
 
   addCamera: () => void;
   addDroneCamera: () => void;
+  removeCamera: (cameraId: string) => void;
   updateCamera: (
     cameraId: string,
-    patch: Partial<Pick<CameraObject, "targetId" | "framing" | "view" | "side" | "lensMm" | "motion" | "name" | "kind">>,
+    patch: Partial<
+      Pick<
+        CameraObject,
+        | "targetId"
+        | "framing"
+        | "view"
+        | "side"
+        | "lensMm"
+        | "motion"
+        | "name"
+        | "kind"
+        | "roll"
+        | "shoulderId"
+        | "otsSide"
+        | "otsOffset"
+      >
+    >,
   ) => void;
   addCameraMove: (cameraId: string, type: CameraMotionType) => void;
   setCameraMoveTime: (moveId: string, start: number, end: number) => void;
   setCameraMoveEase: (moveId: string, ease: EaseCurve) => void;
   patchCameraMove: (moveId: string, patch: Partial<CameraMove>) => void;
   deleteCameraMove: (moveId: string) => void;
+  /** 基于某条过肩 move 生成正反打：互换前景 / 主体、翻转肩侧，并保持同一侧轴线。 */
+  addReverseShot: (moveId: string) => void;
   setAspectRatio: (ratio: AspectRatio) => void;
 
   executeIntent: (objectId: string, action: IntentAction) => void;
   reset: () => void;
+  // —— 撤销 / 重做历史 ——
+  past: DirectorState[];
+  future: DirectorState[];
+  undo: () => void;
+  redo: () => void;
 }
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 const round1 = (value: number) => Math.round(value * 10) / 10;
+
+function nextActionId(state: DirectorState): string {
+  let index = (state.actions?.length ?? 0) + 1;
+  let id = `ACT_${String(index).padStart(2, "0")}`;
+  while (state.actions?.some((a) => a.id === id)) {
+    index += 1;
+    id = `ACT_${String(index).padStart(2, "0")}`;
+  }
+  return id;
+}
 
 function nextSegmentId(state: DirectorState): string {
   let index = state.segments.length + 1;
@@ -333,7 +412,32 @@ function reconcileCameraJunctions(moves: CameraMove[], prev: CameraJunction[]): 
   return next;
 }
 
-export const useDirectorStore = create<DirectorStore>((set, get) => {
+export const useDirectorStore = create<DirectorStore>((setParam, get) => {
+  // 原 Zustand set（类型保留，供 action 内回调正确推断 store 类型）。
+  const rawSet = setParam as unknown as (partial: any, replace?: any) => void;
+  // 撤销历史：每次「改场景数据」的 set 之前，把当前 state 压入 past；
+  // 连续编辑（如拖拽，<500ms 内的多次 set）合并为同一历史项，避免拖拽刷屏；
+  // 切/增/删场景页（含 manifest）时清空历史，避免跨场景误撤销。
+  const HISTORY_LIMIT = 200;
+  const COALESCE_MS = 500;
+  let lastEditTime = 0;
+  const set: typeof setParam = (partial, replace) => {
+    const prev = get().state;
+    const p = partial as any;
+    const next = typeof p === "function" ? p(get()) : p;
+    if (next && next.state && next.state !== prev && !next.manifest) {
+      const now = Date.now();
+      if (now - lastEditTime > COALESCE_MS) {
+        rawSet({ past: [...get().past, prev].slice(-HISTORY_LIMIT), future: [] });
+        lastEditTime = now;
+      }
+      // 否则视为连续编辑（如拖拽），合并到上一条历史项，不重复压栈。
+    } else if (next && next.manifest) {
+      rawSet({ past: [], future: [] });
+    }
+    rawSet(partial, replace);
+  };
+
   const patchSegment = (segmentId: string, patch: Partial<MoveSegment>) =>
     set((store) => {
       const segments = store.state.segments.map((segment) =>
@@ -379,6 +483,8 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
   return {
     state: init.activeState,
     manifest: init.manifest,
+    past: [],
+    future: [],
     currentTime: 0,
     playing: false,
     zoom: 1,
@@ -616,7 +722,7 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
         const activeId = get().manifest.activeSceneId;
         saveSceneState(activeId, parsed);
         set({
-          state: { ...parsed, revision: (parsed.revision ?? 0) + 1 },
+          state: { ...parsed, actions: parsed.actions ?? [], revision: (parsed.revision ?? 0) + 1 },
           currentTime: 0,
           playing: false,
           selectedKind: "object",
@@ -1133,19 +1239,61 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
     addCameraMove: (cameraId, type) => {
       const store = get();
       const { state } = store;
-      const start = round1(store.currentTime);
+      const duration = state.duration;
+      // 每段独立、互不重叠：新段插在播放头处，被夹在相邻两段之间。
+      const atTime = clamp(round1(store.currentTime), 0, Math.max(0, duration - 0.5));
+      const camera = state.cameras.find((c) => c.id === cameraId);
+      const siblings = state.cameraMoves
+        .filter((m) => m.camera === cameraId)
+        .sort((a, b) => a.timeStart - b.timeStart);
+      // 落在某条已有段内部 → 把它从播放头截断，本段接管后续时间。
+      const host = siblings.find((m) => atTime > m.timeStart && atTime < m.timeEnd);
+      // 播放头之后的第一条段，新段右端不能超过它的起点。
+      const next = siblings.filter((m) => m.timeStart >= atTime).sort((a, b) => a.timeStart - b.timeStart)[0];
+
+      let newStart = atTime;
+      let newEnd = round1(Math.min(atTime + 2, duration));
+      if (next) newEnd = round1(Math.min(newEnd, next.timeStart));
+      if (newEnd - newStart < 0.5) {
+        // 旁边没有空间，改放到该段之后，仍不与其重叠。
+        newStart = next ? next.timeEnd : round1(duration - 0.5);
+        newEnd = round1(Math.min(newStart + 2, duration));
+        if (next) newEnd = Math.min(newEnd, next.timeEnd);
+      }
+
+      const cameraMoves = [...state.cameraMoves];
+      if (host) {
+        const hi = cameraMoves.findIndex((m) => m.id === host.id);
+        if (hi >= 0) {
+          if (atTime - host.timeStart < 0.05) {
+            // 几乎压在起点：直接删除原段，新段从其起点接管。
+            cameraMoves.splice(hi, 1);
+            newStart = host.timeStart;
+          } else {
+            cameraMoves[hi] = { ...cameraMoves[hi], timeEnd: atTime };
+          }
+        }
+      }
+
       const move: CameraMove = {
         id: nextCameraMoveId(state, cameraId),
         camera: cameraId,
         type,
-        timeStart: start,
-        timeEnd: round1(Math.min(state.duration, Math.max(start + 1, start + 3))),
+        targetId: camera?.targetId,
+        // OTS 默认取一个非主体的演员作前景，让过肩开箱即用；其余类型留空以继承相机级设置。
+        shoulderId:
+          type === "OTS"
+            ? camera?.shoulderId ?? state.objects.find((o) => o.id !== camera?.targetId)?.id
+            : undefined,
+        otsSide: type === "OTS" ? camera?.otsSide ?? "R" : undefined,
+        timeStart: newStart,
+        timeEnd: newEnd,
         orbitDeg: 90,
         dollyScale: type === "DOLLY" ? 0.55 : 1,
         craneHeight: type === "CRANE" ? 3 : 0,
         ease: [0.42, 0, 0.58, 1],
       };
-      const cameraMoves = [...state.cameraMoves, move];
+      cameraMoves.push(move);
       set({
         state: {
           ...state,
@@ -1159,10 +1307,77 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
       });
     },
 
+    addReverseShot: (moveId) => {
+      const store = get();
+      const { state } = store;
+      const src = state.cameraMoves.find((m) => m.id === moveId);
+      if (!src) return;
+      const camera = state.cameras.find((c) => c.id === src.camera);
+      if (!camera) return;
+      // 正反打：前景与主体互换、肩侧翻转，从而落在动作轴线的同一侧。
+      const newShoulder = src.targetId ?? camera.targetId;
+      const newTarget = src.shoulderId;
+      if (!newShoulder || !newTarget || newShoulder === newTarget) return;
+      const flip = (s?: OtsSide): OtsSide => (s === "L" ? "R" : "L");
+      const newSide = flip(src.otsSide ?? camera.otsSide ?? "R");
+      // 放在源段之后，不与同相机其它段重叠。
+      const sibs = state.cameraMoves
+        .filter((m) => m.camera === src.camera)
+        .sort((a, b) => a.timeStart - b.timeStart);
+      const atTime = src.timeEnd;
+      const next = sibs.filter((m) => m.timeStart >= atTime).sort((a, b) => a.timeStart - b.timeStart)[0];
+      let newStart = atTime;
+      let newEnd = round1(Math.min(atTime + (src.timeEnd - src.timeStart), state.duration));
+      if (next) newEnd = round1(Math.min(newEnd, next.timeStart));
+      if (newEnd - newStart < 0.5) {
+        newStart = next ? next.timeEnd : round1(state.duration - 0.5);
+        newEnd = round1(Math.min(newStart + 2, state.duration));
+        if (next) newEnd = Math.min(newEnd, next.timeEnd);
+      }
+      const move: CameraMove = {
+        id: nextCameraMoveId(state, src.camera),
+        camera: src.camera,
+        type: "OTS",
+        targetId: newTarget,
+        shoulderId: newShoulder,
+        otsSide: newSide,
+        timeStart: newStart,
+        timeEnd: newEnd,
+        orbitDeg: 90,
+        dollyScale: 1,
+        craneHeight: 0,
+        ease: src.ease,
+      };
+      const cameraMoves = [...state.cameraMoves, move];
+      set({
+        state: {
+          ...state,
+          revision: state.revision + 1,
+          cameraMoves,
+          cameraJunctions: reconcileCameraJunctions(cameraMoves, state.cameraJunctions),
+        },
+        selectedKind: "camera",
+        selectedId: src.camera,
+        selectedItem: move.id,
+      });
+    },
+
     setCameraMoveTime: (moveId, start, end) => {
-      const duration = get().state.duration;
-      const nextStart = clamp(round1(start), 0, duration - 0.1);
-      const nextEnd = clamp(round1(end), nextStart + 0.1, duration);
+      const store = get();
+      const duration = store.state.duration;
+      const self = store.state.cameraMoves.find((m) => m.id === moveId);
+      if (!self) return;
+      let nextStart = clamp(round1(start), 0, duration - 0.1);
+      let nextEnd = clamp(round1(end), nextStart + 0.1, duration);
+      // 不与同相机其它段重叠：把本段夹在相邻两段之间。
+      const sibs = store.state.cameraMoves
+        .filter((m) => m.camera === self.camera && m.id !== moveId)
+        .sort((a, b) => a.timeStart - b.timeStart);
+      const prev = sibs.filter((m) => m.timeEnd <= nextStart + 1e-6).sort((a, b) => b.timeEnd - a.timeEnd)[0];
+      const next = sibs.filter((m) => m.timeStart >= nextEnd - 1e-6).sort((a, b) => a.timeStart - b.timeStart)[0];
+      if (prev) nextStart = Math.max(nextStart, round1(prev.timeEnd));
+      if (next) nextEnd = Math.min(nextEnd, round1(next.timeStart));
+      if (nextEnd - nextStart < 0.1) nextEnd = Math.min(duration, nextStart + 0.1);
       patchCameraMove(moveId, { timeStart: nextStart, timeEnd: nextEnd });
     },
 
@@ -1184,9 +1399,93 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
         };
       }),
 
+    removeCamera: (cameraId) =>
+      set((store) => {
+        const cameraMoves = store.state.cameraMoves.filter((move) => move.camera !== cameraId);
+        const nextActive =
+          store.activeCameraId === cameraId
+            ? (store.state.cameras.find((c) => c.id !== cameraId)?.id ?? null)
+            : store.activeCameraId;
+        return {
+          state: {
+            ...store.state,
+            revision: store.state.revision + 1,
+            cameras: store.state.cameras.filter((camera) => camera.id !== cameraId),
+            cameraMoves,
+            cameraJunctions: reconcileCameraJunctions(cameraMoves, store.state.cameraJunctions),
+          },
+          activeCameraId: nextActive,
+          selectedKind: store.selectedKind === "camera" && store.selectedId === cameraId ? "object" : store.selectedKind,
+          selectedId: store.selectedKind === "camera" && store.selectedId === cameraId ? "" : store.selectedId,
+          selectedItem: store.selectedItem,
+        };
+      }),
+
     setAspectRatio: (ratio) =>
       set((store) => ({
         state: { ...store.state, revision: store.state.revision + 1, aspectRatio: ratio },
+      })),
+
+    addAction: (objectId, time) => {
+      const store = get();
+      const { state } = store;
+      const start = round1(time ?? store.currentTime);
+      const end = round1(Math.min(state.duration, start + 2));
+      const clip: ActionClip = {
+        id: nextActionId(state),
+        object: objectId,
+        timeStart: start,
+        timeEnd: end,
+        kind: "wave",
+        intensity: 1,
+      };
+      set({
+        state: {
+          ...state,
+          revision: state.revision + 1,
+          actions: [...(state.actions ?? []), clip],
+        },
+        selectedKind: "object",
+        selectedId: objectId,
+        selectedItem: clip.id,
+        radialObjectId: null,
+      });
+    },
+
+    setActionTime: (actionId, start, end) => {
+      const duration = get().state.duration;
+      const nextStart = clamp(round1(start), 0, duration - 0.1);
+      const nextEnd = clamp(round1(end), nextStart + 0.1, duration);
+      set((store) => ({
+        state: {
+          ...store.state,
+          revision: store.state.revision + 1,
+          actions: (store.state.actions ?? []).map((a) =>
+            a.id === actionId ? { ...a, timeStart: nextStart, timeEnd: nextEnd } : a,
+          ),
+        },
+      }));
+    },
+
+    updateAction: (actionId, patch) =>
+      set((store) => ({
+        state: {
+          ...store.state,
+          revision: store.state.revision + 1,
+          actions: (store.state.actions ?? []).map((a) =>
+            a.id === actionId ? { ...a, ...patch } : a,
+          ),
+        },
+      })),
+
+    deleteAction: (actionId) =>
+      set((store) => ({
+        state: {
+          ...store.state,
+          revision: store.state.revision + 1,
+          actions: (store.state.actions ?? []).filter((a) => a.id !== actionId),
+        },
+        selectedItem: store.selectedItem === actionId ? null : store.selectedItem,
       })),
 
     executeIntent: (objectId, action) => {
@@ -1291,6 +1590,31 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
         return;
       }
 
+      if (action === "ACTION" || action === "ADD ACTION") {
+        const start = round1(time);
+        const end = round1(Math.min(duration, start + 2));
+        const clip: ActionClip = {
+          id: nextActionId(state),
+          object: objectId,
+          timeStart: start,
+          timeEnd: end,
+          kind: "wave",
+          intensity: 1,
+        };
+        set({
+          state: {
+            ...state,
+            revision: state.revision + 1,
+            actions: [...(state.actions ?? []), clip],
+          },
+          selectedKind: "object",
+          selectedId: objectId,
+          selectedItem: clip.id,
+          radialObjectId: null,
+        });
+        return;
+      }
+
       set({ radialObjectId: null, selectedItem: action });
     },
 
@@ -1310,5 +1634,29 @@ export const useDirectorStore = create<DirectorStore>((set, get) => {
         viewLocked: false,
         dragging: false,
       })),
+
+    undo: () => {
+      const { past, future, state } = get();
+      if (past.length === 0) return;
+      const previous = past[past.length - 1];
+      lastEditTime = 0;
+      rawSet({
+        state: previous,
+        past: past.slice(0, -1),
+        future: [state, ...future].slice(0, HISTORY_LIMIT),
+      });
+    },
+
+    redo: () => {
+      const { past, future, state } = get();
+      if (future.length === 0) return;
+      const nextState = future[0];
+      lastEditTime = 0;
+      rawSet({
+        state: nextState,
+        past: [...past, state].slice(-HISTORY_LIMIT),
+        future: future.slice(1),
+      });
+    },
   };
 });

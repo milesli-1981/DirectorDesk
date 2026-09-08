@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, MutableRefObject, useRef, useState } from "react";
 import { Canvas, ThreeEvent, useFrame, useThree } from "@react-three/fiber";
 import { setCaptureCanvas } from "../engine/videoExport";
 import { Html, Line, OrbitControls, PerspectiveCamera } from "@react-three/drei";
 import * as THREE from "three";
 import { useDirectorStore } from "../state/directorStore";
-import { HandoffMode, MoveSegment, PathPoint, Vec2 } from "../domain/schema";
+import { HandoffMode, JointName, MoveSegment, PathPoint, Pose, Vec2 } from "../domain/schema";
 import { curveToggleEligible, pathChain } from "../engine/path";
 import {
   hitCameraRay,
@@ -15,6 +15,9 @@ import {
   pathPolyline,
 } from "../engine/pick";
 import { objectFacing, objectPosition } from "../engine/solver";
+import { actionPoseAt } from "../engine/actionPose";
+import { MODEL_CONFIG } from "../engine/modelConfig";
+import { HumanoidGLB, ModelBoundary } from "./HumanoidModel";
 import {
   activeCameraMove,
   computeFrame,
@@ -22,10 +25,15 @@ import {
   sampleCameraPath,
   solveCamera,
 } from "../engine/cameraSolver";
+import { cameraAxis } from "../engine/axis";
+import { EffectComposer, DepthOfField } from "@react-three/postprocessing";
+import type { DepthOfFieldEffect } from "postprocessing";
+import { bokehScaleForLens, focusRangeForLens, liveShot } from "../engine/shotFocus";
 import { blockingAssets, setRects } from "../engine/occlusion";
 import { segmentRoutePoints } from "../engine/path";
 import { aspectValue, FRAMING_LABELS, MOTION_LABELS, SIDE_LABELS, VIEW_LABELS } from "../domain/schema";
 import { RadialRing } from "./RadialRing";
+import { LockBadge } from "./LockBadge";
 
 const GROUND_PLANE = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 const TARGET = new THREE.Vector3(0, 0, 0);
@@ -66,6 +74,8 @@ function ActorView({ objectId }: { objectId: string }) {
   const bodyRef = useRef<THREE.Group>(null);
   const phaseRef = useRef(0);
   const facingRef = useRef(0);
+  // 把当前速度共享给骨骼组件，由其按速度摆腿摆臂（Body Motion 与位移分离）。
+  const speedRef = useRef(0);
 
   useFrame((_, delta) => {
     if (!object) return;
@@ -91,6 +101,7 @@ function ActorView({ objectId }: { objectId: string }) {
     const dz = position.z - previous.z;
     const distance = Math.hypot(dx, dz);
     const speed = distance / Math.max(delta, 0.001);
+    speedRef.current = speed;
 
     if (groupRef.current) {
       groupRef.current.position.set(position.x, 0, position.z);
@@ -102,11 +113,15 @@ function ActorView({ objectId }: { objectId: string }) {
       groupRef.current.rotation.y = facingRef.current;
     }
 
-    // Body Motion 与整体位移分离：Cycle 由速度驱动，位置由 Motion Curve 驱动。
+    // Body Motion 与整体位移分离：方块简模自己做起伏；
+    // GLB 骨骼动画自带起伏，不再叠加，避免双重弹跳。
     phaseRef.current += delta * speed * 2.6;
     const intensity = Math.min(1, speed / 2.6);
+    const useGlb = object.category === "human" && !!MODEL_CONFIG.human;
     if (bodyRef.current) {
-      bodyRef.current.position.y = Math.abs(Math.sin(phaseRef.current)) * 0.05 * intensity;
+      bodyRef.current.position.y = useGlb
+        ? 0
+        : Math.abs(Math.sin(phaseRef.current)) * 0.05 * intensity;
     }
   });
 
@@ -115,24 +130,45 @@ function ActorView({ objectId }: { objectId: string }) {
   const { w, d, h } = object.footprint;
   const ringR = Math.max(w, d) * 0.7 + 0.16;
 
+  // 方块简模（human 用 HumanoidRig，其它类别用体块）。
+  const blockBody =
+    object.category === "human" ? (
+      <HumanoidRig w={w} d={d} h={h} color={color} speedRef={speedRef} pose={object.pose} objectId={objectId} />
+    ) : (
+      <mesh position={[0, h / 2, 0]}>
+        <boxGeometry args={[w, h, d]} />
+        <meshStandardMaterial
+          color={color}
+          roughness={0.7}
+          metalness={0.05}
+          transparent={object.role === "set"}
+          opacity={object.role === "set" ? 0.82 : 1}
+        />
+      </mesh>
+    );
+
+  // human 且配置了模型 → GLB 骨骼动画；加载中 / 失败都回退到方块简模。
+  const modelConfig = MODEL_CONFIG.human;
+  const body =
+    object.category === "human" && modelConfig ? (
+      <ModelBoundary fallback={blockBody}>
+        <Suspense fallback={blockBody}>
+          <HumanoidGLB
+            objectId={objectId}
+            height={h}
+            speedRef={speedRef}
+            config={modelConfig}
+            color={color}
+          />
+        </Suspense>
+      </ModelBoundary>
+    ) : (
+      blockBody
+    );
+
   return (
     <group ref={groupRef}>
-      <group ref={bodyRef}>
-        {object.category === "human" ? (
-          <HumanoidFigure w={w} d={d} h={h} color={color} />
-        ) : (
-          <mesh position={[0, h / 2, 0]}>
-            <boxGeometry args={[w, h, d]} />
-            <meshStandardMaterial
-              color={color}
-              roughness={0.7}
-              metalness={0.05}
-              transparent={object.role === "set"}
-              opacity={object.role === "set" ? 0.82 : 1}
-            />
-          </mesh>
-        )}
-      </group>
+      <group ref={bodyRef}>{body}</group>
 
       {showHelpers ? (
         <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.02, 0]}>
@@ -173,7 +209,9 @@ function ActorView({ objectId }: { objectId: string }) {
           style={{ pointerEvents: "none" }}
           zIndexRange={[20, 0]}
         >
-          <span className="lock-badge">LOCKED</span>
+          <span className="lock-badge" title="已锁定初始位置：编辑时不可拖拽，播放时仍按轨迹移动">
+            LOCKED
+          </span>
         </Html>
       ) : null}
     </group>
@@ -181,19 +219,28 @@ function ActorView({ objectId }: { objectId: string }) {
 }
 
 /**
- * 人形体块：human 类资产用「头 + 躯干 + 双臂 + 双腿」的组合体表示，
- * 与建筑 / 家具等纯方盒资产在视觉上区分开。尺寸全部由 footprint 推导。
+ * 人形骨骼：human 类资产用「头 + 躯干 + 双臂 + 双腿」的关节化组合体表示。
+ * 关节按 JointName 树嵌套（髋→膝、肩→肘、脊柱→肩/颈），每个关节是一个 group，
+ * mesh 作为子节点挂在关节下方。渲染层把 actor.pose 的静态基线角度与按速度
+ * 驱动的走/跑摆动叠加（Body Motion 与整体位移分离，位置仍由 solver 求解）。
+ * 尺寸全部由 footprint 推导；无 pose 时与旧版方盒人外观一致。
  */
-function HumanoidFigure({
+function HumanoidRig({
   w,
   d,
   h,
   color,
+  speedRef,
+  pose,
+  objectId,
 }: {
   w: number;
   d: number;
   h: number;
   color: string;
+  speedRef: MutableRefObject<number>;
+  pose?: Pose;
+  objectId: string;
 }) {
   const legH = h * 0.44;
   const torsoH = h * 0.34;
@@ -207,33 +254,137 @@ function HumanoidFigure({
   const armD = d * 0.16;
   const armH = torsoH * 0.9;
   const armX = torsoW / 2 + armW / 2;
+  const shoulderY = legH + torsoH; // 肩关节 = 躯干顶端
+  const thighLen = legH * 0.5;
+  const shinLen = legH * 0.5;
+  const upperArmLen = armH * 0.5;
+  const foreArmLen = armH * 0.5;
+
+  const hipL = useRef<THREE.Group>(null);
+  const hipR = useRef<THREE.Group>(null);
+  const kneeL = useRef<THREE.Group>(null);
+  const kneeR = useRef<THREE.Group>(null);
+  const spine = useRef<THREE.Group>(null);
+  const shoulderL = useRef<THREE.Group>(null);
+  const shoulderR = useRef<THREE.Group>(null);
+  const elbowL = useRef<THREE.Group>(null);
+  const elbowR = useRef<THREE.Group>(null);
+  const neck = useRef<THREE.Group>(null);
+  const phaseRef = useRef(0);
+
+  useFrame((_, delta) => {
+    const speed = speedRef.current;
+    const intensity = Math.min(1, speed / 2.6); // 0=静止，1=全速
+
+    // 静态姿势基线（pose）+ 时间轴动作片段（action）叠加；未列出的关节为 0。
+    const { state, currentTime } = useDirectorStore.getState();
+    const actionSample = actionPoseAt(state, objectId, currentTime);
+    const aJ = actionSample.pose.joints;
+    const j = pose?.joints ?? {};
+    const combinedX = (n: JointName) => (j[n]?.[0] ?? 0) + (aJ[n]?.[0] ?? 0);
+    const loco = actionSample.locomotionScale;
+
+    // 步态：显式 walk/run 片段优先；否则按 MOVE 的速度自动判定（低速走、高速跑）。
+    // 注意 MOVE 决定"去哪里"，步态只决定身体怎么动，二者互不覆盖。
+    const RUN_SPEED = 1.6;
+    const isRun =
+      actionSample.gait === "run" || (actionSample.gait === "auto" && speed >= RUN_SPEED);
+    const cadence = isRun ? 1.5 + speed * 1.9 : 1.5 + speed * 1.2;
+    const legAmp = (isRun ? 0.85 : 0.6) * intensity;
+    const armAmp = (isRun ? 0.7 : 0.5) * intensity;
+    const lean = (isRun ? 0.25 : 0.06) * intensity * loco;
+    phaseRef.current += delta * cadence;
+    const legSwing = Math.sin(phaseRef.current) * legAmp;
+    const armSwing = Math.sin(phaseRef.current + Math.PI) * armAmp;
+
+    const setRot = (ref: { current: THREE.Group | null }, n: JointName) => {
+      if (ref.current) {
+        const v = j[n] ?? [0, 0, 0];
+        const av = aJ[n] ?? [0, 0, 0];
+        ref.current.rotation.set(v[0] + av[0], v[1] + av[1], v[2] + av[2]);
+      }
+    };
+
+    // 髋/肩：基线 + 动作 + 走/跑摆动（locomotionScale 在坐/蹲时为 0）。
+    if (hipL.current) hipL.current.rotation.x = combinedX("hipL") + legSwing * loco;
+    if (hipR.current) hipR.current.rotation.x = combinedX("hipR") - legSwing * loco;
+    if (shoulderL.current) shoulderL.current.rotation.x = combinedX("shoulderL") + armSwing * loco;
+    if (shoulderR.current) shoulderR.current.rotation.x = combinedX("shoulderR") - armSwing * loco;
+    // 膝/肘/脊柱/颈：基线 + 动作（无摆动）。
+    setRot(kneeL, "kneeL");
+    setRot(kneeR, "kneeR");
+    setRot(elbowL, "elbowL");
+    setRot(elbowR, "elbowR");
+    setRot(spine, "spine");
+    // 步态前倾：跑动时明显前倾（乘 locomotionScale，坐/蹲时不前倾）。
+    if (spine.current) spine.current.rotation.x += lean;
+    setRot(neck, "neck");
+  });
 
   return (
     <group>
-      <mesh position={[-legX, legH / 2, 0]}>
-        <boxGeometry args={[legW, legH, legD]} />
-        <meshStandardMaterial color={color} roughness={0.7} metalness={0.05} />
-      </mesh>
-      <mesh position={[legX, legH / 2, 0]}>
-        <boxGeometry args={[legW, legH, legD]} />
-        <meshStandardMaterial color={color} roughness={0.7} metalness={0.05} />
-      </mesh>
-      <mesh position={[0, legH + torsoH / 2, 0]}>
-        <boxGeometry args={[torsoW, torsoH, torsoD]} />
-        <meshStandardMaterial color={color} roughness={0.7} metalness={0.05} />
-      </mesh>
-      <mesh position={[-armX, legH + torsoH * 0.55, 0]}>
-        <boxGeometry args={[armW, armH, armD]} />
-        <meshStandardMaterial color={color} roughness={0.62} metalness={0.05} />
-      </mesh>
-      <mesh position={[armX, legH + torsoH * 0.55, 0]}>
-        <boxGeometry args={[armW, armH, armD]} />
-        <meshStandardMaterial color={color} roughness={0.62} metalness={0.05} />
-      </mesh>
-      <mesh position={[0, legH + torsoH + headR, 0]}>
-        <sphereGeometry args={[headR, 18, 14]} />
-        <meshStandardMaterial color={color} roughness={0.6} metalness={0.05} />
-      </mesh>
+      {/* 腿：髋 → 膝（关节嵌套），全局从髋/膝本地旋转 */}
+      <group ref={hipL} position={[-legX, legH, 0]}>
+        <mesh position={[0, -thighLen / 2, 0]}>
+          <boxGeometry args={[legW, thighLen, legD]} />
+          <meshStandardMaterial color={color} roughness={0.7} metalness={0.05} />
+        </mesh>
+        <group ref={kneeL} position={[0, -thighLen, 0]}>
+          <mesh position={[0, -shinLen / 2, 0]}>
+            <boxGeometry args={[legW, shinLen, legD]} />
+            <meshStandardMaterial color={color} roughness={0.7} metalness={0.05} />
+          </mesh>
+        </group>
+      </group>
+      <group ref={hipR} position={[legX, legH, 0]}>
+        <mesh position={[0, -thighLen / 2, 0]}>
+          <boxGeometry args={[legW, thighLen, legD]} />
+          <meshStandardMaterial color={color} roughness={0.7} metalness={0.05} />
+        </mesh>
+        <group ref={kneeR} position={[0, -thighLen, 0]}>
+          <mesh position={[0, -shinLen / 2, 0]}>
+            <boxGeometry args={[legW, shinLen, legD]} />
+            <meshStandardMaterial color={color} roughness={0.7} metalness={0.05} />
+          </mesh>
+        </group>
+      </group>
+      {/* 脊柱（上半身）含躯干、双臂、颈/头，整体可前倾 */}
+      <group ref={spine}>
+        <mesh position={[0, legH + torsoH / 2, 0]}>
+          <boxGeometry args={[torsoW, torsoH, torsoD]} />
+          <meshStandardMaterial color={color} roughness={0.7} metalness={0.05} />
+        </mesh>
+        <group ref={shoulderL} position={[-armX, shoulderY, 0]}>
+          <mesh position={[0, -upperArmLen / 2, 0]}>
+            <boxGeometry args={[armW, upperArmLen, armD]} />
+            <meshStandardMaterial color={color} roughness={0.62} metalness={0.05} />
+          </mesh>
+          <group ref={elbowL} position={[0, -upperArmLen, 0]}>
+            <mesh position={[0, -foreArmLen / 2, 0]}>
+              <boxGeometry args={[armW, foreArmLen, armD]} />
+              <meshStandardMaterial color={color} roughness={0.62} metalness={0.05} />
+            </mesh>
+          </group>
+        </group>
+        <group ref={shoulderR} position={[armX, shoulderY, 0]}>
+          <mesh position={[0, -upperArmLen / 2, 0]}>
+            <boxGeometry args={[armW, upperArmLen, armD]} />
+            <meshStandardMaterial color={color} roughness={0.62} metalness={0.05} />
+          </mesh>
+          <group ref={elbowR} position={[0, -upperArmLen, 0]}>
+            <mesh position={[0, -foreArmLen / 2, 0]}>
+              <boxGeometry args={[armW, foreArmLen, armD]} />
+              <meshStandardMaterial color={color} roughness={0.62} metalness={0.05} />
+            </mesh>
+          </group>
+        </group>
+        <group ref={neck} position={[0, legH + torsoH, 0]}>
+          <mesh position={[0, headR, 0]}>
+            <sphereGeometry args={[headR, 18, 14]} />
+            <meshStandardMaterial color={color} roughness={0.6} metalness={0.05} />
+          </mesh>
+        </group>
+      </group>
     </group>
   );
 }
@@ -710,6 +861,8 @@ function CameraProxy({ cameraId }: { cameraId: string }) {
       resolved.position[2],
     );
     groupRef.current.lookAt(resolved.target[0], resolved.target[1], resolved.target[2]);
+    // 荷兰角：代理是普通 group，lookAt 后本地 +Z 即视线方向，绕 Z 滚转即画面倾斜。
+    if (resolved.roll) groupRef.current.rotateZ((resolved.roll * Math.PI) / 180);
   });
 
   if (!camera) return null;
@@ -835,6 +988,19 @@ function CameraRig() {
 
     camera.position.set(resolved.position[0], resolved.position[1], resolved.position[2]);
     camera.lookAt(resolved.target[0], resolved.target[1], resolved.target[2]);
+    // 荷兰角：lookAt 之后再绕视线轴滚转画面（正值顺时针）。
+    if (resolved.roll) camera.rotateZ((resolved.roll * Math.PI) / 180);
+
+    // 供景深后处理使用：对焦点 = 镜头 target（过肩时是远处的主体，前景肩膀因此自然虚化）。
+    liveShot.focusPoint[0] = resolved.target[0];
+    liveShot.focusPoint[1] = resolved.target[1];
+    liveShot.focusPoint[2] = resolved.target[2];
+    liveShot.focusDistance = Math.hypot(
+      resolved.target[0] - resolved.position[0],
+      resolved.target[1] - resolved.position[1],
+      resolved.target[2] - resolved.position[2],
+    );
+    liveShot.lensMm = resolved.lensMm;
 
     const frame = computeFrame(aspectValue(state.aspectRatio), size.width, size.height);
     if (frame.height <= 0 || frame.width <= 0) return;
@@ -853,6 +1019,38 @@ function CameraRig() {
   });
 
   return null;
+}
+
+/**
+ * 景深 / 焦外虚化：只在「镜头视角」挂载，导演总览视角保持全清晰（要看清机位与轴线）。
+ *
+ * 对焦点跟随当前镜头的 target——过肩时那是远处的主体，前景肩膀因此自然虚化；
+ * 清晰范围由焦距与对焦距离按真实光学推导（长焦 / 近距离 → 景深极浅），详见 engine/shotFocus。
+ */
+function CameraDepthOfField() {
+  const effect = useRef<DepthOfFieldEffect>(null);
+
+  // 每帧直接改写 effect，而不是走 props——否则更新对焦点会触发 React 重渲染。
+  useFrame(() => {
+    const dof = effect.current;
+    if (!dof) return;
+    if (!dof.target) dof.target = new THREE.Vector3();
+    dof.target.set(liveShot.focusPoint[0], liveShot.focusPoint[1], liveShot.focusPoint[2]);
+    // focusRange 是世界单位（米）：对焦点前后完全清晰的区间，越小景深越浅。
+    dof.cocMaterial.focusRange = focusRangeForLens(liveShot.lensMm, liveShot.focusDistance);
+    dof.bokehScale = bokehScaleForLens(liveShot.lensMm);
+  });
+
+  return (
+    <EffectComposer>
+      <DepthOfField
+        ref={effect}
+        target={liveShot.focusPoint}
+        focusRange={focusRangeForLens(liveShot.lensMm, liveShot.focusDistance)}
+        bokehScale={bokehScaleForLens(liveShot.lensMm)}
+      />
+    </EffectComposer>
+  );
 }
 
 /* ------------------------------------------------------------ Interaction */
@@ -1122,7 +1320,9 @@ function WorldScene() {
       <OcclusionHighlights />
       <CameraPaths />
       <CameraProxies />
+      <ActionAxisLine />
       <RadialLayer />
+      {viewMode === "camera" ? <CameraDepthOfField /> : null}
       <OrbitControls
         makeDefault
         target={[0, 0, 0]}
@@ -1131,6 +1331,40 @@ function WorldScene() {
         enabled={viewMode === "director" && !viewLocked && !dragging}
       />
     </>
+  );
+}
+
+/**
+ * 180° 动作轴线：把「机位必须留在其同一侧」的分界线画出来。
+ * 轴线由过肩关系（前景 ↔ 主体）或互视的 LOOK_AT 约束推导；越轴时 Inspector 会给出警告。
+ */
+function ActionAxisLine() {
+  const state = useDirectorStore((s) => s.state);
+  const currentTime = useDirectorStore((s) => s.currentTime);
+  const activeCameraId = useDirectorStore((s) => s.activeCameraId);
+  const showHelpers = useDirectorStore((s) => s.viewMode === "director");
+  if (!showHelpers || !activeCameraId) return null;
+
+  const axis = cameraAxis(state, activeCameraId, currentTime);
+  if (!axis) return null;
+
+  const dx = axis.pb.x - axis.pa.x;
+  const dz = axis.pb.z - axis.pa.z;
+  const len = Math.hypot(dx, dz) || 1;
+  const ex = (dx / len) * 16;
+  const ez = (dz / len) * 16;
+
+  return (
+    <Line
+      points={
+        [
+          [axis.pa.x - ex, 0.06, axis.pa.z - ez],
+          [axis.pb.x + ex, 0.06, axis.pb.z + ez],
+        ] as Array<[number, number, number]>
+      }
+      color="#ffcf6a"
+      lineWidth={1.5}
+    />
   );
 }
 
@@ -1239,17 +1473,10 @@ export function WorldView() {
           <b>{viewMode === "director" ? "DIRECTOR VIEW" : "CAMERA VIEW"}</b>
           <small id="mode">{selectedPoint ? "PATH EDIT" : "SELECT"}</small>
           <small>{selectedId}</small>
-          {viewLocked ? <small className="lock-flag">VIEW LOCKED</small> : null}
+          {viewLocked && viewMode === "director" ? <small className="lock-flag">VIEW LOCKED</small> : null}
         </div>
         <div className="view-tools">
-          <button
-            type="button"
-            className={`lock-btn ${viewLocked ? "active" : ""}`}
-            title="Lock View (L)：锁定后拖拽不再改变视角，方便编辑路径"
-            onClick={toggleViewLocked}
-          >
-            {viewLocked ? "🔒 Locked" : "🔓 Lock View"}
-          </button>
+          {/* 视角模式：始终可见，决定左 / 右两套控件的可见性。 */}
           <div className="view-mode-toggle" role="tablist" aria-label="View Mode">
             <button
               type="button"
@@ -1271,34 +1498,52 @@ export function WorldView() {
               Camera
             </button>
           </div>
-          <select
-            className="camera-select"
-            value={activeCameraId ?? ""}
-            onChange={(event) => setActiveCamera(event.target.value)}
-            disabled={cameras.length === 0}
-          >
-            {cameras.map((camera) => (
-              <option key={camera.id} value={camera.id}>
-                {camera.name}
-              </option>
-            ))}
-          </select>
-          <div className="zoomctl">
-            <button type="button" id="zout" title="Zoom out" onClick={() => setZoom(zoom - 0.1)}>
-              −
-            </button>
-            <button type="button" id="zr" title="Reset to 100%" onClick={() => setZoom(1)}>
-              {Math.round(zoom * 100)}%
-            </button>
-            <button type="button" id="zin" title="Zoom in" onClick={() => setZoom(zoom + 0.1)}>
-              +
-            </button>
-          </div>
+
+          {viewMode === "director" ? (
+            <>
+              {/* 导演视角：自由摆动镜头——需要「锁定」防误触、和缩放来观察。 */}
+              <LockBadge
+                locked={viewLocked}
+                title={
+                  viewLocked
+                    ? "视角已锁定（L）：拖拽不再改变视角"
+                    : "锁定视角（L）：锁定后拖拽不再改变视角，方便编辑路径"
+                }
+                onClick={toggleViewLocked}
+              />
+              <div className="zoomctl">
+                <button type="button" id="zout" title="Zoom out" onClick={() => setZoom(zoom - 0.1)}>
+                  −
+                </button>
+                <button type="button" id="zr" title="Reset to 100%" onClick={() => setZoom(1)}>
+                  {Math.round(zoom * 100)}%
+                </button>
+                <button type="button" id="zin" title="Zoom in" onClick={() => setZoom(zoom + 0.1)}>
+                  +
+                </button>
+              </div>
+            </>
+          ) : (
+            /* 镜头视角：画面已锁死在构图上，缩放 / 视角锁定均无意义；
+               下拉框只在这里出现，用来在多台相机间切换。 */
+            <select
+              className="camera-select"
+              value={activeCameraId ?? ""}
+              onChange={(event) => setActiveCamera(event.target.value)}
+              disabled={cameras.length === 0}
+            >
+              {cameras.map((camera) => (
+                <option key={camera.id} value={camera.id}>
+                  {camera.name}
+                </option>
+              ))}
+            </select>
+          )}
         </div>
       </div>
       <div className="canvasWrap">
         <Canvas dpr={[1, 2]} gl={{ antialias: true }}>
-          <color attach="background" args={["#0a1016"]} />
+          <color attach="background" args={["#0a0a0c"]} />
           <WorldScene />
           <CaptureBridge />
         </Canvas>

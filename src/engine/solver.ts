@@ -160,6 +160,11 @@ export function objectFacing(state: DirectorState, objectId: string, time: numbe
     if (Math.hypot(dxs, dzs) > 1e-4) return Math.atan2(dxs, dzs);
   }
 
+  // 无运动 / 无 LOOK_AT / 无片段方向时，沿用资产自己的摆放朝向（Inspector 的 Rotation）。
+  // 此前这里恒返回 atan2(0,0)=0，导致 Rotation 对 agent 类资产完全无效。
+  const subject = state.objects.find((o) => o.id === objectId);
+  if (subject) return (subject.rotation * Math.PI) / 180;
+
   return Math.atan2(dx, dz);
 }
 

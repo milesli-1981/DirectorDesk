@@ -33,6 +33,28 @@ export interface Vec2 {
 export type Vec3 = [number, number, number];
 
 /**
+ * 人物关节（仅 human 类资产使用）。HumanoidRig 按此树解析本地欧拉角：
+ * root(pelvis) → spine → neck/head；spine → shoulder* → elbow*；root → hip* → knee*。
+ */
+export type JointName =
+  | "root"
+  | "spine"
+  | "neck"
+  | "shoulderL"
+  | "elbowL"
+  | "shoulderR"
+  | "elbowR"
+  | "hipL"
+  | "kneeL"
+  | "hipR"
+  | "kneeR";
+
+/** 姿势 = 各关节相对父关节的本地欧拉角（弧度，[x, y, z]）。未列出的关节默认为 0。 */
+export interface Pose {
+  joints: Partial<Record<JointName, Vec3>>;
+}
+
+/**
  * Director World 中的对象。V1 使用平面世界（WORLD MODE = PLANAR），
  * 因此对象只保存 x / z，高度由 Proxy 语义决定。
  */
@@ -51,6 +73,8 @@ export interface DirectorObject {
   color: string;
   /** 锁定后不可通过拖拽改变位置（防误触）；仍可点选以便解锁。 */
   locked?: boolean;
+  /** human 类资产的静态姿势基线（本地欧拉角）；缺省 = 标准站姿。 */
+  pose?: Pose;
 }
 
 /** Path Point = 路径控制点。ARC 点是控制点，路径不一定穿过它。 */
@@ -122,13 +146,65 @@ export interface Constraint {
 /* ------------------------------------------------------------- Camera */
 
 /** 导演语言，不直接映射成固定 Lens。 */
-export type CameraFraming = "extreme_wide" | "wide" | "medium" | "close_up";
+export type CameraFraming =
+  | "extreme_wide"
+  | "wide"
+  | "medium"
+  | "two_shot"
+  | "close_up"
+  | "extreme_close_up";
 
-export type CameraView = "eye_level" | "low" | "high" | "ground" | "overhead";
+export type CameraView = "eye_level" | "chest" | "low" | "high" | "ground" | "overhead";
 
 export type CameraSide = "front" | "front_3_4" | "side" | "back_3_4" | "back";
 
-export type CameraMotionType = "STATIC" | "FOLLOW" | "ORBIT" | "DOLLY" | "CRANE" | "DRONE";
+/** 过肩镜头（OTS）：镜头越过前景演员的哪一侧肩膀。L = 左肩，R = 右肩。 */
+export type OtsSide = "L" | "R";
+
+export type CameraMotionType =
+  | "STATIC"
+  | "FOLLOW"
+  | "ORBIT"
+  | "DOLLY"
+  | "DOLLY_ZOOM"
+  | "CRANE"
+  | "DRONE"
+  | "OTS";
+
+/**
+ * 动作片段的种类（与 engine/poses.ts 的 POSE_PRESETS 键一致）。
+ * 分两类：
+ * - 姿态/手势类（stand/sit/crouch/wave/point/talk）：给出关节角度；
+ * - 步态类（walk/run）：本身没有静态关节角度，只决定"怎么走"的节奏与幅度。
+ *   注意：MOVE segment 决定"去哪里"，步态只决定身体怎么动，二者互不覆盖。
+ */
+export type ActionKind =
+  | "stand"
+  | "sit"
+  | "crouch"
+  | "wave"
+  | "point"
+  | "talk"
+  | "walk"
+  | "run";
+
+/**
+ * ActionClip = 一个演员在时间轴上的一段"动作"（sit / wave / talk …）。
+ * 与 segments（位移）、constraints（FOLLOW/LOOK_AT）并列，作为第四层叠加：
+ * 由 actionPoseAt 在每帧采样，叠加到静态 pose 与走/跑摆动之上。
+ */
+export interface ActionClip {
+  id: string;
+  /** 所属演员（DirectorObject.id）。 */
+  object: string;
+  timeStart: number;
+  timeEnd: number;
+  kind: ActionKind;
+  /** 动作幅度/强度 0..1。 */
+  intensity: number;
+  /** 关节角度覆盖：在 kind 预设之上微调（未列出的关节沿用预设）。 */
+  pose?: Pose;
+}
 
 /** Camera 是真正的独立 3D Object：FRAMING / VIEW / LENS / MOTION / TARGET。 */
 export interface CameraObject {
@@ -142,6 +218,17 @@ export interface CameraObject {
   lensMm: number;
   /** 没有 Camera Move Clip 时使用的默认运镜。 */
   motion: CameraMotionType;
+  /** 过肩镜头：镜头所越过的演员（前景）；为空则不是过肩。 */
+  shoulderId?: string;
+  /** 过肩：越过前景演员的哪一侧肩膀（默认 R 右肩）。 */
+  otsSide?: OtsSide;
+  /**
+   * 过肩错位量：主体被推离画面中心的比例（以画面半宽为单位）。
+   * 0 = 主体居中（正对，前景糊在主体脸上）；0.35 ≈ 主体落在画面约 1/3 处，前景只露一部分肩膀。
+   */
+  otsOffset?: number;
+  /** 荷兰角：画面滚转角度（度），正值顺时针倾斜。 */
+  roll?: number;
   /** 相机平台：ground = 地面机（默认）；drone = 无人机，自带基础飞行高度、不受地面约束。 */
   kind?: "ground" | "drone";
 }
@@ -158,6 +245,14 @@ export interface CameraMove {
   timeEnd: number;
   /** 覆盖该段的目标（为空则沿用相机自身 Target）。 */
   targetId?: string;
+  /** OTS：本段所越过的前景演员（为空则沿用相机自身 Shoulder）。 */
+  shoulderId?: string;
+  /** OTS：越过前景演员的哪一侧肩膀（为空则沿用相机设置）。 */
+  otsSide?: OtsSide;
+  /** OTS：错位量（为空则沿用相机设置）。 */
+  otsOffset?: number;
+  /** 荷兰角：本段画面滚转角度（度），为空则沿用相机设置。 */
+  roll?: number;
   /** ORBIT：本段内绕目标转过的角度。 */
   orbitDeg: number;
   /** DOLLY：结束时的距离系数（1 = 保持基准取景距离）。 */
@@ -192,6 +287,8 @@ export interface DirectorState {
   cameras: CameraObject[];
   cameraMoves: CameraMove[];
   cameraJunctions: CameraJunction[];
+  /** 演员在时间轴上的动作片段（叠加在静态 pose 与走/跑摆动之上）。 */
+  actions: ActionClip[];
 }
 
 /* ------------------------------------------------------ Stage / Scenes */
@@ -212,7 +309,7 @@ export interface StageManifest {
   activeSceneId: string;
 }
 
-export type TimelineKind = "segment" | "constraint" | "camera";
+export type TimelineKind = "segment" | "constraint" | "camera" | "action";
 
 export interface TimelineItem {
   id: string;
@@ -240,11 +337,14 @@ export const FRAMING_LABELS: Record<CameraFraming, string> = {
   extreme_wide: "Extreme Wide",
   wide: "Wide",
   medium: "Medium",
+  two_shot: "Two Shot",
   close_up: "Close Up",
+  extreme_close_up: "Extreme CU",
 };
 
 export const VIEW_LABELS: Record<CameraView, string> = {
   eye_level: "Eye Level",
+  chest: "Chest 胸高",
   low: "Low",
   high: "High",
   ground: "Ground",
@@ -264,8 +364,15 @@ export const MOTION_LABELS: Record<CameraMotionType, string> = {
   FOLLOW: "FOLLOW",
   ORBIT: "ORBIT",
   DOLLY: "DOLLY",
+  DOLLY_ZOOM: "DOLLY ZOOM",
   CRANE: "CRANE",
   DRONE: "DRONE",
+  OTS: "OTS 过肩",
+};
+
+export const OTS_SIDE_LABELS: Record<OtsSide, string> = {
+  L: "左肩 L",
+  R: "右肩 R",
 };
 
 export const MOTION_HINTS: Record<CameraMotionType, string> = {
@@ -273,7 +380,10 @@ export const MOTION_HINTS: Record<CameraMotionType, string> = {
   FOLLOW: "跟随目标，持续保持取景与机位关系。",
   ORBIT: "跟随并绕目标旋转。",
   DOLLY: "推拉：改变与目标的距离。",
+  DOLLY_ZOOM:
+    "滑动变焦（希区柯克）：推近的同时同步变焦，主体大小不变、背景透视发生畸变，用于眩晕 / 顿悟。",
   CRANE: "升降：改变机位高度。",
+  OTS: "过肩：机位置于前景演员身后，越过其肩膀拍主体，两人移动时自动保持过肩关系。",
   DRONE: "无人机自由飞行：同时绕圈 + 升降 + 推拉。",
 };
 

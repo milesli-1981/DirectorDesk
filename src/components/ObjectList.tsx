@@ -1,5 +1,6 @@
 import { useDirectorStore } from "../state/directorStore";
 import { ASSET_ORDER, ASSET_PRESETS } from "../engine/assetPresets";
+import { LockBadge } from "./LockBadge";
 
 export function ObjectList() {
   const objects = useDirectorStore((s) => s.state.objects);
@@ -19,21 +20,29 @@ export function ObjectList() {
       <div className="st">OBJECTS</div>
       <div id="objectList">
         {objects.map((object) => (
-          <div
-            key={object.id}
-            className={`obj-row ${selectedKind === "object" && selectedId === object.id ? "sel" : ""}`}
-          >
-            <button type="button" className="obj" onClick={() => selectObject(object.id)}>
-              {object.id} · {object.category}
-            </button>
+          <div key={object.id} className="obj-row">
             <button
               type="button"
-              className={`lock-btn ${object.locked ? "on" : ""}`}
-              title={object.locked ? "Unlock position" : "Lock position"}
-              onClick={() => updateAsset(object.id, { locked: !object.locked })}
+              className={`obj ${selectedKind === "object" && selectedId === object.id ? "sel" : ""}`}
+              onClick={() => selectObject(object.id)}
             >
-              {object.locked ? "Locked" : "Lock"}
+              <span className="obj-name">{object.id}</span>
+              <span className="obj-meta">
+                {object.category} · {object.role}
+              </span>
             </button>
+            {/* 右上角控制区：锁角标浮在这一角，不再占用行内宽度，名字因此能吃满整行 */}
+            <div className="obj-actions">
+              <LockBadge
+                locked={!!object.locked}
+                title={
+                  object.locked
+                    ? "已锁定初始位置：编辑时不可拖拽（点此解锁）；播放时仍按轨迹移动"
+                    : "锁定初始位置：编辑时不可拖拽，播放时仍按轨迹移动"
+                }
+                onClick={() => updateAsset(object.id, { locked: !object.locked })}
+              />
+            </div>
           </div>
         ))}
       </div>
@@ -54,12 +63,14 @@ export function ObjectList() {
       </div>
 
       <div className="st cam-st">CAMERAS</div>
-      <button type="button" className="obj addobj" onClick={addCamera}>
-        ＋ CAMERA
-      </button>
-      <button type="button" className="obj addobj" onClick={addDroneCamera}>
-        ＋ DRONE
-      </button>
+      <div className="btn-pair">
+        <button type="button" className="obj addobj" onClick={addCamera}>
+          ＋ CAMERA
+        </button>
+        <button type="button" className="obj addobj" onClick={addDroneCamera}>
+          ＋ DRONE
+        </button>
+      </div>
       <div id="cameraList">
         {cameras.map((camera) => (
           <button

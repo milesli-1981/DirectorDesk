@@ -13,6 +13,10 @@ export function App() {
   const togglePlay = useDirectorStore((s) => s.togglePlay);
   const setTime = useDirectorStore((s) => s.setTime);
   const reset = useDirectorStore((s) => s.reset);
+  const undo = useDirectorStore((s) => s.undo);
+  const redo = useDirectorStore((s) => s.redo);
+  const canUndo = useDirectorStore((s) => s.past.length > 0);
+  const canRedo = useDirectorStore((s) => s.future.length > 0);
   const exportProject = useDirectorStore((s) => s.exportProject);
   const importProject = useDirectorStore((s) => s.importProject);
   const persist = useDirectorStore((s) => s.persist);
@@ -121,6 +125,18 @@ export function App() {
         event.preventDefault();
         useDirectorStore.getState().toggleViewLocked();
       }
+      // 撤销 / 重做：Ctrl+Z 撤销，Ctrl+Shift+Z 或 Ctrl+Y 重做（输入框内不拦截，保留原生文本撤销）。
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
+        event.preventDefault();
+        if (event.shiftKey) useDirectorStore.getState().redo();
+        else useDirectorStore.getState().undo();
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "y") {
+        event.preventDefault();
+        useDirectorStore.getState().redo();
+        return;
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -138,6 +154,12 @@ export function App() {
           </button>
           <button type="button" id="home" onClick={() => setTime(0)}>
             Home
+          </button>
+          <button type="button" id="undo" onClick={undo} disabled={!canUndo} title="撤销 (Ctrl+Z)">
+            ↶ Undo
+          </button>
+          <button type="button" id="redo" onClick={redo} disabled={!canRedo} title="重做 (Ctrl+Shift+Z)">
+            ↷ Redo
           </button>
           <button type="button" id="reset" onClick={reset}>
             Reset

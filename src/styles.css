@@ -2,6 +2,47 @@
   box-sizing: border-box;
 }
 
+/* ==========================================================================
+   Apple Design Tokens（暗色）
+   参照 Apple HIG 与 Final Cut Pro 一类专业 App：纯黑画布 + 中性灰分层表面 +
+   系统蓝强调色 + 大圆角 + 极轻阴影 + 毛玻璃。整体换肤只需改这一个块。
+   ========================================================================== */
+:root {
+  /* 字体：优先 SF Pro（macOS / iOS），逐级回退到系统无衬线 */
+  --ap-font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+    "Helvetica Neue", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+  --ap-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* 背景分层：画布 → 面板 → 控件 → 悬浮 */
+  --ap-bg: #000000;
+  --ap-surface: #1c1c1e;
+  --ap-surface-2: #2c2c2e;
+  --ap-surface-3: #3a3a3c;
+
+  /* 分隔线与文本层级 */
+  --ap-sep: rgba(255, 255, 255, 0.09);
+  --ap-text: #f5f5f7;
+  --ap-text-2: #a1a1a6;
+  --ap-text-3: #6e6e73;
+
+  /* 系统色（暗色模式取值） */
+  --ap-blue: #0a84ff;
+  --ap-green: #30d158;
+  --ap-red: #ff453a;
+  --ap-orange: #ff9f0a;
+  --ap-purple: #bf5af2;
+
+  /* 圆角：Apple 偏好连续大圆角 */
+  --ap-r-xs: 6px;
+  --ap-r-sm: 8px;
+  --ap-r-md: 12px;
+  --ap-r-lg: 18px;
+
+  /* 阴影与聚焦环 */
+  --ap-shadow: 0 10px 34px rgba(0, 0, 0, 0.6);
+  --ap-ring: 0 0 0 3px rgba(10, 132, 255, 0.35);
+}
+
 html,
 body {
   margin: 0;
@@ -210,7 +251,7 @@ header {
   font-size: 10px;
   letter-spacing: 0.13em;
   color: #738394;
-  margin: 2px 0 9px;
+  margin: 2px 0 7px;
 }
 
 .obj {
@@ -224,39 +265,63 @@ header {
   background: #18283a;
 }
 
-/* 资产锁定：Scene Tree 行内快捷开关 + Director 视图中的 LOCKED 标记 */
+/* 场景树对象行：内容占满整行，锁角标浮在右上角 */
 .obj-row {
-  display: flex;
-  align-items: stretch;
-  gap: 4px;
-}
-.obj-row.sel {
-  border: 1px solid #67a7ff;
-  border-radius: 4px;
-  background: #18283a;
+  position: relative;
 }
 .obj-row .obj {
-  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  width: 100%;
   min-width: 0;
+  /* 右侧让出角标的位置，长名字不会钻到锁图标底下 */
+  padding-right: 28px;
+  margin: 3px 0;
+  overflow: hidden;
+}
+.obj-row .obj-name {
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 12px;
+  color: #cdd8e2;
 }
-.lock-btn {
+.obj-row .obj-meta {
+  font-size: 10px;
+  color: #6f8191;
+}
+/* 对象行右上角的控制区：锁角标浮在这里，后续还能往里加别的快捷操作 */
+.obj-actions {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+/* 统一的锁角标按钮：工具栏 / 场景树 / 资产面板共用，只显示图标 */
+.lock-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: 0 0 auto;
-  padding: 2px 6px;
-  font-size: 11px;
-  line-height: 1.4;
+  width: 22px;
+  height: 22px;
+  padding: 0;
   color: #6b7a8a;
   background: #0f1922;
   border: 1px solid #2a3742;
   border-radius: 4px;
   cursor: pointer;
 }
-.lock-btn:hover {
+.lock-icon-btn:hover {
   border-color: #3a4a57;
+  color: #93a3b4;
 }
-.lock-btn.on {
+.lock-icon-btn.on {
   color: #ffcf6a;
   border-color: #6b5a2a;
   background: #221c0e;
@@ -618,6 +683,16 @@ canvas {
   border-color: #8b6fc4;
 }
 
+/* 动作片段（动作轨道） */
+.clip.action {
+  background: #3a2a18;
+  border-color: #c79247;
+}
+
+.action-row .label {
+  color: #d8b884;
+}
+
 .camera-row .label {
   color: #c0a8e8;
   display: flex;
@@ -827,6 +902,17 @@ pre {
   border-style: dashed;
 }
 
+/* 成对的添加按钮并排两列，省下一整行高度 */
+.btn-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+  margin-bottom: 4px;
+}
+.btn-pair .addobj {
+  margin: 0;
+}
+
 .dot {
   display: inline-block;
   width: 7px;
@@ -871,18 +957,85 @@ pre {
   cursor: not-allowed;
 }
 
-.lock-btn {
-  background: #101822;
-  color: #8fa0b2;
-  border: 1px solid #303c49;
-  padding: 5px 9px;
+/* --------------------------------------------------------- Modal (Customize Joints) */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(4, 8, 12, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
 }
 
-.lock-btn.active {
-  border-color: #67a7ff;
-  background: #18283a;
-  color: #cfe3f9;
+.modal {
+  background: #0c1117;
+  color: #d8e1ea;
+  border: 1px solid #2c3a48;
+  border-radius: 8px;
+  padding: 16px 18px;
+  width: min(560px, 92vw);
+  max-height: 86vh;
+  overflow: auto;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
 }
+
+.modal h3 {
+  margin: 0 0 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #cdd8e2;
+}
+
+.modal .joint-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 7px 0;
+}
+
+.modal .joint-row .jname {
+  width: 78px;
+  font-size: 11px;
+  color: #93a3b4;
+  flex: 0 0 auto;
+}
+
+.modal .joint-row .axis {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: 1 1 0;
+}
+
+.modal .joint-row .axis span:first-child {
+  width: 12px;
+  font-size: 11px;
+  color: #738394;
+}
+
+.modal .joint-row .axis .deg {
+  width: 38px;
+  text-align: right;
+  font-size: 10px;
+  color: #8ca1b4;
+  font-variant-numeric: tabular-nums;
+}
+
+.modal .joint-row input[type="range"] {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.modal .modal-actions {
+  margin-top: 14px;
+  text-align: right;
+}
+
+.modal .modal-actions .ghost-button {
+  min-width: 72px;
+}
+
 
 .lock-flag {
   color: #67a7ff !important;
@@ -1081,11 +1234,18 @@ pre {
   margin-top: 10px;
   color: #8ea2b6;
 }
+/* 资产面板：两列网格，取代原来随宽度乱换行的 flex-wrap */
 .asset-palette {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  padding: 0 8px 8px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+  padding: 0 0 2px;
+}
+.asset-palette .addasset {
+  margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .addasset {
   font-size: 11px;
@@ -1161,4 +1321,604 @@ pre {
   border-color: #67a7ff;
   background: #1b2c46;
   color: #ffffff;
+}
+
+/* ------------------------------------------- Inspector: 强相关控件子分组 */
+.sub-group {
+  margin: 9px 0 11px;
+  padding: 8px 9px 9px;
+  border: 1px solid #26313b;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.012);
+}
+
+.sub-group .sub-title {
+  color: #8ea3b6;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-bottom: 7px;
+}
+
+.sub-group .hint {
+  margin-top: 7px;
+}
+
+/* --------------------------------- 资产尺寸 W / D / H：三个滑杆 */
+.block-size {
+  margin: 4px 0 8px;
+}
+.block-size-title {
+  color: var(--ap-text-2);
+  font: 600 11px/1 var(--ap-font);
+  margin-bottom: 6px;
+}
+.size-slider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 5px 0;
+}
+.size-slider .val {
+  flex: 0 0 12px;
+  color: var(--ap-text-2);
+  font-size: 11px;
+}
+.size-slider input[type="range"] {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.size-slider .sz {
+  flex: 0 0 32px;
+  text-align: right;
+  color: var(--ap-text);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ==========================================================================
+   Apple 皮肤覆盖层
+   放在文件末尾：同选择器时以此为准，未覆盖到的旧规则继续兜底。
+   ========================================================================== */
+
+/* ---- 基础 ---- */
+html,
+body {
+  background: var(--ap-bg);
+  color: var(--ap-text);
+  font: 13px/1.45 var(--ap-font);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button {
+  background: var(--ap-surface-2);
+  color: var(--ap-text);
+  border: 1px solid transparent;
+  border-radius: var(--ap-r-sm);
+  padding: 6px 11px;
+  font: 500 11.5px/1.35 var(--ap-font);
+  transition: background 0.18s ease, color 0.18s ease;
+}
+button:hover {
+  background: var(--ap-surface-3);
+  border-color: transparent;
+}
+button:focus-visible {
+  outline: none;
+  box-shadow: var(--ap-ring);
+}
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+input,
+select,
+textarea {
+  font-family: var(--ap-font);
+}
+input:not([type="range"]):not([type="checkbox"]),
+select,
+textarea {
+  background: var(--ap-surface-2);
+  border: 1px solid transparent;
+  border-radius: var(--ap-r-xs);
+  color: var(--ap-text);
+  padding: 5px 8px;
+  font-size: 11.5px;
+}
+input:not([type="range"]):focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--ap-blue);
+  box-shadow: var(--ap-ring);
+}
+
+/* Apple 滑块：细轨 + 白色圆钮 */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--ap-surface-3);
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  cursor: pointer;
+}
+input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 0;
+  border-radius: 50%;
+  background: #ffffff;
+  cursor: pointer;
+}
+
+pre {
+  color: var(--ap-text-2);
+  background: var(--ap-surface-2);
+  border-radius: var(--ap-r-sm);
+  padding: 9px 10px;
+  font-family: var(--ap-mono);
+}
+
+/* ---- 顶栏（毛玻璃） ---- */
+header {
+  background: rgba(28, 28, 30, 0.82);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border-bottom: 1px solid var(--ap-sep);
+}
+.brand {
+  color: var(--ap-text);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.brand span {
+  color: var(--ap-text-3);
+  font-weight: 500;
+}
+.render-status {
+  color: var(--ap-text-2);
+}
+.scene-tabs {
+  border-bottom: 1px solid var(--ap-sep);
+  background: rgba(28, 28, 30, 0.6);
+}
+.tab,
+.tab-add {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--ap-r-sm);
+  color: var(--ap-text-2);
+}
+.tab:hover,
+.tab-add:hover {
+  background: var(--ap-surface-2);
+  color: var(--ap-text);
+}
+.tab.active {
+  background: var(--ap-surface-2);
+  color: var(--ap-text);
+  border-color: transparent;
+}
+.stage-name {
+  background: var(--ap-surface-2);
+  border: 1px solid transparent;
+  border-radius: var(--ap-r-sm);
+  color: var(--ap-text);
+  font: 500 11.5px var(--ap-font);
+}
+.stage-name:focus {
+  border-color: var(--ap-blue);
+}
+
+/* ---- 左右面板 ---- */
+.left,
+.right {
+  background: var(--ap-surface);
+}
+.left {
+  border-right: 1px solid var(--ap-sep);
+}
+.right {
+  border-left: 1px solid var(--ap-sep);
+}
+.st {
+  font: 600 10px/1 var(--ap-font);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ap-text-3);
+  margin: 4px 0 8px;
+}
+
+/* ---- 视图工具栏 ---- */
+.viewbar {
+  background: rgba(28, 28, 30, 0.72);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border-bottom: 1px solid var(--ap-sep);
+}
+.viewbar b {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.viewbar small {
+  color: var(--ap-text-2);
+}
+.view-tools {
+  gap: 8px;
+}
+
+/* Apple 分段控件：容器嵌底 + 选中段浮起 */
+.view-mode-toggle {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--ap-surface-2);
+  border-radius: 9px;
+}
+.view-tab {
+  border: 0;
+  background: transparent;
+  color: var(--ap-text-2);
+  font: 500 11.5px/1 var(--ap-font);
+  padding: 6px 14px;
+  border-radius: 7px;
+  transition: background 0.18s ease, color 0.18s ease;
+}
+.view-tab + .view-tab {
+  border-left: 0;
+}
+.view-tab:hover:not(:disabled) {
+  color: var(--ap-text);
+  background: rgba(255, 255, 255, 0.06);
+}
+.view-tab.active {
+  background: rgba(255, 255, 255, 0.16);
+  color: var(--ap-text);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+}
+.view-tab:disabled {
+  color: var(--ap-text-3);
+  opacity: 0.5;
+}
+
+.zoomctl {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--ap-surface-2);
+  border-radius: 9px;
+}
+.zoomctl button {
+  border: 0;
+  background: transparent;
+  color: var(--ap-text-2);
+  padding: 5px 9px;
+  min-width: 30px;
+  border-radius: 7px;
+  font: 500 11.5px/1 var(--ap-font);
+}
+.zoomctl button:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--ap-text);
+}
+#zr {
+  min-width: 48px;
+  color: var(--ap-text);
+}
+
+.camera-select {
+  background: var(--ap-surface-2);
+  color: var(--ap-text);
+  border: 1px solid transparent;
+  border-radius: 9px;
+  padding: 6px 10px;
+  font: 500 11.5px/1 var(--ap-font);
+}
+.camera-select:focus {
+  outline: none;
+  border-color: var(--ap-blue);
+  box-shadow: var(--ap-ring);
+}
+.lock-flag {
+  color: var(--ap-blue) !important;
+  letter-spacing: 0.04em;
+}
+
+/* ---- 场景树 ---- */
+.obj {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--ap-r-sm);
+  padding: 7px 10px;
+  color: var(--ap-text);
+  margin: 2px 0;
+}
+.obj:hover {
+  background: var(--ap-surface-2);
+}
+.obj.sel {
+  background: rgba(10, 132, 255, 0.22);
+  border-color: transparent;
+  color: #ffffff;
+}
+.obj-row .obj {
+  padding-right: 32px;
+}
+.obj-row .obj-name {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: inherit;
+}
+.obj-row .obj-meta {
+  font-size: 10.5px;
+  color: var(--ap-text-3);
+}
+.addobj {
+  background: transparent;
+  border: 1px dashed rgba(255, 255, 255, 0.18);
+  color: var(--ap-text-2);
+  border-radius: var(--ap-r-sm);
+}
+.addobj:hover {
+  border-color: var(--ap-blue);
+  color: var(--ap-blue);
+  background: rgba(10, 132, 255, 0.1);
+}
+.addasset {
+  background: transparent;
+}
+.addasset:hover {
+  border-color: var(--ap-green);
+  color: var(--ap-green);
+  background: rgba(48, 209, 88, 0.12);
+}
+.dot {
+  border-radius: 50%;
+}
+
+/* ---- 锁角标 ---- */
+.lock-icon-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--ap-r-xs);
+  color: var(--ap-text-3);
+}
+.lock-icon-btn:hover {
+  background: var(--ap-surface-3);
+  border-color: transparent;
+  color: var(--ap-text);
+}
+.lock-icon-btn.on {
+  background: rgba(255, 159, 10, 0.18);
+  border-color: transparent;
+  color: var(--ap-orange);
+}
+
+/* ---- Inspector ---- */
+.title {
+  color: var(--ap-text);
+  font-weight: 600;
+}
+.sub {
+  color: var(--ap-text-3);
+}
+.field {
+  border-top: 1px solid var(--ap-sep);
+  padding: 11px 0;
+}
+.lab {
+  color: var(--ap-text-2);
+  font-weight: 600;
+  font-size: 11px;
+  margin-bottom: 8px;
+}
+.hint {
+  color: var(--ap-text-3);
+  font-size: 11px;
+  line-height: 1.55;
+}
+.row2 label {
+  color: var(--ap-text-2);
+}
+.row2 .val,
+.right .row2 .val {
+  color: var(--ap-text);
+}
+.right .row2 input[type="number"] {
+  background: var(--ap-surface-2);
+  border: 1px solid transparent;
+  border-radius: var(--ap-r-xs);
+  color: var(--ap-text);
+}
+.inspector-row select,
+.inspector-row input:not([type="range"]),
+.field > select {
+  background: var(--ap-surface-2);
+  border: 1px solid transparent;
+  border-radius: var(--ap-r-xs);
+  color: var(--ap-text);
+}
+.ghost-button {
+  background: var(--ap-surface-2);
+  border: 1px solid transparent;
+  border-radius: var(--ap-r-sm);
+  color: var(--ap-text);
+  padding: 6px 11px;
+  font: 500 11.5px/1 var(--ap-font);
+}
+.ghost-button:hover {
+  background: var(--ap-surface-3);
+  border-color: transparent;
+}
+.ghost-button.on {
+  background: var(--ap-blue);
+  border-color: transparent;
+  color: #ffffff;
+}
+.danger-button {
+  color: var(--ap-red);
+  background: transparent;
+}
+.danger-button:hover {
+  background: rgba(255, 69, 58, 0.16);
+  border-color: transparent;
+  color: var(--ap-red);
+}
+.pill {
+  background: var(--ap-surface-2);
+  border: 1px solid transparent;
+  color: var(--ap-text-2);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 10.5px;
+  font-weight: 500;
+}
+.sub-group {
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid var(--ap-sep);
+  border-radius: var(--ap-r-md);
+  padding: 10px 11px 11px;
+  margin: 10px 0 12px;
+}
+.sub-group .sub-title {
+  color: var(--ap-text-2);
+  font: 600 10px/1 var(--ap-font);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  margin-bottom: 9px;
+}
+.ease-wrap {
+  background: var(--ap-surface-2);
+  border-radius: var(--ap-r-sm);
+}
+
+/* ---- 弹窗 ---- */
+.modal-backdrop {
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+.modal {
+  background: #1c1c1e;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--ap-r-lg);
+  box-shadow: var(--ap-shadow);
+  color: var(--ap-text);
+  padding: 18px 20px;
+}
+.modal h3 {
+  color: var(--ap-text);
+  font: 600 14px/1.35 var(--ap-font);
+}
+
+/* ---- 时间轴 ---- */
+.timeline {
+  background: var(--ap-surface);
+  border-top: 1px solid var(--ap-sep);
+}
+.tlbar {
+  background: rgba(28, 28, 30, 0.8);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--ap-sep);
+}
+.timecode {
+  font-family: var(--ap-mono);
+  color: var(--ap-text);
+}
+.ctx {
+  color: var(--ap-text-2);
+}
+.ruler {
+  color: var(--ap-text-3);
+}
+.row {
+  border-bottom: 1px solid var(--ap-sep);
+}
+.label,
+.track-name {
+  color: var(--ap-text-2);
+}
+.clip {
+  border-radius: var(--ap-r-xs);
+}
+.clip.segment {
+  background: rgba(10, 132, 255, 0.3);
+  border: 1px solid rgba(10, 132, 255, 0.55);
+  color: #d6e9ff;
+}
+.clip.constraint {
+  background: rgba(191, 90, 242, 0.26);
+  border: 1px solid rgba(191, 90, 242, 0.55);
+  color: #e9d8ff;
+}
+.clip.camera {
+  background: rgba(255, 159, 10, 0.26);
+  border: 1px solid rgba(255, 159, 10, 0.55);
+  color: #ffe6c2;
+}
+.clip.action {
+  background: rgba(48, 209, 88, 0.24);
+  border: 1px solid rgba(48, 209, 88, 0.55);
+  color: #d3f5de;
+}
+.clip.sel {
+  box-shadow: 0 0 0 2px var(--ap-blue);
+}
+.handle {
+  background: var(--ap-blue);
+  border-radius: 3px;
+}
+.ph {
+  border-radius: 999px;
+}
+.ph-grip {
+  border-radius: 50%;
+}
+.handoff-badge {
+  border: 2px solid var(--ap-orange);
+  color: var(--ap-orange);
+  background: rgba(0, 0, 0, 0.55);
+}
+.cam-junction {
+  color: var(--ap-text-2);
+}
+
+/* ---- 3D 视图与 HUD ---- */
+.canvasWrap {
+  background: #000000;
+}
+.obj-label,
+.node-label {
+  font-family: var(--ap-font);
+  color: #ffffff;
+}
+.cam-hud {
+  background: rgba(28, 28, 30, 0.78);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--ap-sep);
+  border-radius: var(--ap-r-sm);
+  color: var(--ap-text-2);
+}
+.cam-hud strong {
+  color: var(--ap-text);
+  font-weight: 600;
+}
+.occ-warn {
+  color: var(--ap-red);
+}
+.mask-bar {
+  background: #000000;
 }
