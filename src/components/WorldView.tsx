@@ -964,10 +964,11 @@ function CaptureBridge() {
   const gl = useThree((state) => state.gl);
   const camera = useThree((state) => state.camera);
   useEffect(() => {
-    setCaptureCanvas(gl.domElement as HTMLCanvasElement);
+    // 画布已在 Canvas.onCreated 注册；此处仅同步可能更新的相机 / 画布引用。
+    // 注意：不要在此清空 captureCanvas——本组件可能因子树下 Suspense 暂时卸载，
+    // 一旦清空就会导致「渲染画布尚未就绪」的报错。
     viewRef.camera = camera;
     viewRef.canvas = gl.domElement as HTMLCanvasElement;
-    return () => setCaptureCanvas(null);
   }, [gl, camera]);
   return null;
 }
@@ -1654,7 +1655,16 @@ export function WorldView() {
           handleDropAdd(kind, point);
         }}
       >
-        <Canvas dpr={[1, 2]} gl={{ antialias: true }}>
+        <Canvas
+          dpr={[1, 2]}
+          gl={{ antialias: true }}
+          onCreated={({ gl, camera }) => {
+            // 渲染器一创建就注册画布：不依赖子树挂载，且不受子组件 Suspense 影响。
+            setCaptureCanvas(gl.domElement as HTMLCanvasElement);
+            viewRef.canvas = gl.domElement as HTMLCanvasElement;
+            viewRef.camera = camera;
+          }}
+        >
           <color attach="background" args={["#0a0a0c"]} />
           <WorldScene />
           <CaptureBridge />

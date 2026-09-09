@@ -11,7 +11,7 @@
   },
   "scenes": {
     "SCN_COMMUTE": {
-      "revision": 1266,
+      "revision": 1602,
       "duration": 5,
       "aspectRatio": "16:9",
       "objects": [
@@ -28,22 +28,24 @@
             "d": 0.6,
             "h": 1.8
           },
-          "color": "#67a7ff"
+          "color": "#67a7ff",
+          "locked": true
         },
         {
           "id": "GREETER",
           "type": "actor",
           "category": "human",
           "role": "agent",
-          "x": 3.5,
-          "z": 1.5,
+          "x": 5.498127690491148,
+          "z": 2.3944551874081705,
           "rotation": -90,
           "footprint": {
             "w": 0.6,
             "d": 0.6,
             "h": 1.8
           },
-          "color": "#f0a35a"
+          "color": "#f0a35a",
+          "locked": true
         },
         {
           "id": "BLD_L",
@@ -58,37 +60,40 @@
             "d": 4,
             "h": 14
           },
-          "color": "#9aa7b5"
+          "color": "#9aa7b5",
+          "locked": true
         },
         {
           "id": "BLD_R",
           "type": "landmark",
           "category": "building",
           "role": "set",
-          "x": 6,
-          "z": 0,
+          "x": 4.4810987271850005,
+          "z": -2.267777580722216,
           "rotation": 0,
           "footprint": {
             "w": 5,
             "d": 5,
-            "h": 18
+            "h": 8.2
           },
-          "color": "#8a93a3"
+          "color": "#8a93a3",
+          "locked": false
         },
         {
           "id": "BLD_FAR",
           "type": "landmark",
           "category": "building",
           "role": "set",
-          "x": 2.5,
-          "z": 4,
+          "x": 4.715178979505359,
+          "z": 7.4590089737395004,
           "rotation": 0,
           "footprint": {
             "w": 4,
             "d": 4,
-            "h": 10
+            "h": 6.2
           },
-          "color": "#9aa7b5"
+          "color": "#9aa7b5",
+          "locked": false
         },
         {
           "id": "AST_HUMAN_03",
@@ -103,7 +108,8 @@
             "d": 0.6,
             "h": 1.8
           },
-          "color": "#67a7ff"
+          "color": "#67a7ff",
+          "locked": true
         }
       ],
       "segments": [
@@ -129,12 +135,12 @@
           "id": "SEG_GREET",
           "type": "MOVE",
           "object": "GREETER",
-          "startX": 3.5,
-          "startZ": 1.5,
-          "endX": 1,
-          "endZ": -1,
+          "startX": 5.498127690491148,
+          "startZ": 2.3944551874081705,
+          "endX": 1.423436026974331,
+          "endZ": -0.38947609941919437,
           "points": [],
-          "timeStart": 1.8,
+          "timeStart": 1.1,
           "timeEnd": 2.8,
           "ease": [
             0.42,
@@ -163,8 +169,8 @@
           "timeStart": 0,
           "timeEnd": 5,
           "ease": [
-            0.255,
-            0.461,
+            0.342,
+            0.784,
             0.991,
             0.104
           ]
@@ -200,17 +206,6 @@
           "side": "front",
           "lensMm": 35,
           "motion": "FOLLOW"
-        },
-        {
-          "id": "CAM_EST",
-          "name": "ESTABLISH",
-          "color": "#8ad1ff",
-          "targetId": "WALKER",
-          "framing": "extreme_wide",
-          "view": "high",
-          "side": "front_3_4",
-          "lensMm": 24,
-          "motion": "STATIC"
         }
       ],
       "cameraMoves": [
@@ -266,37 +261,20 @@
             0.58,
             1
           ]
-        },
-        {
-          "id": "MOVE_CAM_EST_01",
-          "camera": "CAM_EST",
-          "type": "STATIC",
-          "timeStart": 0,
-          "timeEnd": 5,
-          "targetId": "WALKER",
-          "orbitDeg": 0,
-          "dollyScale": 1,
-          "craneHeight": 0,
-          "ease": [
-            0.42,
-            0,
-            0.58,
-            1
-          ]
         }
       ],
       "cameraJunctions": [
         {
-          "id": "J_CAM_A_01_02",
+          "id": "J_MOVE_CAM_A_01_MOVE_CAM_A_02",
           "prevMove": "MOVE_CAM_A_01",
           "nextMove": "MOVE_CAM_A_02",
-          "mode": "smooth"
+          "mode": "stop"
         },
         {
-          "id": "J_CAM_A_02_03",
+          "id": "J_MOVE_CAM_A_02_MOVE_CAM_A_03",
           "prevMove": "MOVE_CAM_A_02",
           "nextMove": "MOVE_CAM_A_03",
-          "mode": "cut"
+          "mode": "stop"
         }
       ],
       "actions": [
@@ -311,9 +289,9 @@
         {
           "id": "ACT_GAIT_RUN",
           "object": "GREETER",
-          "timeStart": 1.8,
+          "timeStart": 1.1,
           "timeEnd": 2.8,
-          "kind": "run",
+          "kind": "walk",
           "intensity": 1
         },
         {
@@ -339,6 +317,14 @@
           "timeEnd": 5,
           "kind": "talk",
           "intensity": 0.8
+        },
+        {
+          "id": "ACT_06",
+          "object": "AST_HUMAN_03",
+          "timeStart": 0,
+          "timeEnd": 5,
+          "kind": "walk",
+          "intensity": 1
         }
       ]
     }

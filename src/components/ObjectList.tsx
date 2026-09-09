@@ -24,7 +24,7 @@ export function ObjectList() {
             >
               <span className="obj-name">{object.id}</span>
               <span className="obj-meta">
-                {object.category} · {object.role}
+                {object.category} / {object.role}
               </span>
             </button>
             {/* 右上角控制区：锁角标浮在这一角，不再占用行内宽度，名字因此能吃满整行 */}

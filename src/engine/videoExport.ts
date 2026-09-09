@@ -53,7 +53,12 @@ export async function recordCameraPov(
   fps = 24,
   onProgress?: (message: string) => void,
 ): Promise<Blob> {
-  const canvas = getCaptureCanvas();
+  // 画布可能尚未完成首帧初始化，短暂轮询等待（最多约 1.5s）再判定为未就绪。
+  let canvas = getCaptureCanvas();
+  for (let attempt = 0; !canvas && attempt < 30; attempt += 1) {
+    await delay(50);
+    canvas = getCaptureCanvas();
+  }
   if (!canvas) throw new Error("渲染画布尚未就绪，请稍候重试");
 
   const capture = (canvas as HTMLCanvasElement & {

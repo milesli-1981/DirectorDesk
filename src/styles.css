@@ -71,7 +71,7 @@ button:hover {
 .app {
   height: 100vh;
   display: grid;
-  grid-template-columns: 155px minmax(500px, 1fr) 295px;
+  grid-template-columns: 144px minmax(500px, 1fr) 295px;
   grid-template-rows: 30px 46px minmax(0, 1fr) 255px;
 }
 
@@ -248,7 +248,7 @@ header {
 }
 
 .st {
-  font-size: 10px;
+  font-size: 9px;
   letter-spacing: 0.13em;
   color: #738394;
   margin: 2px 0 7px;
@@ -257,7 +257,8 @@ header {
 .obj {
   width: 100%;
   text-align: left;
-  margin: 3px 0;
+  margin: 2px 0;
+  font-size: 11px;
 }
 
 .obj.sel {
@@ -277,8 +278,8 @@ header {
   width: 100%;
   min-width: 0;
   /* 右侧让出角标的位置，长名字不会钻到锁图标底下 */
-  padding-right: 28px;
-  margin: 3px 0;
+  padding-right: 24px;
+  margin: 2px 0;
   overflow: hidden;
 }
 .obj-row .obj-name {
@@ -286,12 +287,13 @@ header {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
+  font-size: 11px;
   color: #cdd8e2;
 }
 .obj-row .obj-meta {
-  font-size: 10px;
+  font-size: 9px;
   color: #6f8191;
+  white-space: nowrap;
 }
 /* 对象行右上角的控制区：锁角标浮在这里，后续还能往里加别的快捷操作 */
 .obj-actions {
@@ -591,7 +593,7 @@ canvas {
   height: 28px;
   position: sticky;
   top: 0;
-  margin-left: 96px;
+  margin-left: 124px;
   min-width: 1300px;
   border-bottom: 1px solid #27313b;
   background: #0c1117;
@@ -615,7 +617,7 @@ canvas {
 .row {
   height: 36px;
   display: grid;
-  grid-template-columns: 96px 1fr auto;
+  grid-template-columns: 124px 1fr auto;
   border-bottom: 1px solid #1d2630;
 }
 
@@ -693,6 +695,63 @@ canvas {
 
 .action-row .label {
   color: #d8b884;
+}
+
+/* 时间轴树状结构：资产为父节点，动作为其强绑定的子节点 */
+.asset-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding-left: 6px;
+}
+.caret {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #8ea2b6;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+.caret:hover {
+  color: #cfe0ef;
+}
+.node-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
+}
+.node-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 动作行缩进并向上连一条竖线到父资产，明确从属关系 */
+.action-node .label {
+  padding-left: 24px;
+  position: relative;
+  /* 允许向上溢出的连接线显示（覆盖 .label 的 overflow:hidden） */
+  overflow: visible;
+  background: #0c1117;
+}
+.action-node .label::before {
+  content: "";
+  position: absolute;
+  left: 14px;
+  top: -19px;
+  height: 19px;
+  width: 1px;
+  background: #4a3b22;
+}
+.action-node .connector {
+  margin-right: 5px;
+  color: #c79247;
 }
 
 .camera-row .label {
@@ -894,7 +953,7 @@ pre {
 /* --------------------------------------------------------- Camera / view */
 
 .cam-st {
-  margin-top: 14px;
+  margin-top: 10px;
 }
 
 .addobj {
@@ -1664,11 +1723,11 @@ header {
   border-left: 1px solid var(--ap-sep);
 }
 .st {
-  font: 600 10px/1 var(--ap-font);
+  font: 600 9px/1 var(--ap-font);
   letter-spacing: 0.07em;
   text-transform: uppercase;
   color: var(--ap-text-3);
-  margin: 4px 0 8px;
+  margin: 3px 0 5px;
 }
 
 /* ---- 视图工具栏 ---- */
