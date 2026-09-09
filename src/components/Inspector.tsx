@@ -6,9 +6,11 @@ import {
   CameraFraming,
   CameraMotionType,
   CameraSide,
-  CameraTargetType,
   CameraView,
   EaseCurve,
+  Footprint,
+  FormationKind,
+  FORMATION_LABELS,
   HandoffMode,
   JointName,
   Pose,
@@ -17,10 +19,10 @@ import {
   LENS_OPTIONS,
   MOTION_HINTS,
   MOTION_LABELS,
+  objectDisplayName,
   OtsSide,
   OTS_SIDE_LABELS,
   SIDE_LABELS,
-  TARGET_TYPE_LABELS,
   VIEW_LABELS,
 } from "../domain/schema";
 import { EaseEditor } from "./EaseEditor";
@@ -104,6 +106,8 @@ function SubGroup({
 
 export function Inspector() {
   const state = useDirectorStore((s) => s.state);
+  // 队伍成员作为整体单位，不单独出现在相机 Target 下拉里（只列独立对象与队伍本身）。
+  const memberIds = new Set((state.groups ?? []).flatMap((g) => g.members));
   const selectedKind = useDirectorStore((s) => s.selectedKind);
   const selectedId = useDirectorStore((s) => s.selectedId);
   const selectedItem = useDirectorStore((s) => s.selectedItem);
@@ -126,9 +130,23 @@ export function Inspector() {
   const deleteSegment = useDirectorStore((s) => s.deleteSegment);
   const updateAsset = useDirectorStore((s) => s.updateAsset);
   const removeAsset = useDirectorStore((s) => s.removeAsset);
+  const updateGroup = useDirectorStore((s) => s.updateGroup);
+  const setGroupCount = useDirectorStore((s) => s.setGroupCount);
+  const setGroupFootprint = useDirectorStore((s) => s.setGroupFootprint);
+  const setCameraGroup = useDirectorStore((s) => s.setCameraGroup);
+  const renameGroup = useDirectorStore((s) => s.renameGroup);
+  const removeGroup = useDirectorStore((s) => s.removeGroup);
 
   const object = selectedKind === "object" ? state.objects.find((o) => o.id === selectedId) : undefined;
   const camera = selectedKind === "camera" ? state.cameras.find((c) => c.id === selectedId) : undefined;
+  // 组是对象的一类：选中某个组成员（如团队队首）时，按成员关系找到其所属组，配置在下方展示。
+  const group = object ? (state.groups ?? []).find((g) => g.members.includes(object.id)) : undefined;
+  // 未选中任何对象 / 相机时，整个 Inspector（标题、占位 “—”、Selected Timeline Item）都不显示。
+  const showInspector = !!(object || camera);
+  // 组 Block 尺寸：以锚点（members[0]）的 footprint 为代表，改动时统一写回所有成员。
+  const groupFootprint = group
+    ? state.objects.find((o) => o.id === group.members[0])?.footprint ?? { w: 1, d: 1, h: 1 }
+    : undefined;
   const segment = state.segments.find((item) => item.id === selectedItem);
   const constraint = state.constraints.find((item) => item.id === selectedItem);
   const move = state.cameraMoves.find((item) => item.id === selectedItem);
@@ -205,53 +223,183 @@ export function Inspector() {
         }
       : null;
 
-  const title = camera ? camera.name : (object?.id ?? "—");
+  // 用显示名（改名后即时联动），未命名的资产回退到 id。
+  const title = camera
+    ? camera.name
+    : group
+      ? `👥 ${group.name}`
+      : object
+        ? objectDisplayName(object)
+        : "—";
 
   return (
     <aside className="right">
-      <div className="st">INSPECTOR</div>
-      <div className="title">{title}</div>
-      <div className="sub">{camera ? "Camera Intent" : "Director State"}</div>
-
+      {/* 场景级设置：始终显示，不依赖是否选中对象 */}
       <div className="field">
-        <div className="lab">Current Intent</div>
-        <div id="intentInfo">
-          {camera ? (
-            <>
-              <span className="pill">CAMERA</span> TARGET {camera.targetId} ·{" "}
-              {FRAMING_LABELS[camera.framing]} / {SIDE_LABELS[camera.side]} /{" "}
-              {VIEW_LABELS[camera.view]} · {camera.lensMm}mm
-            </>
-          ) : constraint ? (
-            <>
-              <span className="pill">{constraint.type}</span> {constraint.subject} →{" "}
-              {constraint.target} · {constraint.timeStart.toFixed(1)}–
-              {constraint.timeEnd.toFixed(1)}s
-            </>
-          ) : segment ? (
-            <>
-              <span className="pill">{segment.type}</span> {segment.object} ·{" "}
-              {segment.timeStart.toFixed(1)}–{segment.timeEnd.toFixed(1)}s
-            </>
-          ) : move ? (
-            <>
-              <span className="pill">{move.type}</span> {move.camera} ·{" "}
-              {move.timeStart.toFixed(1)}–{move.timeEnd.toFixed(1)}s
-            </>
-          ) : (
-            "No timeline intent selected."
-          )}
-        </div>
+        <div className="lab">Master Aspect Ratio</div>
+        <select
+          value={state.aspectRatio}
+          onChange={(event) => setAspectRatio(event.target.value as AspectRatio)}
+        >
+          {ASPECT_OPTIONS.map((option) => (
+            <option key={option.label} value={option.label}>
+              {option.label}
+            </option>
+          ))}
+        </select>
       </div>
 
-      <div className="field">
-        <div className="lab">Selected Timeline Item</div>
+      {showInspector ? (
+        <>
+          <div className="st">INSPECTOR</div>
+          <div className="title">{title}</div>
+          {camera && <div className="sub">Camera Intent</div>}
+          {group && <div className="sub">Group Dynamics（对象 / 团队）</div>}
+
+          <div className="field">
+            <div className="lab">Selected Timeline Item</div>
         <div id="itemInfo">
           {selectedItem ?? "—"}
           {segment ? ` · ${pointCount} path point${pointCount === 1 ? "" : "s"}` : ""}
           {selectedPointShape ? ` · ${selectedPointShape}` : ""}
         </div>
       </div>
+
+      {group ? (
+        <div className="field">
+          <div className="lab">Group — {group.members.length} 人</div>
+          <div className="row2">
+            <label>名称</label>
+            <input
+              type="text"
+              value={group.name}
+              onChange={(event) => renameGroup(group.id, event.target.value)}
+            />
+          </div>
+          <div className="row2">
+            <label>人数</label>
+            <div className="grp-count" style={{ border: "none", padding: 0 }}>
+              <button
+                type="button"
+                className="grp-btn"
+                disabled={group.members.length <= 1}
+                title="减少一名尾随队员"
+                onClick={() => setGroupCount(group.id, group.members.length - 1)}
+              >
+                −
+              </button>
+              <span className="grp-count-num">{group.members.length}</span>
+              <button
+                type="button"
+                className="grp-btn"
+                disabled={group.members.length >= 24}
+                title="增加一名尾随队员"
+                onClick={() => setGroupCount(group.id, group.members.length + 1)}
+              >
+                ＋
+              </button>
+            </div>
+          </div>
+          {groupFootprint && (
+            <div className="grp-block">
+              <div className="lab">Block 尺寸（全体队员统一）</div>
+              <div className="grp-slider">
+                <span>宽 W {groupFootprint.w.toFixed(1)}</span>
+                <input
+                  type="range"
+                  min={0.4}
+                  max={5}
+                  step={0.1}
+                  value={groupFootprint.w}
+                  onChange={(event) => setGroupFootprint(group.id, { w: Number(event.target.value) })}
+                />
+              </div>
+              <div className="grp-slider">
+                <span>深 D {groupFootprint.d.toFixed(1)}</span>
+                <input
+                  type="range"
+                  min={0.4}
+                  max={5}
+                  step={0.1}
+                  value={groupFootprint.d}
+                  onChange={(event) => setGroupFootprint(group.id, { d: Number(event.target.value) })}
+                />
+              </div>
+              <div className="grp-slider">
+                <span>高 H {groupFootprint.h.toFixed(1)}</span>
+                <input
+                  type="range"
+                  min={0.4}
+                  max={5}
+                  step={0.1}
+                  value={groupFootprint.h}
+                  onChange={(event) => setGroupFootprint(group.id, { h: Number(event.target.value) })}
+                />
+              </div>
+            </div>
+          )}
+          <button
+            type="button"
+            className="grp-btn wide"
+            disabled={!activeCameraId}
+            title={activeCameraId ? `让 ${activeCameraId} 以 GROUP 取景本组` : "先选中一台相机"}
+            onClick={() => activeCameraId && setCameraGroup(activeCameraId, group.id)}
+          >
+            相机取景（{activeCameraId ?? "未选相机"}）
+          </button>
+          <label className="grp-toggle">
+            <input
+              type="checkbox"
+              checked={group.dynamics}
+              onChange={(event) => updateGroup(group.id, { dynamics: event.target.checked })}
+            />
+            引力场
+          </label>
+          <div className="grp-slider">
+            <span>编队</span>
+            <select
+              className="grp-select"
+              value={group.formation ?? "column"}
+              onChange={(event) => updateGroup(group.id, { formation: event.target.value as FormationKind })}
+            >
+              {(Object.keys(FORMATION_LABELS) as FormationKind[]).map((kind) => (
+                <option key={kind} value={kind}>
+                  {FORMATION_LABELS[kind]}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="grp-slider">
+            <span>间距 {(group.spacing ?? 1.2).toFixed(1)}m</span>
+            <input
+              type="range"
+              min={0.4}
+              max={4}
+              step={0.1}
+              value={group.spacing ?? 1.2}
+              onChange={(event) => updateGroup(group.id, { spacing: Number(event.target.value) })}
+            />
+          </div>
+          <div className="grp-slider">
+            <span>微扰 {(group.noise ?? 0.35).toFixed(2)}</span>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={group.noise ?? 0.35}
+              onChange={(event) => updateGroup(group.id, { noise: Number(event.target.value) })}
+            />
+          </div>
+          <p className="hint">
+            ⚓ 首位成员是<b>锚点</b>：它的路径就是整队的唯一路线，其余队员按编队跟随。
+            匀速时保持编队，加速 / 减速 / 变线时出现弹簧拉扯后复原。
+          </p>
+          <button type="button" className="obj-del wide" title="删除组" onClick={() => removeGroup(group.id)}>
+            删除组
+          </button>
+        </div>
+      ) : null}
 
       {object ? (
         <div className="field">
@@ -350,15 +498,6 @@ export function Inspector() {
               <p className="hint">这里只设人物的静态基线姿势；关节微调请在选中某个动作片段后，于「Action」面板的 Joints 区调整。</p>
             </div>
           ) : null}
-          <div className="mini-btns">
-            <button
-              type="button"
-              className="ghost-button danger-button"
-              onClick={() => removeAsset(object.id)}
-            >
-              Delete Asset
-            </button>
-          </div>
           <p className="hint">锁定后不可通过拖拽移动位置（防误触），仍可点选以便解锁；agent = 可运动、可作相机目标，set = 环境遮挡体与路径障碍</p>
         </div>
       ) : null}
@@ -503,56 +642,43 @@ export function Inspector() {
               </p>
             ) : null}
             <SubGroup title="构图 Composition" hint="拍谁、多近、从哪个角度。">
-              <Field label="Target">
+              <Field label="Target（跟随对象 / 队伍）">
                 <select
                   value={camera.targetId}
-                  onChange={(event) => updateCamera(camera.id, { targetId: event.target.value })}
+                  onChange={(event) => {
+                    const id = event.target.value;
+                    const grp = state.groups?.find((g) => g.id === id);
+                    if (grp) {
+                      // 选中的是队伍：与对象同等地位，自动按 GROUP 取景并框住全队。
+                      updateCamera(camera.id, {
+                        targetId: id,
+                        targetType: "GROUP",
+                        groupId: id,
+                      });
+                    } else {
+                      updateCamera(camera.id, {
+                        targetId: id,
+                        targetType: "OBJECT",
+                        groupId: undefined,
+                      });
+                    }
+                  }}
                 >
-                  {state.objects.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.id}
+                  <option value="">— 无 —</option>
+                  {state.objects
+                    .filter((item) => !memberIds.has(item.id))
+                    .map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {objectDisplayName(item)}
+                      </option>
+                    ))}
+                  {(state.groups ?? []).map((grp) => (
+                    <option key={grp.id} value={grp.id}>
+                      👥 {grp.name}
                     </option>
                   ))}
                 </select>
               </Field>
-              <Field label="Target 类型">
-                <select
-                  value={camera.targetType ?? "OBJECT"}
-                  onChange={(event) =>
-                    updateCamera(camera.id, { targetType: event.target.value as CameraTargetType })
-                  }
-                >
-                  {(Object.keys(TARGET_TYPE_LABELS) as CameraTargetType[]).map((value) => (
-                    <option key={value} value={value}>
-                      {TARGET_TYPE_LABELS[value]}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-              {camera.targetType === "GROUP" ? (
-                <Field label="Group 成员（自动框住）">
-                  <div className="grp-ids">
-                    {state.objects.map((item) => {
-                      const on = camera.groupIds?.includes(item.id) ?? false;
-                      return (
-                        <button
-                          key={item.id}
-                          type="button"
-                          className={`chip ${on ? "on" : ""}`}
-                          onClick={() => {
-                            const set = new Set(camera.groupIds ?? []);
-                            if (set.has(item.id)) set.delete(item.id);
-                            else set.add(item.id);
-                            updateCamera(camera.id, { groupIds: [...set] });
-                          }}
-                        >
-                          {item.id}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </Field>
-              ) : null}
               <Field label="Framing">
                 <select
                   value={camera.framing}
@@ -655,25 +781,6 @@ export function Inspector() {
                   />
                 </Field>
               ) : null}
-            </SubGroup>
-
-            <SubGroup
-              title="Prompt（喂给视频模型）"
-              hint="模板自带的自然语言描述，可编辑后复制；与结构化 spec 一起喂给 MiniMax / Kling / Runway 等视频模型。"
-            >
-              <textarea
-                className="prompt-box"
-                rows={5}
-                value={camera.prompt ?? ""}
-                onChange={(event) => updateCamera(camera.id, { prompt: event.target.value })}
-              />
-              <button
-                type="button"
-                className="obj"
-                onClick={() => navigator.clipboard?.writeText(camera.prompt ?? "")}
-              >
-                复制 prompt
-              </button>
             </SubGroup>
 
             {cameraOts ? (
@@ -797,15 +904,6 @@ export function Inspector() {
                 }}
               >
                 {viewMode === "camera" && activeCameraId === camera.id ? "Exit Camera View" : "Camera View"}
-              </button>
-            </div>
-            <div className="mini-btns" style={{ marginTop: 8 }}>
-              <button
-                type="button"
-                className="ghost-button danger-button"
-                onClick={() => removeCamera(camera.id)}
-              >
-                Delete Camera
               </button>
             </div>
           </div>
@@ -1071,25 +1169,6 @@ export function Inspector() {
       ) : null}
 
       <div className="field">
-        <div className="lab">Master Aspect Ratio</div>
-        <select
-          value={state.aspectRatio}
-          onChange={(event) => setAspectRatio(event.target.value as AspectRatio)}
-        >
-          {ASPECT_OPTIONS.map((option) => (
-            <option key={option.label} value={option.label}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      <div className="field">
-        <div className="lab">State Revision</div>
-        <div id="rev">{state.revision}</div>
-      </div>
-
-      <div className="field">
         <div className="lab">
           Director State JSON
           <button type="button" className="ghost-button" onClick={() => setShowJson((v) => !v)}>
@@ -1105,6 +1184,8 @@ export function Inspector() {
           Segment/Constraint/CameraMove directly. Play reads the same state.
         </div>
       </div>
+      </>
+      ) : null}
     </aside>
   );
 }

@@ -9,8 +9,10 @@ import {
   CameraSide,
   CameraView,
   Constraint,
+  DirectorGroup,
   DirectorState,
   EaseCurve,
+  Footprint,
   Handoff,
   HandoffMode,
   IntentAction,
@@ -23,15 +25,22 @@ import {
   Vec2,
   ViewMode,
 } from "../domain/schema";
-import { createBlankState, createDemoState } from "../engine/demoShot";
-import { normalizePathPointModes, pathInsertIndex } from "../engine/path";
-import { contentEndTime } from "../engine/timeline";
+import { createBlankState } from "../engine/demoShot";
+import { normalizePathPointModes, pathInsertIndex, simplifyPath } from "../engine/path";
+import { contentEndTime, rawContentEnd } from "../engine/timeline";
 import { ASSET_PRESETS } from "../engine/assetPresets";
 import { separateSetAsset } from "../engine/collision";
-import { AssetCategory, DirectorObject } from "../domain/schema";
+import { AssetCategory, DirectorObject, FormationKind } from "../domain/schema";
+import { formationSlotOf } from "../engine/solver";
 import { findTemplate } from "../domain/templates";
 
 const CAMERA_COLORS = ["#c792ea", "#67a7ff", "#63d39b", "#f0a35a", "#ff7b91", "#8ad1ff"];
+
+/**
+ * 手绘路径的抽稀容差（米）：小于此偏离的采样点视为手抖，合并掉。
+ * 调大 → 控制点更少更"硬"；调小 → 保留更多细节但点更密。
+ */
+const HAND_DRAW_EPSILON = 0.35;
 
 // 持久化 v3：每张场景页独立 localStorage key，由片场 manifest 索引。
 const MANIFEST_KEY = "director-desk-manifest-v3";
@@ -63,7 +72,8 @@ function loadSceneState(id: string): DirectorState | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as DirectorState;
     if (!parsed || !Array.isArray(parsed.objects) || !Array.isArray(parsed.cameraMoves)) return null;
-    return { ...parsed, actions: parsed.actions ?? [] };
+    // 读盘即兜底清理孤儿路径等悬空引用，保证任何来源的存档都干净。
+    return sanitizeState({ ...parsed, actions: parsed.actions ?? [] });
   } catch {
     return null;
   }
@@ -117,9 +127,80 @@ function collectExamples(): {
   return { order, scenes };
 }
 
+/** 稳定字符串哈希（djb2）：给示例内容做指纹。 */
+function hashString(value: string): string {
+  let h = 5381;
+  for (let i = 0; i < value.length; i += 1) h = ((h << 5) + h + value.charCodeAt(i)) | 0;
+  return String(h >>> 0);
+}
+
+const exampleHashKey = (id: string) => `director-desk-example-hash-${id}`;
+const exampleWrittenKey = (id: string) => `director-desk-example-written-${id}`;
+/** 用户改过的示例页：标记为不再自动覆盖（只能用 ↺ 强刷）。 */
+const USER_MODIFIED = "user-modified";
+
+function lsGet(key: string): string | null {
+  try {
+    return typeof localStorage !== "undefined" ? localStorage.getItem(key) : null;
+  } catch {
+    return null;
+  }
+}
+function lsSet(key: string, value: string): void {
+  try {
+    if (typeof localStorage !== "undefined") localStorage.setItem(key, value);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 写入示例并记录两个指纹：示例源内容指纹 + 本次实际写入内容指纹。 */
+function writeExample(id: string, st: DirectorState, exampleHash: string): void {
+  saveSceneState(id, st);
+  lsSet(exampleHashKey(id), exampleHash);
+  lsSet(exampleWrittenKey(id), hashString(JSON.stringify(st)));
+}
+
+/**
+ * 示例同步：示例 JSON 改了之后自动刷新本地示例页，避免"改了示例却看不到效果"。
+ *
+ * 判定规则（force = ↺ 强刷时无条件覆盖）：
+ * - tab 缺失 → 补建；
+ * - 本地内容仍是上次写进去的那份（未被用户编辑）→ 示例一变就覆盖；
+ * - 本地内容已被用户改过 → 标为 user-modified，之后**永不自动覆盖**（只能 ↺ 强刷）；
+ * - 没有任何历史指纹（首次启用本机制）→ 视为陈旧样本，覆盖。
+ */
+function syncExamples(order: StageManifest["order"], force = false): StageManifest["order"] {
+  const built = collectExamples();
+  const next = [...order];
+  for (const tab of built.order) {
+    const st = built.scenes[tab.id];
+    if (!st) continue;
+    const exampleHash = hashString(JSON.stringify(st));
+    const written = lsGet(exampleWrittenKey(tab.id));
+    const savedRaw = lsGet(sceneKey(tab.id));
+    const savedHash = savedRaw !== null ? hashString(savedRaw) : null;
+    const missing = !next.some((t) => t.id === tab.id);
+    const upToDate = savedHash === exampleHash;
+    const untouched = written !== null && savedHash === written;
+
+    if (force || missing || (!upToDate && (untouched || written === null))) {
+      writeExample(tab.id, st, exampleHash);
+      if (missing) next.push(tab);
+    } else if (!upToDate && written !== null) {
+      // 本地与"我们写进去的"不一致 = 用户改过：标记后不再自动覆盖。
+      lsSet(exampleWrittenKey(tab.id), USER_MODIFIED);
+      lsSet(exampleHashKey(tab.id), exampleHash);
+    } else {
+      lsSet(exampleHashKey(tab.id), exampleHash);
+    }
+  }
+  return next;
+}
+
 /**
  * 启动时装配片场：
- * - 已有 manifest（用户继续编辑）→ 保留现状，仅补齐缺失的示例场景 tab，不覆盖用户已有项。
+ * - 已有 manifest（用户继续编辑）→ 保留现状，并同步示例（陈旧/未改动的示例页自动更新）。
  * - 首屏（无 manifest）→ 以 scene_examples 目录下所有示例片场作为默认片场。
  * 返回的 activeState 直接作为 store 顶层 `state`（= 当前激活场景页的引用）。
  */
@@ -128,16 +209,10 @@ function initStage(): { manifest: StageManifest; activeState: DirectorState } {
   const manifest = loadManifest();
 
   if (manifest && manifest.order.length > 0) {
-    // 保留用户片场，仅把缺失的示例场景 tab 追加进来。
-    const existing = new Set(manifest.order.map((t) => t.id));
-    const added = built.order.filter((t) => !existing.has(t.id));
-    const nextManifest =
-      added.length > 0 ? { ...manifest, order: [...manifest.order, ...added] } : manifest;
-    for (const tab of added) {
-      const st = built.scenes[tab.id];
-      if (st) saveSceneState(tab.id, st);
-    }
-    if (added.length > 0) saveManifest(nextManifest);
+    // 保留用户片场，同时同步示例：缺失的补建，陈旧且未被改动的自动更新。
+    const order = syncExamples(manifest.order);
+    const nextManifest = order.length !== manifest.order.length ? { ...manifest, order } : manifest;
+    if (nextManifest !== manifest) saveManifest(nextManifest);
     const activeId =
       nextManifest.activeSceneId && nextManifest.order.some((t) => t.id === nextManifest.activeSceneId)
         ? nextManifest.activeSceneId
@@ -161,7 +236,7 @@ function initStage(): { manifest: StageManifest; activeState: DirectorState } {
   }
   for (const tab of built.order) {
     const st = built.scenes[tab.id];
-    if (st) saveSceneState(tab.id, st);
+    if (st) writeExample(tab.id, st, hashString(JSON.stringify(st)));
   }
   const newManifest: StageManifest = {
     name: "示例片场",
@@ -190,6 +265,8 @@ interface DirectorStore {
   activeCameraId: string | null;
   /** 锁视角：开启后拖拽不再改变 Director View 的机位。 */
   viewLocked: boolean;
+  /** 手绘路径模式：开启后可在画布上拖拽绘制选中资产的移动轨迹。 */
+  pathDrawMode: boolean;
   /** 是否正在拖拽场景对象 / 路径点，用于临时接管 OrbitControls。 */
   dragging: boolean;
 
@@ -200,6 +277,7 @@ interface DirectorStore {
   setViewMode: (mode: ViewMode) => void;
   setActiveCamera: (cameraId: string) => void;
   toggleViewLocked: () => void;
+  togglePathDraw: () => void;
   setDragging: (dragging: boolean) => void;
 
   selectObject: (objectId: string) => void;
@@ -215,8 +293,30 @@ interface DirectorStore {
   /** 锁定 / 解锁资产：锁定后不可通过拖拽移动位置（防误触），仍可点选以便解锁。 */
   toggleLock: (id: string) => void;
   addAsset: (category: AssetCategory, at?: { x: number; z: number }) => void;
+  /**
+   * 拖入一个「团队 Group」：一次生成 count 个同类资产并建组，整队共用一条路线
+   * （锚点 = members[0]），队员按 formation 跟随。
+   */
+  addGroupAt: (
+    category: AssetCategory,
+    count: number,
+    formation: FormationKind,
+    at?: { x: number; z: number },
+  ) => void;
   updateAsset: (id: string, patch: Partial<DirectorObject>) => void;
   removeAsset: (id: string) => void;
+  /** 组（Group Dynamics） */
+  createGroup: () => void;
+  removeGroup: (groupId: string) => void;
+  renameGroup: (groupId: string, name: string) => void;
+  addMemberToGroup: (groupId: string, objectId: string) => void;
+  removeMemberFromGroup: (groupId: string, objectId: string) => void;
+  setGroupCount: (groupId: string, count: number) => void;
+  updateGroup: (groupId: string, patch: Partial<DirectorGroup>) => void;
+  /** 组 Block 尺寸：统一写回组内所有成员的 footprint（w=宽 d=深 h=高）。 */
+  setGroupFootprint: (groupId: string, patch: Partial<Footprint>) => void;
+  /** 让某台相机以 GROUP 方式取景指定组（实时跟随成员变化）。 */
+  setCameraGroup: (cameraId: string, groupId?: string) => void;
   exportScene: () => string;
   importScene: (json: string) => void;
   persist: () => void;
@@ -228,6 +328,8 @@ interface DirectorStore {
   removeScene: (id: string) => void;
   duplicateScene: (id: string) => void;
   reorderScene: (fromId: string, toId: string) => void;
+  /** 用磁盘上 scene_examples 的最新内容覆盖同名示例场景页，并切到第一个示例页。 */
+  resetExamples: () => void;
   exportProject: () => string;
   importProject: (json: string) => void;
   addPathPoint: (segmentId: string, x: number, z: number) => string | null;
@@ -236,6 +338,10 @@ interface DirectorStore {
   toggleCurve: (segmentId: string, pointId: string) => void;
   deletePoint: (segmentId: string, pointId: string) => void;
   addSegment: (objectId: string, afterSegmentId?: string) => void;
+  /** 用一组有序坐标点直接覆盖某 segment 的路径（起点/终点取首尾点）。 */
+  setSegmentPoints: (segmentId: string, points: { x: number; z: number }[]) => void;
+  /** 手绘路径：为资产创建/复用最后的 MOVE segment，并写入拖拽得到的轨迹点。 */
+  drawAssetPath: (objectId: string, points: { x: number; z: number }[]) => void;
   setHandoffMode: (handoffId: string, mode: HandoffMode) => void;
   setCameraJunctionMode: (junctionId: string, mode: HandoffMode) => void;
   deleteSegment: (segmentId: string) => void;
@@ -272,9 +378,9 @@ interface DirectorStore {
         | "otsOffset"
         | "altitude"
         | "templateId"
-        | "prompt"
         | "targetType"
         | "groupIds"
+        | "groupId"
         | "panDeg"
         | "tiltDeg"
         | "truckDist"
@@ -289,9 +395,13 @@ interface DirectorStore {
   /** 基于某条过肩 move 生成正反打：互换前景 / 主体、翻转肩侧，并保持同一侧轴线。 */
   addReverseShot: (moveId: string) => void;
   setAspectRatio: (ratio: AspectRatio) => void;
+  /**
+   * 设置本场景的最大时长（秒）。成片导出与时间轴刻度都以此为准。
+   * 下限受已有内容约束（不允许把片段截掉），上限防止误输入超大值。
+   */
+  setDuration: (seconds: number) => void;
 
   executeIntent: (objectId: string, action: IntentAction) => void;
-  reset: () => void;
   // —— 撤销 / 重做历史 ——
   past: DirectorState[];
   future: DirectorState[];
@@ -392,6 +502,32 @@ function reconcileHandoffs(segments: MoveSegment[], prevHandoffs: Handoff[]): Ha
     }
   }
   return next;
+}
+
+/**
+ * 清理「悬空引用」：移除 object 字段指向不存在资产的 segment（孤儿路径）、
+ * 以及引用缺失对象的 constraint / handoff / cameraMove。
+ * 用于导入、读盘时兜底，避免历史/手工数据导致渲染或求解出错。
+ */
+function sanitizeState(s: DirectorState): DirectorState {
+  const ids = new Set(s.objects.map((o) => o.id));
+  const segments = s.segments.filter((seg) => ids.has(seg.object));
+  return {
+    ...s,
+    segments,
+    constraints: s.constraints.filter((c) => ids.has(c.subject) && ids.has(c.target)),
+    handoffs: reconcileHandoffs(segments, s.handoffs),
+  };
+}
+
+/**
+ * 团队路线的归属者：整队只 author 一条路线，挂在锚点（members[0]）上。
+ * 任何落在队员身上的建段 / 画路径请求都重定向到锚点，避免「每个人各有一条路线」。
+ */
+function teamRouteOwner(state: DirectorState, objectId: string): string {
+  const group = (state.groups ?? []).find((g) => g.dynamics && g.members.includes(objectId));
+  if (!group || group.members.length < 2) return objectId;
+  return group.members[0];
 }
 
 /**
@@ -508,6 +644,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
     viewMode: "director",
     activeCameraId: "CAM_A",
     viewLocked: false,
+    pathDrawMode: false,
     dragging: false,
 
     // 播放需要连续时间，不能在这里做 0.1s 量化。
@@ -535,6 +672,8 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
     setActiveCamera: (cameraId) => set({ activeCameraId: cameraId }),
 
     toggleViewLocked: () => set((store) => ({ viewLocked: !store.viewLocked })),
+
+    togglePathDraw: () => set((store) => ({ pathDrawMode: !store.pathDrawMode })),
 
     setDragging: (dragging) => set({ dragging }),
 
@@ -570,6 +709,11 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         const target = state.objects.find((o) => o.id === objectId);
         // 锁定对象不可通过拖拽移动位置（防误触）。
         if (target && target.locked) return {};
+        // 锁定团队：拖动其锚点（队首）= 移动整队，故一并禁止。
+        const team = (state.groups ?? []).find(
+          (g) => g.dynamics && g.members[0] === objectId,
+        );
+        if (team && team.locked) return {};
         // set 资产落点需与已有环境资产分离，避免穿模。
         const { x: nx, z: nz } =
           target && target.role === "set"
@@ -675,6 +819,73 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
       });
     },
 
+    /**
+     * 团队（Group）作为一个整体拖入：一次生成 count 个同类资产并建组。
+     * 只给「组」设定一条路线——锚点（members[0]）承载它，其余队员由求解器按
+     * formation 实时跟随（匀速保持编队、变速/变线弹簧回弹）。
+     */
+    addGroupAt: (category, count, formation, at) => {
+      const store = get();
+      const { state } = store;
+      const preset = ASSET_PRESETS[category];
+      if (!preset) return;
+      const total = Math.max(1, Math.min(24, Math.round(count) || 1));
+      const spacing = 1.3;
+      const baseX = at ? Math.round(at.x * 10) / 10 : 0;
+      const baseZ = at ? Math.round(at.z * 10) / 10 : 0;
+
+      const created: DirectorObject[] = [];
+      const members: string[] = [];
+      for (let i = 0; i < total; i += 1) {
+        let n = state.objects.filter((o) => o.category === category).length + created.length + 1;
+        let id = `AST_${category.toUpperCase()}_${String(n).padStart(2, "0")}`;
+        while ([...state.objects, ...created].some((o) => o.id === id)) {
+          n += 1;
+          id = `AST_${category.toUpperCase()}_${String(n).padStart(2, "0")}`;
+        }
+        // 初始摆放沿用求解器同一套编队槽位（本地坐标 forward = +z, right = +x）。
+        const slot = formationSlotOf(formation, spacing, i, total);
+        created.push({
+          id,
+          type: preset.role === "agent" ? "actor" : "prop",
+          category,
+          role: preset.role,
+          x: Math.round((baseX + slot.right) * 10) / 10,
+          z: Math.round((baseZ + slot.fwd) * 10) / 10,
+          rotation: 0,
+          footprint: { ...preset.footprint },
+          color: preset.color,
+        });
+        members.push(id);
+      }
+
+      const palette = ["#ff8fab", "#9d7bff", "#5ad1c4", "#f0c050", "#7bd88f", "#ff9d5c"];
+      const group: DirectorGroup = {
+        id: `GRP_${Date.now().toString(36)}`,
+        name: `${preset.label}队${(state.groups?.length ?? 0) + 1}`,
+        color: palette[(state.groups?.length ?? 0) % palette.length],
+        members,
+        dynamics: true,
+        formation,
+        spacing,
+        noise: 0.35,
+      };
+
+      set({
+        state: {
+          ...state,
+          revision: state.revision + 1,
+          objects: [...state.objects, ...created],
+          groups: [...(state.groups ?? []), group],
+        },
+        selectedKind: "object",
+        // 选中锚点：之后画路径 / 加 MOVE 都是给整队设定那唯一一条路线。
+        selectedId: members[0],
+        selectedItem: null,
+        selectedPoint: null,
+      });
+    },
+
     updateAsset: (id, patch) =>
       set((store) => {
         const state = store.state;
@@ -721,14 +932,217 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
             constraints: store.state.constraints.filter((c) => c.subject !== id && c.target !== id),
             cameraMoves,
             cameraJunctions: reconcileCameraJunctions(cameraMoves, store.state.cameraJunctions),
+            // 被删对象同时从各组成员中移除，空组清理掉。
+            groups: (store.state.groups ?? [])
+              .map((g) => ({ ...g, members: g.members.filter((m) => m !== id) }))
+              .filter((g) => g.members.length > 0),
           },
           selectedItem:
             store.selectedItem && store.state.segments.some((s) => s.id === store.selectedItem)
               ? store.selectedItem
               : null,
           selectedPoint: null,
+          // 删掉的正是当前选中资产时，清空选择，避免后续 DRAW PATH 把轨迹写进不存在的 id（孤儿路径）。
+          selectedId: store.selectedId === id ? "" : store.selectedId,
+          selectedKind: store.selectedKind === "object" && store.selectedId === id ? undefined : store.selectedKind,
+          radialObjectId: store.radialObjectId === id ? null : store.radialObjectId,
         };
       }),
+
+    createGroup: () =>
+      set((store) => {
+        const n = (store.state.groups?.length ?? 0) + 1;
+        const palette = ["#ff8fab", "#9d7bff", "#5ad1c4", "#f0c050", "#7bd88f", "#ff9d5c"];
+        const group: DirectorGroup = {
+          id: `GRP_${Date.now().toString(36)}`,
+          name: `G${n}`,
+          color: palette[(n - 1) % palette.length],
+          members: [],
+          dynamics: false,
+          formation: "column",
+          spacing: 1.2,
+          noise: 0.35,
+        };
+        return {
+          state: {
+            ...store.state,
+            revision: store.state.revision + 1,
+            groups: [...(store.state.groups ?? []), group],
+          },
+        };
+      }),
+
+    removeGroup: (groupId) =>
+      set((store) => ({
+        state: {
+          ...store.state,
+          revision: store.state.revision + 1,
+          groups: (store.state.groups ?? []).filter((g) => g.id !== groupId),
+          cameras: store.state.cameras.map((c) =>
+            c.groupId === groupId ? { ...c, groupId: undefined } : c,
+          ),
+        },
+      })),
+
+    renameGroup: (groupId, name) =>
+      set((store) => ({
+        state: {
+          ...store.state,
+          revision: store.state.revision + 1,
+          groups: (store.state.groups ?? []).map((g) =>
+            g.id === groupId ? { ...g, name: name.trim() || g.name } : g,
+          ),
+        },
+      })),
+
+    addMemberToGroup: (groupId, objectId) =>
+      set((store) => ({
+        state: {
+          ...store.state,
+          revision: store.state.revision + 1,
+          groups: (store.state.groups ?? []).map((g) =>
+            g.id === groupId && !g.members.includes(objectId)
+              ? { ...g, members: [...g.members, objectId] }
+              : g,
+          ),
+        },
+      })),
+
+    removeMemberFromGroup: (groupId, objectId) =>
+      set((store) => ({
+        state: {
+          ...store.state,
+          revision: store.state.revision + 1,
+          groups: (store.state.groups ?? []).map((g) =>
+            g.id === groupId ? { ...g, members: g.members.filter((m) => m !== objectId) } : g,
+          ),
+        },
+      })),
+
+    // 只通过「数量」管理队伍规模：以锚点（members[0]）为基准增删尾随队员，不暴露单独增删改。
+    setGroupCount: (groupId, count) =>
+      set((store) => {
+        const state = store.state;
+        const group = (state.groups ?? []).find((g) => g.id === groupId);
+        if (!group) return {};
+        const target = Math.max(1, Math.min(24, Math.round(count) || 1));
+        const current = group.members.length;
+        if (target === current) return {};
+
+        // 减少：删除尾部队员，并清理其对象 / 路径 / 约束（锚点始终保留）。
+        if (target < current) {
+          const removed = group.members.slice(target);
+          const kept = group.members.slice(0, target);
+          return {
+            state: {
+              ...state,
+              revision: state.revision + 1,
+              objects: state.objects.filter((o) => !removed.includes(o.id)),
+              segments: state.segments.filter((s) => !removed.includes(s.object)),
+              constraints: state.constraints.filter(
+                (c) => !removed.includes(c.subject) && !removed.includes(c.target),
+              ),
+              groups: (state.groups ?? []).map((g) =>
+                g.id === groupId ? { ...g, members: kept } : g,
+              ),
+            },
+          };
+        }
+
+        // 增加：以锚点当前位置为基准，按编队槽位生成新的尾随队员对象。
+        const anchor = state.objects.find((o) => o.id === group.members[0]);
+        if (!anchor) return {};
+        const created: DirectorObject[] = [];
+        const newMembers = [...group.members];
+        const formation = group.formation ?? "column";
+        const spacing = group.spacing ?? 1.2;
+        for (let k = 0; k < target - current; k += 1) {
+          const i = current + k;
+          let n = state.objects.filter((o) => o.category === anchor.category).length + created.length + 1;
+          let id = `AST_${anchor.category.toUpperCase()}_${String(n).padStart(2, "0")}`;
+          while ([...state.objects, ...created].some((o) => o.id === id)) {
+            n += 1;
+            id = `AST_${anchor.category.toUpperCase()}_${String(n).padStart(2, "0")}`;
+          }
+          const slot = formationSlotOf(formation, spacing, i, target);
+          created.push({
+            id,
+            type: anchor.type,
+            category: anchor.category,
+            role: anchor.role,
+            x: Math.round((anchor.x + slot.right) * 10) / 10,
+            z: Math.round((anchor.z + slot.fwd) * 10) / 10,
+            rotation: anchor.rotation ?? 0,
+            footprint: { ...anchor.footprint },
+            color: anchor.color,
+          });
+          newMembers.push(id);
+        }
+        return {
+          state: {
+            ...state,
+            revision: state.revision + 1,
+            objects: [...state.objects, ...created],
+            groups: (state.groups ?? []).map((g) =>
+              g.id === groupId ? { ...g, members: newMembers } : g,
+            ),
+          },
+        };
+      }),
+
+    updateGroup: (groupId, patch) =>
+      set((store) => {
+        const currentTime = store.currentTime;
+        const groups = (store.state.groups ?? []).map((g) => {
+          if (g.id !== groupId) return g;
+          const next = { ...g, ...patch };
+          // 编队切换：记录切换时刻与上一阵型，供求解器按时间插值，避免瞬间变阵（不真实）。
+          if (patch.formation !== undefined && patch.formation !== g.formation) {
+            next.prevFormation = g.formation;
+            next.formationChangeAt = currentTime;
+          }
+          return next;
+        });
+        return {
+          state: {
+            ...store.state,
+            revision: store.state.revision + 1,
+            groups,
+          },
+        };
+      }),
+
+    setGroupFootprint: (groupId, patch) =>
+      set((store) => {
+        const state = store.state;
+        const group = (state.groups ?? []).find((g) => g.id === groupId);
+        if (!group || group.members.length === 0) return {};
+        const memberSet = new Set(group.members);
+        return {
+          state: {
+            ...state,
+            revision: state.revision + 1,
+            objects: state.objects.map((object) =>
+              memberSet.has(object.id)
+                ? { ...object, footprint: { ...object.footprint, ...patch } }
+                : object,
+            ),
+          },
+        };
+      }),
+
+    setCameraGroup: (cameraId, groupId) =>
+      set((store) => ({
+        state: {
+          ...store.state,
+          revision: store.state.revision + 1,
+          cameras: store.state.cameras.map((c) =>
+            c.id === cameraId
+              ? { ...c, groupId: groupId ?? undefined, targetType: groupId ? "GROUP" : c.targetType }
+              : c,
+          ),
+        },
+      })),
 
     exportScene: () => JSON.stringify(get().state, null, 2),
 
@@ -741,7 +1155,12 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         const activeId = get().manifest.activeSceneId;
         saveSceneState(activeId, parsed);
         set({
-          state: { ...parsed, actions: parsed.actions ?? [], revision: (parsed.revision ?? 0) + 1 },
+          state: {
+            ...sanitizeState(parsed),
+            actions: parsed.actions ?? [],
+            groups: parsed.groups ?? [],
+            revision: (parsed.revision ?? 0) + 1,
+          },
           currentTime: 0,
           playing: false,
           selectedKind: "object",
@@ -804,7 +1223,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         const activeId = get().manifest.activeSceneId;
         saveSceneState(activeId, single);
         set({
-          state: { ...single, revision: (single.revision ?? 0) + 1 },
+          state: { ...sanitizeState(single), revision: (single.revision ?? 0) + 1 },
           currentTime: 0,
           playing: false,
           selectedKind: "object",
@@ -958,6 +1377,35 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
       set({ manifest });
     },
 
+    /**
+     * 开发 / 演示用：磁盘上的 scene_examples 改了，但 localStorage 里已有旧存档，
+     * 正常启动流程不会覆盖它们，于是改了示例看不到效果。这里强制用最新示例覆盖
+     * 同名场景页并切过去。注意：会丢失这些示例页上的本地修改。
+     */
+    resetExamples: () => {
+      const store = get();
+      const built = collectExamples();
+      if (built.order.length === 0) return;
+      // force = true：无条件用最新示例覆盖（已有 tab 保留其位置与名字，缺失的补到末尾）。
+      const order = syncExamples(store.manifest.order, true);
+      const first = built.order[0];
+      const manifest: StageManifest = { ...store.manifest, order, activeSceneId: first.id };
+      saveManifest(manifest);
+      const state = loadSceneState(first.id) ?? createBlankState();
+      set({
+        manifest,
+        state,
+        currentTime: 0,
+        playing: false,
+        selectedKind: "object",
+        selectedId: state.objects[0]?.id ?? "",
+        selectedItem: null,
+        selectedPoint: null,
+        radialObjectId: null,
+        activeCameraId: state.cameras[0]?.id ?? null,
+      });
+    },
+
     addPathPoint: (segmentId, x, z) => {
       const store = get();
       const segment = store.state.segments.find((s) => s.id === segmentId);
@@ -1045,8 +1493,12 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
     addSegment: (objectId, afterSegmentId) => {
       const store = get();
       const { state } = store;
+      // 团队路线归一：队员身上的建段请求全部落到锚点，整队只保留一条路线。
+      const targetId = teamRouteOwner(state, objectId);
+      // 防呆：对象不存在时不建段，避免产生孤儿路径（object 指向无主资产）。
+      if (!state.objects.some((o) => o.id === targetId)) return;
       const objectSegments = state.segments
-        .filter((segment) => segment.object === objectId)
+        .filter((segment) => segment.object === targetId)
         .sort((a, b) => a.timeStart - b.timeStart);
       const reference = afterSegmentId
         ? objectSegments.find((segment) => segment.id === afterSegmentId)
@@ -1077,7 +1529,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
       const segment: MoveSegment = {
         id: nextSegmentId(state),
         type: "MOVE",
-        object: objectId,
+        object: targetId,
         startX: round1(startX),
         startZ: round1(startZ),
         endX: round1(startX + directionX * 2),
@@ -1095,10 +1547,57 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           handoffs: reconcileHandoffs([...state.segments, segment], state.handoffs),
         },
         selectedKind: "object",
-        selectedId: objectId,
+        selectedId: targetId,
         selectedItem: segment.id,
         selectedPoint: null,
       });
+    },
+
+    setSegmentPoints: (segmentId, points) => {
+      const store = get();
+      const state = store.state;
+      const segment = state.segments.find((item) => item.id === segmentId);
+      if (!segment) return;
+      let counter = 0;
+      const pts: PathPoint[] = points.map((point) => ({
+        id: `pp_${Date.now().toString(36)}_${counter++}`,
+        type: "path",
+        shape: "LINE",
+        x: round1(point.x),
+        z: round1(point.z),
+      }));
+      const patch: Partial<MoveSegment> = { points: normalizePathPointModes(pts) };
+      if (pts.length > 0) {
+        patch.startX = pts[0].x;
+        patch.startZ = pts[0].z;
+        patch.endX = pts[pts.length - 1].x;
+        patch.endZ = pts[pts.length - 1].z;
+      }
+      patchSegment(segmentId, patch);
+    },
+
+    drawAssetPath: (objectId, points) => {
+      const store = get();
+      const state = store.state;
+      // 团队路线归一：给队员画路径 = 给整队画路径，落到锚点那唯一一条路线上。
+      const targetId = teamRouteOwner(state, objectId);
+      // 防呆：选中的对象已不存在时直接跳过，避免把轨迹写进无主资产（孤儿路径）。
+      if (!state.objects.some((o) => o.id === targetId)) return;
+      const objectSegments = state.segments
+        .filter((item) => item.object === targetId)
+        .sort((a, b) => a.timeStart - b.timeStart);
+      let segment = objectSegments[objectSegments.length - 1];
+      if (!segment) {
+        store.addSegment(targetId, undefined);
+        const after = get().state.segments
+          .filter((item) => item.object === targetId)
+          .sort((a, b) => a.timeStart - b.timeStart);
+        segment = after[after.length - 1];
+      }
+      if (!segment) return;
+      // 手绘是逐帧采样的，先抽稀再落库：只保留真正拐弯的关键点，避免几十个控制点堆在画布上。
+      get().setSegmentPoints(segment.id, simplifyPath(points, HAND_DRAW_EPSILON));
+      set({ selectedItem: segment.id });
     },
 
     setHandoffMode: (handoffId, mode) => {
@@ -1273,7 +1772,6 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         kind: template.kind ?? "ground",
         altitude: template.altitude,
         templateId: template.id,
-        prompt: template.prompt,
         targetType: template.target.type,
         groupIds: template.target.type === "GROUP" ? [...template.target.ref] : undefined,
         roll: template.roll,
@@ -1314,15 +1812,29 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
     },
 
     updateCamera: (cameraId, patch) =>
-      set((store) => ({
-        state: {
-          ...store.state,
-          revision: store.state.revision + 1,
-          cameras: store.state.cameras.map((camera) =>
-            camera.id === cameraId ? { ...camera, ...patch } : camera,
-          ),
-        },
-      })),
+      set((store) => {
+        const prev = store.state.cameras.find((c) => c.id === cameraId);
+        const cameras = store.state.cameras.map((camera) =>
+          camera.id === cameraId ? { ...camera, ...patch } : camera,
+        );
+        // 改「相机级 Target」时，把它同步给该相机的所有运镜段，使相机级 Target 成为主控：
+        // camera view 里 active CameraMove 的 targetId 会覆盖相机级，故一并更新才能让跟随实时生效。
+        // （某段想单独跟不同目标，可在该段的 Target 下拉里覆盖，但改相机级时会整体重设。）
+        let cameraMoves = store.state.cameraMoves;
+        if (patch.targetId !== undefined && prev && prev.targetId !== patch.targetId) {
+          cameraMoves = cameraMoves.map((move) =>
+            move.camera === cameraId ? { ...move, targetId: patch.targetId } : move,
+          );
+        }
+        return {
+          state: {
+            ...store.state,
+            revision: store.state.revision + 1,
+            cameras,
+            cameraMoves,
+          },
+        };
+      }),
 
     addCameraMove: (cameraId, type) => {
       const store = get();
@@ -1514,6 +2026,20 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         state: { ...store.state, revision: store.state.revision + 1, aspectRatio: ratio },
       })),
 
+    setDuration: (seconds) =>
+      set((store) => {
+        const current = store.state;
+        if (!Number.isFinite(seconds)) return {};
+        // 下限：不能小于已有内容的末尾，否则会把片段截掉（向上取整到 0.1s，便于输入）。
+        const min = Math.max(1, Math.ceil(rawContentEnd(current) * 10) / 10);
+        const duration = clamp(round1(seconds), min, 600);
+        if (duration === current.duration) return {};
+        return {
+          state: { ...current, revision: current.revision + 1, duration },
+          currentTime: Math.min(store.currentTime, duration),
+        };
+      }),
+
     addAction: (objectId, time) => {
       const store = get();
       const { state } = store;
@@ -1610,8 +2136,10 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
       }
 
       if (action === "MOVE") {
+        // 团队路线归一：给队员加 MOVE = 给整队加 MOVE，落到锚点那唯一一条路线上。
+        const routeId = teamRouteOwner(state, objectId);
         const own = state.segments
-          .filter((s) => s.object === objectId)
+          .filter((s) => s.object === routeId)
           .sort((a, b) => a.timeEnd - b.timeEnd);
         const last = own[own.length - 1];
         let start: Vec2 = { x: object.x, z: object.z };
@@ -1634,7 +2162,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         const segment: MoveSegment = {
           id: nextSegmentId(state),
           type: "MOVE",
-          object: objectId,
+          object: routeId,
           startX: round1(start.x),
           startZ: round1(start.z),
           endX: round1(start.x + direction.x * 5),
@@ -1651,7 +2179,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
             segments: [...state.segments, segment],
           },
           selectedKind: "object",
-          selectedId: objectId,
+          selectedId: routeId,
           selectedItem: segment.id,
           radialObjectId: null,
         });
@@ -1705,23 +2233,6 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
 
       set({ radialObjectId: null, selectedItem: action });
     },
-
-    reset: () =>
-      set((store) => ({
-        state: { ...createDemoState(), revision: store.state.revision + 1 },
-        currentTime: 0,
-        playing: false,
-        zoom: 1,
-        selectedKind: "object",
-        selectedId: "M17",
-        selectedItem: null,
-        selectedPoint: null,
-        radialObjectId: null,
-        viewMode: "director",
-        activeCameraId: "CAM_A",
-        viewLocked: false,
-        dragging: false,
-      })),
 
     undo: () => {
       const { past, future, state } = get();

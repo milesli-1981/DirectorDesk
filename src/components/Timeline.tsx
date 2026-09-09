@@ -1,11 +1,20 @@
-import { Fragment, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useDirectorStore } from "../state/directorStore";
-import { AssetCategory, EaseCurve, HandoffMode, TimelineItem } from "../domain/schema";
+import {
+  AssetCategory,
+  EaseCurve,
+  HandoffMode,
+  objectDisplayName,
+  TimelineItem,
+} from "../domain/schema";
 import { buildTimelineItems, itemRange } from "../engine/timeline";
 import { easeVal, normalizeEase } from "../engine/ease";
 
-const PX_PER_SEC = 100;
-const LABEL_WIDTH = 124;
+const MAX_PX_PER_SEC = 100;
+const MIN_PX_PER_SEC = 12;
+const LABEL_WIDTH = 190;
+/* 右侧留给 add-leg 等行内控件的宽度，避免刻度铺满把按钮挤出可视区 */
+const LANE_TAIL = 32;
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
@@ -49,24 +58,16 @@ interface ClipDrag {
 
 function TimelineReadout() {
   const currentTime = useDirectorStore((s) => s.currentTime);
-  const selectedKind = useDirectorStore((s) => s.selectedKind);
-  const selectedId = useDirectorStore((s) => s.selectedId);
   const seconds = currentTime.toFixed(1);
 
   return (
-    <>
-      <span className="ctx" id="ctx">
-        Frame {seconds}s · Track {selectedId}
-        {selectedKind === "camera" ? " (CAM)" : ""}
-      </span>
-      <span className="timecode" id="tc">
-        00:{seconds.padStart(4, "0")}
-      </span>
-    </>
+    <span className="timecode" id="tc">
+      00:{seconds.padStart(4, "0")}
+    </span>
   );
 }
 
-function Playhead() {
+function Playhead({ pxPerSec }: { pxPerSec: number }) {
   const currentTime = useDirectorStore((s) => s.currentTime);
   const setTime = useDirectorStore((s) => s.setTime);
   const duration = useDirectorStore((s) => s.state.duration);
@@ -78,7 +79,7 @@ function Playhead() {
     if (!scrollEl) return;
     const rect = scrollEl.getBoundingClientRect();
     const x = clientX - rect.left + scrollEl.scrollLeft - LABEL_WIDTH;
-    setTime(clamp(x / PX_PER_SEC, 0, duration));
+    setTime(clamp(x / pxPerSec, 0, duration));
   };
 
   // 可拖动的抓手：按下后捕获指针，移动即定位播放头。
@@ -99,7 +100,7 @@ function Playhead() {
   };
 
   return (
-    <div className="ph" style={{ left: LABEL_WIDTH + currentTime * PX_PER_SEC }}>
+    <div className="ph" style={{ left: LABEL_WIDTH + currentTime * pxPerSec }}>
       <div className="ph-hit" ref={gripRef} onPointerDown={onGripDown} title="拖动以定位播放头" />
       <div className="ph-grip" />
     </div>
@@ -121,12 +122,51 @@ export function Timeline() {
   const addAction = useDirectorStore((s) => s.addAction);
   const setActionTime = useDirectorStore((s) => s.setActionTime);
   const setCameraJunctionMode = useDirectorStore((s) => s.setCameraJunctionMode);
+  const updateCamera = useDirectorStore((s) => s.updateCamera);
+  const setDuration = useDirectorStore((s) => s.setDuration);
+
+  // 时间刻度按可视宽度自适应：整段时长刚好铺满可滚动区，因此不会出现横向滚动条。
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [laneWidth, setLaneWidth] = useState(0);
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+    const measure = () => setLaneWidth(element.clientWidth - LABEL_WIDTH - LANE_TAIL);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  const pxPerSec = useMemo(
+    () => clamp(laneWidth / Math.max(1, state.duration), MIN_PX_PER_SEC, MAX_PX_PER_SEC),
+    [laneWidth, state.duration],
+  );
   const reorderObject = useDirectorStore((s) => s.reorderObject);
 
   const items = useMemo(() => buildTimelineItems(state), [state]);
+  // 团队（Group）在时间轴上合并为一行：整队只共用一条路线，不再为每个队员各开一行。
+  const teamGroups = useMemo(
+    () => (state.groups ?? []).filter((g) => g.dynamics && g.members.length >= 2),
+    [state.groups],
+  );
+  const teamMemberIds = useMemo(
+    () => new Set(teamGroups.flatMap((g) => g.members)),
+    [teamGroups],
+  );
   const dragRef = useRef<ClipDrag | null>(null);
   const [dragRowId, setDragRowId] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  // 相机行双击改名（name 可改、id 不变）。
+  const [camEditingId, setCamEditingId] = useState<string | null>(null);
+  const [camDraft, setCamDraft] = useState("");
+  const startCamRename = (id: string, current: string) => {
+    setCamEditingId(id);
+    setCamDraft(current);
+  };
+  const commitCamRename = () => {
+    if (camEditingId) updateCamera(camEditingId, { name: camDraft.trim() || camEditingId });
+    setCamEditingId(null);
+  };
   const toggleCollapse = (id: string) =>
     setCollapsed((prev) => {
       const next = new Set(prev);
@@ -160,13 +200,13 @@ export function Timeline() {
     if ((event.target as Element).closest?.(".clip, .label")) return;
     const element = event.currentTarget;
     const rect = element.getBoundingClientRect();
-    setTime((event.clientX - rect.left + element.scrollLeft - LABEL_WIDTH) / PX_PER_SEC);
+    setTime((event.clientX - rect.left + element.scrollLeft - LABEL_WIDTH) / pxPerSec);
   };
 
   const handleClipMove = (event: React.PointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
     if (!drag) return;
-    const delta = (event.clientX - drag.originX) / PX_PER_SEC;
+    const delta = (event.clientX - drag.originX) / pxPerSec;
     const length = drag.end - drag.start;
     let nextStart = drag.start;
     let nextEnd = drag.end;
@@ -203,8 +243,8 @@ export function Timeline() {
         key={item.id}
         className={`clip ${item.kind} ${selectedItem === item.source ? "sel" : ""}`}
         style={{
-          left: range.start * PX_PER_SEC,
-          width: Math.max(28, (range.end - range.start) * PX_PER_SEC),
+          left: range.start * pxPerSec,
+          width: Math.max(28, (range.end - range.start) * pxPerSec),
           backgroundImage: spark,
           backgroundRepeat: spark ? "no-repeat" : undefined,
           backgroundPosition: spark ? "right 4px center" : undefined,
@@ -248,20 +288,100 @@ export function Timeline() {
     <div className="timeline">
       <div className="tlbar">
         <TimelineReadout />
+        {/* 场景最大时长：成片导出与时间轴刻度都以此为基准。置于时间轴顶栏右上角，便于随时调整。 */}
+        <label className="dur-field" title="本场景的最大时长；成片导出与时间轴刻度以此为准。不能小于已有内容的末尾。">
+          <span className="lab">Scene Duration (s)</span>
+          <input
+            type="number"
+            min={1}
+            max={600}
+            step={0.5}
+            value={state.duration}
+            onChange={(event) => setDuration(Number(event.target.value))}
+          />
+        </label>
       </div>
-      <div className="scroll" id="scroll" onPointerDown={handleScrub}>
+      <div className="scroll" id="scroll" ref={scrollRef} onPointerDown={handleScrub}>
         <div className="ruler" id="ruler">
           {Array.from({ length: state.duration + 1 }, (_, index) => (
-            <div key={index} className="tick" style={{ left: index * PX_PER_SEC }}>
+            <div key={index} className="tick" style={{ left: index * pxPerSec }}>
               {index}s
             </div>
           ))}
         </div>
-        <Playhead />
+        <Playhead pxPerSec={pxPerSec} />
         <div className="tracks" id="tracks">
           {state.objects
             .filter((object) => object.role === "agent" || items.some((item) => item.track === object.id))
             .map((object) => {
+              // 团队成员不单独成行；遍历到锚点（队首）时渲染「整队」那一行。
+              const team = teamGroups.find((g) => g.members[0] === object.id);
+              if (teamMemberIds.has(object.id) && !team) return null;
+              if (team) {
+                const teamCollapsed = collapsed.has(team.id);
+                const anchorId = team.members[0];
+                return (
+                  <Fragment key={team.id}>
+                    <div className="row asset-node group-node">
+                      <div
+                        className="label asset-label"
+                        title={`团队 · ${team.name}（${team.members.length} 人，整队共用一条路线）`}
+                      >
+                        <button
+                          type="button"
+                          className="caret"
+                          title={teamCollapsed ? "展开动作" : "收起动作"}
+                          onPointerDown={(event) => event.stopPropagation()}
+                          onClick={() => toggleCollapse(team.id)}
+                        >
+                          {teamCollapsed ? "▸" : "▾"}
+                        </button>
+                        <span className="node-dot" style={{ background: team.color }} />
+                        <span className="node-name">
+                          👥 {team.name} ×{team.members.length}
+                        </span>
+                      </div>
+                      {/* 整队路线 = 锚点（队首）那条路径上的片段。 */}
+                      <div className="lane" data-track={anchorId}>
+                        {items
+                          .filter((item) => item.track === anchorId && item.kind !== "action")
+                          .map(renderClip)}
+                      </div>
+                      <button
+                        type="button"
+                        className="add-leg"
+                        title="为整队添加一段 MOVE（写在队首路线上）"
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={() => addSegment(anchorId)}
+                      >
+                        ＋
+                      </button>
+                    </div>
+                    {!teamCollapsed ? (
+                      <div className="row action-row action-node">
+                        <div className="label act-label" title={`${team.name} 动作`}>
+                          <span className="connector">↳</span>
+                          <span>动作</span>
+                        </div>
+                        <div className="lane" data-track={anchorId}>
+                          {items
+                            .filter((item) => item.track === anchorId && item.kind === "action")
+                            .map(renderClip)}
+                        </div>
+                        <button
+                          type="button"
+                          className="add-leg"
+                          title="为队首添加动作片段"
+                          onPointerDown={(event) => event.stopPropagation()}
+                          onClick={() => addAction(anchorId)}
+                        >
+                          ＋A
+                        </button>
+                      </div>
+                    ) : null}
+                  </Fragment>
+                );
+              }
               const isCollapsed = collapsed.has(object.id);
               const noun = assetNoun(object.category);
               return (
@@ -270,7 +390,9 @@ export function Timeline() {
                   <div className={`row asset-node ${dragRowId === object.id ? "row-dragging" : ""}`}>
                     <div
                       className="label asset-label"
-                      title={`${noun} · ${object.id}`}
+                      title={`${noun} · ${objectDisplayName(object)}${
+                        object.name?.trim() ? `（${object.id}）` : ""
+                      }`}
                       draggable
                       onDragStart={handleRowDragStart(object.id)}
                       onDragOver={handleRowDragOver(object.id)}
@@ -286,7 +408,7 @@ export function Timeline() {
                         {isCollapsed ? "▸" : "▾"}
                       </button>
                       <span className="node-dot" style={{ background: object.color }} />
-                      <span className="node-name">{noun} {object.id}</span>
+                      <span className="node-name">{noun} {objectDisplayName(object)}</span>
                     </div>
                     {/* 运动轨道：只放 MOVE / Constraint，动作片段单独一行避免重叠。 */}
                     <div className="lane" data-track={object.id}>
@@ -335,7 +457,28 @@ export function Timeline() {
             <div key={camera.id} className="row camera-row">
               <div className="label cam-label" title={camera.name}>
                 <span className="dot" style={{ background: camera.color }} />
-                <span className="track-name">{camera.name}</span>
+                {camEditingId === camera.id ? (
+                  <input
+                    className="cam-rename"
+                    autoFocus
+                    value={camDraft}
+                    onChange={(event) => setCamDraft(event.target.value)}
+                    onBlur={commitCamRename}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") commitCamRename();
+                      else if (event.key === "Escape") setCamEditingId(null);
+                    }}
+                    onPointerDown={(event) => event.stopPropagation()}
+                  />
+                ) : (
+                  <span
+                    className="track-name"
+                    onDoubleClick={() => startCamRename(camera.id, camera.name)}
+                    title="双击改名"
+                  >
+                    {camera.name}
+                  </span>
+                )}
               </div>
               <div className="lane" data-track={camera.id}>
                 {items.filter((item) => item.track === camera.id).map(renderClip)}
@@ -360,7 +503,7 @@ export function Timeline() {
                       <div
                         key={junction.id}
                         className="cam-junction"
-                        style={{ left: boundary * PX_PER_SEC, borderColor: color, color }}
+                        style={{ left: boundary * pxPerSec, borderColor: color, color }}
                         title={`Camera junction: ${junction.mode} — click to cycle stop/smooth/cut`}
                         onPointerDown={(event) => event.stopPropagation()}
                         onClick={() => {

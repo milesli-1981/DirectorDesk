@@ -11,7 +11,7 @@ import {
   Vec3,
 } from "../domain/schema";
 import { easeVal, normalizeEase } from "./ease";
-import { objectFacing, objectPosition } from "./solver";
+import { baseHeading, objectFacing, objectPosition } from "./solver";
 
 export interface ResolvedCamera {
   position: Vec3;
@@ -173,9 +173,13 @@ function placeCamera(
     const look = 6;
     position = [p.x, eye, p.z];
     target = [p.x + Math.sin(yaw) * look, eye, p.z + Math.cos(yaw) * look];
-  } else if (targetType === "GROUP" && camera.groupIds?.length) {
+  } else if (targetType === "GROUP") {
     // GROUP：框住一组对象（双人同框 / 群像）；机位锚到群体质心，距离按群体跨度自适应放大。
-    const members = camera.groupIds
+    // 优先用 camera.groupId 直接引用一个组（成员实时参与取景），否则用 camera.groupIds。
+    const groupMemberIds = camera.groupId
+      ? (state.groups ?? []).find((g) => g.id === camera.groupId)?.members ?? []
+      : (camera.groupIds ?? []);
+    const members = groupMemberIds
       .map((id) => state.objects.find((object) => object.id === id))
       .filter((object): object is DirectorObject => !!object)
       .map((object) => objectPosition(state, object.id, time));
@@ -189,7 +193,13 @@ function placeCamera(
       const fitDist = (radius + 2) / Math.tan(hfovH / 2);
       const baseDistance = FRAMING_DISTANCE[framing] * (options.distanceScale ?? 1);
       const horizontal = Math.max(baseDistance, fitDist);
-      const yaw = ((objectFacing(state, targetId, time) + SIDE_ANGLE[side]) * Math.PI) / 180;
+      // 队伍朝向用锚点（members[0]）的行进方向，而非 targetId（可能是组 id，非对象）。
+      const anchorId = groupMemberIds[0];
+      const facing =
+        anchorId && state.objects.some((o) => o.id === anchorId)
+          ? baseHeading(state, anchorId, time)
+          : objectFacing(state, targetId, time);
+      const yaw = ((facing + SIDE_ANGLE[side]) * Math.PI) / 180;
       const groupTarget: Vec3 = [cx, 1.3, cz];
       if (view === "overhead") {
         const h = FRAMING_DISTANCE[framing] + 4 + droneLift + altitude + (options.craneHeight ?? 0);

@@ -30,7 +30,11 @@ const CIRCLE_OF_CONFUSION_MM = 0.03;
 export function focusRangeForLens(lensMm: number, distanceM: number): number {
   const rangeM =
     (2000 * APERTURE_F * CIRCLE_OF_CONFUSION_MM * distanceM * distanceM) / (lensMm * lensMm);
-  return Math.min(30, Math.max(0.15, rangeM));
+  // 上限不能太小：高空 / 大俯角（无人机）机位到主体距离大、场景纵深也大，
+  // 按光学公式本应得到很深的清晰范围（如 24mm@20m ≈ 110m），若强行压到 30m 会让
+  // 近地与远景同时落在清晰带外，整画面发虚（"虚焦"）。抬高上限恢复远景深。
+  // 近景 / 长焦仍由公式自然给出极浅景深，不受此上限影响。
+  return Math.min(200, Math.max(0.15, rangeM));
 }
 
 /** 虚化强度：焦距越长光斑越大。 */

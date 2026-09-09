@@ -60,6 +60,12 @@ export interface Pose {
  */
 export interface DirectorObject {
   id: string;
+  /**
+   * 显示名（可在 item list 双击修改）。为空时回退显示 id。
+   * id 始终是场景内的稳定标识（被 segment / constraint / camera target 引用），
+   * 改名只影响显示，不动 id，因此无需同步任何引用。
+   */
+  name?: string;
   /** 兼容保留：actor / landmark / prop。新逻辑以 category + role 为主。 */
   type: ObjectKind;
   category: AssetCategory;
@@ -75,6 +81,11 @@ export interface DirectorObject {
   locked?: boolean;
   /** human 类资产的静态姿势基线（本地欧拉角）；缺省 = 标准站姿。 */
   pose?: Pose;
+}
+
+/** 资产显示名：优先用用户改过的 name，未命名则回退 id（id 始终是稳定标识）。 */
+export function objectDisplayName(object: { id: string; name?: string }): string {
+  return object.name?.trim() || object.id;
 }
 
 /** Path Point = 路径控制点。ARC 点是控制点，路径不一定穿过它。 */
@@ -243,12 +254,12 @@ export interface CameraObject {
   altitude?: number;
   /** 由模板库创建时记下来源模板 id（便于回看 / 再编辑）。 */
   templateId?: string;
-  /** 喂给视频模型的自然语言描述，可在 Inspector 编辑后复制。 */
-  prompt?: string;
   /** 目标类型：OBJECT 单对象 / OTS 过肩 / GROUP 多对象同框 / POV 主观视线 / LOCATION 固定环境。默认 OBJECT。 */
   targetType?: CameraTargetType;
   /** GROUP：参与取景的对象集合（双人同框 / 群像），相机自动框住全部。 */
   groupIds?: string[];
+  /** GROUP：直接引用一个组（DirectorGroup.id）；其成员实时参与取景，优于 groupIds。 */
+  groupId?: string;
   /** 相机级默认：PAN 原地水平旋转角（度）。 */
   panDeg?: number;
   /** 相机级默认：TILT 原地俯仰角（度）。 */
@@ -305,6 +316,51 @@ export type AspectRatio = "16:9" | "2.39:1" | "1.85:1" | "4:3" | "9:16";
  * Director State = 导演意图的唯一来源。
  * Timeline 只是它的一个视图；Playback 读取同一份状态。
  */
+/** 编队预设种类：队员相对锚点（队首）的站位排布。 */
+export type FormationKind = "column" | "row" | "wedge" | "ring";
+
+/** 编队切换过渡时长（秒）：切换队形时队员用这段时间从旧阵型滑到新阵型，而非瞬间跳变。 */
+export const FORMATION_MORPH_SECONDS = 1.0;
+
+export const FORMATION_LABELS: Record<FormationKind, string> = {
+  column: "纵队 Column",
+  row: "横队 Row",
+  wedge: "楔队 Wedge",
+  ring: "环阵 Ring",
+};
+
+/**
+ * 组（Group Dynamics，Baseline §58）。
+ *
+ * 一个 team 视作一个 unit：**只 author 一条路线**——由锚点（members[0]，队首）承载。
+ * 其余队员按编队预设相对锚点站位：
+ * - 匀速直线运动时，锚点加速度≈0 → 弹簧位移≈0 → **编队保持不变**（外加微量自然扰动）；
+ * - 突然加速 / 减速 / 变线时，队员因惯性被甩出 → **弹簧拉扯**，随后阻尼回弹、
+ *   归零 → **回到原编队槽位**。
+ * 这样只需画一条路径就能指挥整队，模拟兽群 / 军队的行进。
+ */
+export interface DirectorGroup {
+  id: string;
+  name: string;
+  color: string;
+  /** 成员对象 id。members[0] 为**锚点**（队首）：它的路径就是整队的唯一路线。 */
+  members: string[];
+  /** 团队行为开关。关时为纯取景分组（仅供相机 GROUP 取景），不接管队员位置。 */
+  dynamics: boolean;
+  /** 编队预设：队员相对锚点的站位排布。 */
+  formation: FormationKind;
+  /** 编队切换前的预设：切换瞬间记录，供求解器按时间插值（现实中变阵需要时间，不能瞬间完成）。 */
+  prevFormation?: FormationKind;
+  /** 上次切换编队的时刻（秒）。未定义 = 无过渡，沿用旧行为（瞬间到位）。 */
+  formationChangeAt?: number;
+  /** 编队间距（米）：相邻槽位之间的距离。 */
+  spacing: number;
+  /** 匀速时的自然微扰强度 0..1：让编队不死板（确定性噪声，可复算）。 */
+  noise: number;
+  /** 锁定后不可通过拖拽移动整队（防误触）；仍可点选以便解锁。 */
+  locked?: boolean;
+}
+
 export interface DirectorState {
   revision: number;
   duration: number;
@@ -319,6 +375,8 @@ export interface DirectorState {
   cameraJunctions: CameraJunction[];
   /** 演员在时间轴上的动作片段（叠加在静态 pose 与走/跑摆动之上）。 */
   actions: ActionClip[];
+  /** 组（Group Dynamics）。旧场景 JSON 无此字段时默认为空数组。 */
+  groups: DirectorGroup[];
 }
 
 /* ------------------------------------------------------ Stage / Scenes */

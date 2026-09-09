@@ -2,8 +2,6 @@
  * Shot Archetype Library（机位模板库）
  *
  * 把视频参考里"模型最容易翻车"的运镜沉淀成结构化机位模板：导演从模板选最接近的
- * 一种 → 在 Director View / Inspector 微调 → 导出「结构化 spec + 自然语言 prompt」喂给
- * MiniMax / Kling / Runway 等视频模型。
  *
  * 字段对齐真实 schema 枚举（CameraFraming / CameraView / CameraSide / CameraMotionType / lensMm），
  * 因此模板可直接实例化到一台 CameraObject + 初始 CameraMove。
@@ -85,8 +83,6 @@ export interface ShotTemplate {
   altitude?: number;
   /** drone = 无人机平台（自带基础飞行高度）。 */
   kind?: "ground" | "drone";
-  /** 为视频模型写好的自然语言描述（喂料）。 */
-  prompt: string;
   /** 中文说明（UI 提示）。 */
   description: string;
 }
@@ -103,8 +99,6 @@ export const SHOT_TEMPLATES: ShotTemplate[] = [
     lens: 50,
     target: { type: "OBJECT", ref: ["M17"] },
     duration: 4,
-    prompt:
-      "Locked-off static shot: camera stays completely still while the world happens inside the frame. [subject] framed medium from 3/4 back at eye level, 50mm, no camera movement, stable composition.",
     description: "机器不动，让世界在框里发生。最基础的机位，也是对照其它运镜的基线。",
   },
   {
@@ -118,8 +112,6 @@ export const SHOT_TEMPLATES: ShotTemplate[] = [
     lens: 50,
     target: { type: "OBJECT", ref: ["M17"] },
     duration: 5,
-    prompt:
-      "Tracking shot: camera moves parallel to [subject], keeping them framed medium at eye level, 50mm. Smooth lateral follow, subject stays centered in frame as they walk.",
     description: "平行跟随主体，主体始终在框。",
   },
   {
@@ -134,8 +126,6 @@ export const SHOT_TEMPLATES: ShotTemplate[] = [
     target: { type: "OBJECT", ref: ["M17"] },
     duration: 5,
     dollyScale: 0.6,
-    prompt:
-      "Dolly-in reveal: camera pushes in toward [subject] from a wider setup, passing an obstacle to reveal them. Ends close up at eye level, 50mm, slow continuous forward move, subject grows in frame.",
     description: "沿光轴推进，穿过遮挡露出主体。",
   },
   {
@@ -150,8 +140,6 @@ export const SHOT_TEMPLATES: ShotTemplate[] = [
     target: { type: "OBJECT", ref: ["M17"] },
     duration: 5,
     craneHeight: 3,
-    prompt:
-      "Crane shot hero entrance: camera starts low near the ground and rises up to eye level as [subject] appears, framing them medium from 3/4 back, 35mm. Vertical boom up, reveals the hero.",
     description: "由低仰拍拉到眼平，经典英雄登场。",
   },
   {
@@ -166,8 +154,6 @@ export const SHOT_TEMPLATES: ShotTemplate[] = [
     target: { type: "OBJECT", ref: ["M17"] },
     duration: 5,
     orbitDeg: 180,
-    prompt:
-      "Orbit around [subject]: camera circles the hero, changing viewpoint angle, framed medium at eye level, 35mm. Smooth continuous arc, 180 degrees of rotation, background parallax reveals the environment.",
     description: "绕主体转，改变视点角度。",
   },
   {
@@ -184,8 +170,6 @@ export const SHOT_TEMPLATES: ShotTemplate[] = [
     orbitDeg: 360,
     altitude: 12,
     kind: "drone",
-    prompt:
-      "Aerial drone shot orbiting clockwise around [subject] at 12m height, wide framing, overhead view, 35mm. Slow continuous circle from behind to front, smooth reveal of the surroundings.",
     description: "高空恒定高度环绕，俯视。",
   },
   {
@@ -201,8 +185,6 @@ export const SHOT_TEMPLATES: ShotTemplate[] = [
     duration: 6,
     craneHeight: 14,
     kind: "drone",
-    prompt:
-      "Aerial reveal: drone starts low and tilts up to an overhead top-down view of [subject] and the scene, wide framing, 35mm. Vertical lift from low angle to bird's-eye, scale and layout revealed.",
     description: "由仰拍拉到俯视，拉开看全貌。",
   },
   {
@@ -221,8 +203,6 @@ export const SHOT_TEMPLATES: ShotTemplate[] = [
     craneHeight: 6,
     altitude: 8,
     kind: "drone",
-    prompt:
-      "Free drone flight around [subject]: camera orbits, rises and pushes out at the same time, wide framing, high view, 35mm. Continuous choreographed movement, dynamic one-take aerial.",
     description: "边绕边升边拉的一镜自由飞行。",
   },
   {
@@ -237,8 +217,6 @@ export const SHOT_TEMPLATES: ShotTemplate[] = [
     target: { type: "OTS", ref: ["M16", "M17"] },
     duration: 4,
     otsOffset: 0.35,
-    prompt:
-      "Over-the-shoulder shot: camera sits behind [foreground] looking over their shoulder at [subject], framed medium at eye level, 50mm. Keep the 180-degree axis across the reverse angle. [foreground]'s shoulder in the lower foreground, [subject] slightly off-center.",
     description: "越过前景演员肩膀拍主体，反打保持 180° 轴线。",
   },
   {
@@ -252,8 +230,6 @@ export const SHOT_TEMPLATES: ShotTemplate[] = [
     lens: 35,
     target: { type: "GROUP", ref: ["M16", "M17"] },
     duration: 4,
-    prompt:
-      "Two-shot: both [subjectA] and [subjectB] framed together in one shot, eye level, 35mm. Keep left/right positions consistent across the coverage. Medium-wide, both faces visible.",
     description: "框住双人，谁左谁右不反。",
   },
   {
@@ -268,8 +244,6 @@ export const SHOT_TEMPLATES: ShotTemplate[] = [
     target: { type: "GROUP", ref: ["M16", "M17"] },
     duration: 6,
     orbitDeg: 60,
-    prompt:
-      "Group blocking: camera slowly orbits a group of [subjectA] and [subjectB] as they move, wide framing at eye level, 35mm. Foreground/background relationships stay readable, gentle arc.",
     description: "多人前后景走位，环绕呈现群像。",
   },
   {
@@ -283,8 +257,6 @@ export const SHOT_TEMPLATES: ShotTemplate[] = [
     lens: 35,
     target: { type: "POV", ref: ["M17"] },
     duration: 5,
-    prompt:
-      "POV walk: first-person view from [subject]'s eyes as they walk forward, medium framing, eye level, 35mm. Slight natural head bob, world moves toward camera.",
     description: "以某角色为眼走（真·POV 视线待 cameraSolver 支持，当前以跟随近似）。",
   },
   {
@@ -299,8 +271,6 @@ export const SHOT_TEMPLATES: ShotTemplate[] = [
     target: { type: "LOCATION", ref: [] },
     duration: 1.5,
     panDeg: 160,
-    prompt:
-      "Whip pan transition: fast horizontal camera rotation snapping from one setup to the next, wide framing, 35mm. Motion blur on the swing, hard cut feel at the end of the pan.",
     description: "快速水平摇转场（真·PAN 待 Motion 维度补全，当前以快速 ORBIT 近似）。",
   },
   {
@@ -315,8 +285,6 @@ export const SHOT_TEMPLATES: ShotTemplate[] = [
     target: { type: "OBJECT", ref: ["M17"] },
     duration: 4,
     dollyScale: 0.5,
-    prompt:
-      "Vertigo effect (dolly zoom): camera pushes in toward [subject] while zooming out, or pulls back while zooming in, so the subject stays the same size but the background perspective distorts. Medium framing, 50mm, unsettling realization moment.",
     description: "推拉 + 反向变焦，主体大小不变、背景透视畸变。",
   },
   {
@@ -331,8 +299,6 @@ export const SHOT_TEMPLATES: ShotTemplate[] = [
     target: { type: "OBJECT", ref: ["M17"] },
     duration: 6,
     orbitDeg: 360,
-    prompt:
-      "Product turntable: camera slowly orbits a static [subject] 360 degrees, close up at eye level, 50mm. Even continuous rotation, subject centered, shows all sides with controlled lighting.",
     description: "环绕静物特写，旋转展示。",
   },
   {
@@ -347,8 +313,6 @@ export const SHOT_TEMPLATES: ShotTemplate[] = [
     target: { type: "LOCATION", ref: [] },
     duration: 6,
     craneHeight: 10,
-    prompt:
-      "Establishing shot: wide crane up to an overhead view of the whole location and environment, extreme wide, 24mm. Reveals scale, layout and geography before cutting to the action.",
     description: "拉开看全貌，建立环境。",
   },
 ];
