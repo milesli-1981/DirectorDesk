@@ -241,6 +241,16 @@ interface ShotTemplate {
 4. **中**：UI 加「**从模板新建机位**」入口；Inspector 显示并允许编辑该机位的 `prompt` 文案，一键复制。
 5. **低**：导出面板，同时输出结构化 spec + 自然语言 prompt。
 
+### 6.1 实现状态（2026-09-09）
+
+| §6 项 | 状态 | 说明 |
+|---|---|---|
+| #2 ShotTemplate 模板库（15+ 预设） | ✅ 已实现 | `src/domain/templates.ts`：`SHOT_TEMPLATES`（共 16 个，覆盖 §2 全部集中情况）+ `groupTemplatesByCategory()` / `findTemplate()`；字段对齐真实 schema 枚举（CameraFraming / CameraView / CameraSide / CameraMotionType / lensMm），每个模板带英文 `prompt` 文案。 |
+| #4 UI「从模板新建机位」 | ✅ 已实现 | `ObjectList` 的 CAMERAS 区新增「🎬 从模板」按钮 → 按分类展开选择器；点击经 store 的 `addCameraFromTemplate` 创建相机 + 初始 CameraMove，best-effort 解析目标（首个 agent）。`Inspector` 相机面板新增「Prompt（喂给视频模型）」编辑框 + 复制按钮。 |
+| #1 Target 类型扩展 GROUP / OTS / POV / LOCATION | ✅ 已实现 | `CameraObject` 新增 `targetType`（`OBJECT`/`OTS`/`GROUP`/`POV`/`LOCATION`）与 `groupIds`；`cameraSolver.placeCamera` 支持多参照取景——GROUP 框住群体质心并按跨度自适应拉远、POV 把机位放到角色眼高沿朝向看前方、LOCATION 锚到场景中心作固定环境机位；OTS 沿用既有 shoulder/target 关系。`Inspector` 增加「Target 类型」下拉与 GROUP 成员多选 chips。 |
+| #3 Motion PAN / TILT / TRUCK / STEADICAM / HANDHELD | ✅ 已实现 | `CameraMotionType` 新增 `PAN/TILT/TRUCK/STEADICAM/HANDHELD`（DOLLY_ZOOM 原本已有）。`cameraSolver.placeCamera` 在基础机位之上叠加——PAN 原地水平摇 / TILT 原地俯仰（只改注视方向、机位不动）、TRUCK 沿视线右向量平行横移、`HANDHELD` 叠加细微正弦抖动；`altitude` 字段现已参与机位高度。`CameraMove`/`CameraObject` 增加 `panDeg/tiltDeg/truckDist` 参数；`Inspector` 在构图中按运镜类型显示对应滑杆，`MOTION_LABELS`/`MOTION_HINTS` 已补全。STEADICAM 当前按 FOLLOW（连续平滑跟随）处理。 |
+| #5 导出面板同时输出 prompt | ⬜ 未实现 | 当前仅渲染视频；prompt 可在 Inspector 复制，但未在导出流程自动附带。 |
+
 ---
 
 ## 7. Segment / Leg 与 Handoff 交互设计（新增）

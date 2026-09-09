@@ -1,13 +1,27 @@
 import { Fragment, useMemo, useRef, useState } from "react";
 import { useDirectorStore } from "../state/directorStore";
-import { EaseCurve, HandoffMode, TimelineItem } from "../domain/schema";
+import { AssetCategory, EaseCurve, HandoffMode, TimelineItem } from "../domain/schema";
 import { buildTimelineItems, itemRange } from "../engine/timeline";
 import { easeVal, normalizeEase } from "../engine/ease";
 
 const PX_PER_SEC = 100;
-const LABEL_WIDTH = 96;
+const LABEL_WIDTH = 124;
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+
+/** 资产类别对应的中文名词：时间轴里用「角色 / 载具 / 道具 …」而非笼统的 asset。 */
+const ASSET_NOUN: Record<AssetCategory, string> = {
+  human: "角色",
+  animal: "动物",
+  vehicle: "载具",
+  building: "建筑",
+  furniture: "家具",
+  nature: "布景",
+  prop: "道具",
+};
+function assetNoun(category: AssetCategory): string {
+  return ASSET_NOUN[category] ?? "对象";
+}
 
 function easeSpark(ease: EaseCurve): string {
   let d = "";
@@ -112,6 +126,14 @@ export function Timeline() {
   const items = useMemo(() => buildTimelineItems(state), [state]);
   const dragRef = useRef<ClipDrag | null>(null);
   const [dragRowId, setDragRowId] = useState<string | null>(null);
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const toggleCollapse = (id: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
 
   // 行拖拽排序：拖住左侧标签上下移动，即可调整对象在时间轴 / Scene Tree 中的行序。
   const handleRowDragStart = (id: string) => (event: React.DragEvent) => {
@@ -239,59 +261,75 @@ export function Timeline() {
         <div className="tracks" id="tracks">
           {state.objects
             .filter((object) => object.role === "agent" || items.some((item) => item.track === object.id))
-            .map((object) => (
-            <Fragment key={object.id}>
-              <div className={`row ${dragRowId === object.id ? "row-dragging" : ""}`}>
-                <div
-                  className="label"
-                  title={object.id}
-                  draggable
-                  onDragStart={handleRowDragStart(object.id)}
-                  onDragOver={handleRowDragOver(object.id)}
-                  onDragEnd={handleRowDragEnd}
-                >
-                  {object.id}
-                </div>
-                {/* 运动轨道：只放 MOVE / Constraint，动作片段单独一行避免重叠。 */}
-                <div className="lane" data-track={object.id}>
-                  {items
-                    .filter((item) => item.track === object.id && item.kind !== "action")
-                    .map(renderClip)}
-                </div>
-                <button
-                  type="button"
-                  className="add-leg"
-                  title="Add leg (append a new MOVE segment anchored to the last leg's end)"
-                  onPointerDown={(event) => event.stopPropagation()}
-                  onClick={() => addSegment(object.id)}
-                >
-                  ＋
-                </button>
-              </div>
-              {/* 动作轨道：仅 human 类资产有（车辆 / 建筑等没有关节，不提供动作）。 */}
-              {object.category === "human" ? (
-                <div className="row action-row">
-                  <div className="label act-label" title={`${object.id} 动作`}>
-                    {object.id} 动作
+            .map((object) => {
+              const isCollapsed = collapsed.has(object.id);
+              const noun = assetNoun(object.category);
+              return (
+                <Fragment key={object.id}>
+                  {/* 资产（父节点）：运动轨道即资产自身的路径 / 约束。 */}
+                  <div className={`row asset-node ${dragRowId === object.id ? "row-dragging" : ""}`}>
+                    <div
+                      className="label asset-label"
+                      title={`${noun} · ${object.id}`}
+                      draggable
+                      onDragStart={handleRowDragStart(object.id)}
+                      onDragOver={handleRowDragOver(object.id)}
+                      onDragEnd={handleRowDragEnd}
+                    >
+                      <button
+                        type="button"
+                        className="caret"
+                        title={isCollapsed ? "展开动作" : "收起动作"}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={() => toggleCollapse(object.id)}
+                      >
+                        {isCollapsed ? "▸" : "▾"}
+                      </button>
+                      <span className="node-dot" style={{ background: object.color }} />
+                      <span className="node-name">{noun} {object.id}</span>
+                    </div>
+                    {/* 运动轨道：只放 MOVE / Constraint，动作片段单独一行避免重叠。 */}
+                    <div className="lane" data-track={object.id}>
+                      {items
+                        .filter((item) => item.track === object.id && item.kind !== "action")
+                        .map(renderClip)}
+                    </div>
+                    <button
+                      type="button"
+                      className="add-leg"
+                      title="Add leg (append a new MOVE segment anchored to the last leg's end)"
+                      onPointerDown={(event) => event.stopPropagation()}
+                      onClick={() => addSegment(object.id)}
+                    >
+                      ＋
+                    </button>
                   </div>
-                  <div className="lane" data-track={object.id}>
-                    {items
-                      .filter((item) => item.track === object.id && item.kind === "action")
-                      .map(renderClip)}
-                  </div>
-                  <button
-                    type="button"
-                    className="add-leg"
-                    title="Add action clip (pose / gesture / gait)"
-                    onPointerDown={(event) => event.stopPropagation()}
-                    onClick={() => addAction(object.id)}
-                  >
-                    ＋A
-                  </button>
-                </div>
-              ) : null}
-            </Fragment>
-          ))}
+                  {/* 动作轨道（子节点）：仅 human 类资产有，强绑定于上方资产。 */}
+                  {object.category === "human" && !isCollapsed ? (
+                    <div className="row action-row action-node">
+                      <div className="label act-label" title={`${object.id} 动作`}>
+                        <span className="connector">↳</span>
+                        <span>动作</span>
+                      </div>
+                      <div className="lane" data-track={object.id}>
+                        {items
+                          .filter((item) => item.track === object.id && item.kind === "action")
+                          .map(renderClip)}
+                      </div>
+                      <button
+                        type="button"
+                        className="add-leg"
+                        title="Add action clip (pose / gesture / gait)"
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={() => addAction(object.id)}
+                      >
+                        ＋A
+                      </button>
+                    </div>
+                  ) : null}
+                </Fragment>
+              );
+            })}
 
           {state.cameras.map((camera) => (
             <div key={camera.id} className="row camera-row">

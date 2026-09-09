@@ -1,0 +1,360 @@
+{
+  "manifest": {
+    "name": "未命名片场",
+    "order": [
+      {
+        "id": "SCN_COMMUTE",
+        "name": "通勤偶遇"
+      }
+    ],
+    "activeSceneId": "SCN_COMMUTE"
+  },
+  "scenes": {
+    "SCN_COMMUTE": {
+      "revision": 1445,
+      "duration": 5,
+      "aspectRatio": "16:9",
+      "objects": [
+        {
+          "id": "WALKER",
+          "type": "actor",
+          "category": "human",
+          "role": "agent",
+          "x": 0,
+          "z": -7,
+          "rotation": 0,
+          "footprint": {
+            "w": 0.6,
+            "d": 0.6,
+            "h": 1.8
+          },
+          "color": "#67a7ff",
+          "locked": true
+        },
+        {
+          "id": "GREETER",
+          "type": "actor",
+          "category": "human",
+          "role": "agent",
+          "x": 3.5,
+          "z": 1.5,
+          "rotation": -90,
+          "footprint": {
+            "w": 0.6,
+            "d": 0.6,
+            "h": 1.8
+          },
+          "color": "#f0a35a",
+          "locked": true
+        },
+        {
+          "id": "BLD_L",
+          "type": "landmark",
+          "category": "building",
+          "role": "set",
+          "x": -4.5,
+          "z": -1,
+          "rotation": 0,
+          "footprint": {
+            "w": 4,
+            "d": 4,
+            "h": 14
+          },
+          "color": "#9aa7b5",
+          "locked": true
+        },
+        {
+          "id": "BLD_R",
+          "type": "landmark",
+          "category": "building",
+          "role": "set",
+          "x": 6,
+          "z": 0,
+          "rotation": 0,
+          "footprint": {
+            "w": 5,
+            "d": 5,
+            "h": 8.2
+          },
+          "color": "#8a93a3",
+          "locked": true
+        },
+        {
+          "id": "BLD_FAR",
+          "type": "landmark",
+          "category": "building",
+          "role": "set",
+          "x": 4.715178979505359,
+          "z": 7.4590089737395004,
+          "rotation": 0,
+          "footprint": {
+            "w": 4,
+            "d": 4,
+            "h": 6.2
+          },
+          "color": "#9aa7b5",
+          "locked": false
+        },
+        {
+          "id": "AST_HUMAN_03",
+          "type": "actor",
+          "category": "human",
+          "role": "agent",
+          "x": -1.3765068371845623,
+          "z": -6.5248877228663975,
+          "rotation": 0,
+          "footprint": {
+            "w": 0.6,
+            "d": 0.6,
+            "h": 1.8
+          },
+          "color": "#67a7ff",
+          "locked": true
+        }
+      ],
+      "segments": [
+        {
+          "id": "SEG_WALK",
+          "type": "MOVE",
+          "object": "WALKER",
+          "startX": 0,
+          "startZ": -5,
+          "endX": 0,
+          "endZ": -1,
+          "points": [],
+          "timeStart": 0,
+          "timeEnd": 3,
+          "ease": [
+            0.42,
+            0,
+            0.58,
+            1
+          ]
+        },
+        {
+          "id": "SEG_GREET",
+          "type": "MOVE",
+          "object": "GREETER",
+          "startX": 3.5,
+          "startZ": 1.5,
+          "endX": 1,
+          "endZ": -1,
+          "points": [],
+          "timeStart": 1.8,
+          "timeEnd": 2.8,
+          "ease": [
+            0.42,
+            0,
+            0.58,
+            1
+          ]
+        },
+        {
+          "id": "SEG_03",
+          "type": "MOVE",
+          "object": "AST_HUMAN_03",
+          "startX": -1.3765068371845623,
+          "startZ": -6.5248877228663975,
+          "endX": -5.621459763794551,
+          "endZ": -3.979138839499379,
+          "points": [
+            {
+              "id": "P_mtsqyq0k_762",
+              "type": "path",
+              "shape": "ARC",
+              "x": -0.27236703547183555,
+              "z": -2.667220581716526
+            }
+          ],
+          "timeStart": 0,
+          "timeEnd": 5,
+          "ease": [
+            0.342,
+            0.784,
+            0.991,
+            0.104
+          ]
+        }
+      ],
+      "handoffs": [],
+      "constraints": [
+        {
+          "id": "LOOK_WALKER",
+          "type": "LOOK_AT",
+          "subject": "WALKER",
+          "target": "GREETER",
+          "timeStart": 3,
+          "timeEnd": 5
+        },
+        {
+          "id": "LOOK_GREETER",
+          "type": "LOOK_AT",
+          "subject": "GREETER",
+          "target": "WALKER",
+          "timeStart": 2.8,
+          "timeEnd": 5
+        }
+      ],
+      "cameras": [
+        {
+          "id": "CAM_A",
+          "name": "CAM_A",
+          "color": "#c792ea",
+          "targetId": "WALKER",
+          "framing": "medium",
+          "view": "chest",
+          "side": "front",
+          "lensMm": 35,
+          "motion": "FOLLOW"
+        },
+        {
+          "id": "CAM_EST",
+          "name": "ESTABLISH",
+          "color": "#8ad1ff",
+          "targetId": "WALKER",
+          "framing": "extreme_wide",
+          "view": "high",
+          "side": "front_3_4",
+          "lensMm": 24,
+          "motion": "STATIC"
+        }
+      ],
+      "cameraMoves": [
+        {
+          "id": "MOVE_CAM_A_01",
+          "camera": "CAM_A",
+          "type": "FOLLOW",
+          "timeStart": 0,
+          "timeEnd": 2,
+          "targetId": "WALKER",
+          "orbitDeg": 0,
+          "dollyScale": 1,
+          "craneHeight": 0,
+          "ease": [
+            0.42,
+            0,
+            0.58,
+            1
+          ]
+        },
+        {
+          "id": "MOVE_CAM_A_02",
+          "camera": "CAM_A",
+          "type": "ORBIT",
+          "timeStart": 2,
+          "timeEnd": 3,
+          "targetId": "WALKER",
+          "orbitDeg": -90,
+          "dollyScale": 1,
+          "craneHeight": 0,
+          "ease": [
+            0.42,
+            0,
+            0.58,
+            1
+          ]
+        },
+        {
+          "id": "MOVE_CAM_A_03",
+          "camera": "CAM_A",
+          "type": "OTS",
+          "timeStart": 3,
+          "timeEnd": 5,
+          "targetId": "GREETER",
+          "shoulderId": "WALKER",
+          "otsSide": "R",
+          "orbitDeg": 0,
+          "dollyScale": 1,
+          "craneHeight": 0,
+          "ease": [
+            0.42,
+            0,
+            0.58,
+            1
+          ]
+        },
+        {
+          "id": "MOVE_CAM_EST_01",
+          "camera": "CAM_EST",
+          "type": "STATIC",
+          "timeStart": 0,
+          "timeEnd": 5,
+          "targetId": "WALKER",
+          "orbitDeg": 0,
+          "dollyScale": 1,
+          "craneHeight": 0,
+          "ease": [
+            0.42,
+            0,
+            0.58,
+            1
+          ]
+        }
+      ],
+      "cameraJunctions": [
+        {
+          "id": "J_CAM_A_01_02",
+          "prevMove": "MOVE_CAM_A_01",
+          "nextMove": "MOVE_CAM_A_02",
+          "mode": "smooth"
+        },
+        {
+          "id": "J_CAM_A_02_03",
+          "prevMove": "MOVE_CAM_A_02",
+          "nextMove": "MOVE_CAM_A_03",
+          "mode": "cut"
+        }
+      ],
+      "actions": [
+        {
+          "id": "ACT_GAIT_WALK",
+          "object": "WALKER",
+          "timeStart": 0,
+          "timeEnd": 3,
+          "kind": "walk",
+          "intensity": 1
+        },
+        {
+          "id": "ACT_GAIT_RUN",
+          "object": "GREETER",
+          "timeStart": 1.8,
+          "timeEnd": 2.8,
+          "kind": "run",
+          "intensity": 1
+        },
+        {
+          "id": "ACT_WAVE",
+          "object": "GREETER",
+          "timeStart": 2.8,
+          "timeEnd": 3.5,
+          "kind": "wave",
+          "intensity": 1
+        },
+        {
+          "id": "ACT_TALK_W",
+          "object": "WALKER",
+          "timeStart": 3.2,
+          "timeEnd": 5,
+          "kind": "talk",
+          "intensity": 0.8
+        },
+        {
+          "id": "ACT_TALK_G",
+          "object": "GREETER",
+          "timeStart": 3.2,
+          "timeEnd": 5,
+          "kind": "talk",
+          "intensity": 0.8
+        },
+        {
+          "id": "ACT_06",
+          "object": "AST_HUMAN_03",
+          "timeStart": 0,
+          "timeEnd": 5,
+          "kind": "walk",
+          "intensity": 1
+        }
+      ]
+    }
+  }
+}

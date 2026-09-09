@@ -4,7 +4,7 @@ import { setCaptureCanvas } from "../engine/videoExport";
 import { Html, Line, OrbitControls, PerspectiveCamera } from "@react-three/drei";
 import * as THREE from "three";
 import { useDirectorStore } from "../state/directorStore";
-import { HandoffMode, JointName, MoveSegment, PathPoint, Pose, Vec2 } from "../domain/schema";
+import { AssetCategory, HandoffMode, JointName, MoveSegment, PathPoint, Pose, Vec2 } from "../domain/schema";
 import { curveToggleEligible, pathChain } from "../engine/path";
 import {
   hitCameraRay,
@@ -31,6 +31,9 @@ import type { DepthOfFieldEffect } from "postprocessing";
 import { bokehScaleForLens, focusRangeForLens, liveShot } from "../engine/shotFocus";
 import { blockingAssets, setRects } from "../engine/occlusion";
 import { segmentRoutePoints } from "../engine/path";
+import { screenToGround, viewRef } from "../engine/viewBridge";
+import { ASSET_ORDER, ASSET_PRESETS } from "../engine/assetPresets";
+import { groupTemplatesByCategory } from "../domain/templates";
 import { aspectValue, FRAMING_LABELS, MOTION_LABELS, SIDE_LABELS, VIEW_LABELS } from "../domain/schema";
 import { RadialRing } from "./RadialRing";
 import { LockBadge } from "./LockBadge";
@@ -959,10 +962,14 @@ function CameraPaths() {
 /** 把渲染画布暴露给视频导出模块（供 canvas.captureStream 录制）。 */
 function CaptureBridge() {
   const gl = useThree((state) => state.gl);
+  const camera = useThree((state) => state.camera);
   useEffect(() => {
-    setCaptureCanvas(gl.domElement as HTMLCanvasElement);
-    return () => setCaptureCanvas(null);
-  }, [gl]);
+    // 画布已在 Canvas.onCreated 注册；此处仅同步可能更新的相机 / 画布引用。
+    // 注意：不要在此清空 captureCanvas——本组件可能因子树下 Suspense 暂时卸载，
+    // 一旦清空就会导致「渲染画布尚未就绪」的报错。
+    viewRef.camera = camera;
+    viewRef.canvas = gl.domElement as HTMLCanvasElement;
+  }, [gl, camera]);
   return null;
 }
 
@@ -1465,6 +1472,23 @@ export function WorldView() {
   const selectedPoint = useDirectorStore((s) => s.selectedPoint);
   const viewLocked = useDirectorStore((s) => s.viewLocked);
   const toggleViewLocked = useDirectorStore((s) => s.toggleViewLocked);
+  const addAsset = useDirectorStore((s) => s.addAsset);
+  const addCamera = useDirectorStore((s) => s.addCamera);
+  const addDroneCamera = useDirectorStore((s) => s.addDroneCamera);
+  const addCameraFromTemplate = useDirectorStore((s) => s.addCameraFromTemplate);
+  const [tplOpen, setTplOpen] = useState(false);
+  const templateGroups = groupTemplatesByCategory();
+
+  const handleDropAdd = (kind: string, point: { x: number; z: number }) => {
+    if (kind === "camera") {
+      addCamera();
+    } else if (kind === "drone") {
+      addDroneCamera();
+    } else {
+      // kind 即 AssetCategory
+      addAsset(kind as AssetCategory, point);
+    }
+  };
 
   return (
     <main>
@@ -1541,8 +1565,106 @@ export function WorldView() {
           )}
         </div>
       </div>
-      <div className="canvasWrap">
-        <Canvas dpr={[1, 2]} gl={{ antialias: true }}>
+      {viewMode === "director" ? (
+        <div className="addbar">
+          <span className="addbar-hint">拖拽到画布添加 →</span>
+          {ASSET_ORDER.map((category) => (
+            <button
+              key={category}
+              type="button"
+              className="add-icon"
+              draggable
+              title={`拖拽到画布添加 ${ASSET_PRESETS[category].label}`}
+              onDragStart={(event) => {
+                event.dataTransfer.setData("application/director-add", category);
+                event.dataTransfer.effectAllowed = "copy";
+              }}
+            >
+              {ASSET_PRESETS[category].label}
+            </button>
+          ))}
+          <button
+            type="button"
+            className="add-icon"
+            draggable
+            title="拖拽到画布添加 Camera（自动取景目标）"
+            onDragStart={(event) => {
+              event.dataTransfer.setData("application/director-add", "camera");
+              event.dataTransfer.effectAllowed = "copy";
+            }}
+          >
+            Camera
+          </button>
+          <button
+            type="button"
+            className="add-icon"
+            draggable
+            title="拖拽到画布添加 Drone（自动取景目标）"
+            onDragStart={(event) => {
+              event.dataTransfer.setData("application/director-add", "drone");
+              event.dataTransfer.effectAllowed = "copy";
+            }}
+          >
+            Drone
+          </button>
+          <button
+            type="button"
+            className="add-icon tpl-btn"
+            title="从机位模板库新建机位"
+            onClick={() => setTplOpen((open) => !open)}
+          >
+            🎬 模板
+          </button>
+          {tplOpen ? (
+            <div className="tpl-picker">
+              {templateGroups.map((group) => (
+                <div key={group.category} className="tpl-group">
+                  <div className="tpl-cat">{group.label}</div>
+                  {group.templates.map((template) => (
+                    <button
+                      key={template.id}
+                      type="button"
+                      className="obj tpl-item"
+                      title={template.description}
+                      onClick={() => {
+                        addCameraFromTemplate(template.id);
+                        setTplOpen(false);
+                      }}
+                    >
+                      {template.label}
+                    </button>
+                  ))}
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      <div
+        className="canvasWrap"
+        onDragOver={(event) => {
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "copy";
+        }}
+        onDrop={(event) => {
+          event.preventDefault();
+          const kind = event.dataTransfer.getData("application/director-add");
+          if (!kind) return;
+          const point = screenToGround(event.clientX, event.clientY);
+          if (!point) return;
+          handleDropAdd(kind, point);
+        }}
+      >
+        <Canvas
+          dpr={[1, 2]}
+          gl={{ antialias: true }}
+          onCreated={({ gl, camera }) => {
+            // 渲染器一创建就注册画布：不依赖子树挂载，且不受子组件 Suspense 影响。
+            setCaptureCanvas(gl.domElement as HTMLCanvasElement);
+            viewRef.canvas = gl.domElement as HTMLCanvasElement;
+            viewRef.camera = camera;
+          }}
+        >
           <color attach="background" args={["#0a0a0c"]} />
           <WorldScene />
           <CaptureBridge />

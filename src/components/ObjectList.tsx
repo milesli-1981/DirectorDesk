@@ -1,5 +1,4 @@
 import { useDirectorStore } from "../state/directorStore";
-import { ASSET_ORDER, ASSET_PRESETS } from "../engine/assetPresets";
 import { LockBadge } from "./LockBadge";
 
 export function ObjectList() {
@@ -10,9 +9,6 @@ export function ObjectList() {
   const activeCameraId = useDirectorStore((s) => s.activeCameraId);
   const selectObject = useDirectorStore((s) => s.selectObject);
   const selectCamera = useDirectorStore((s) => s.selectCamera);
-  const addCamera = useDirectorStore((s) => s.addCamera);
-  const addDroneCamera = useDirectorStore((s) => s.addDroneCamera);
-  const addAsset = useDirectorStore((s) => s.addAsset);
   const updateAsset = useDirectorStore((s) => s.updateAsset);
 
   return (
@@ -28,7 +24,7 @@ export function ObjectList() {
             >
               <span className="obj-name">{object.id}</span>
               <span className="obj-meta">
-                {object.category} · {object.role}
+                {object.category} / {object.role}
               </span>
             </button>
             {/* 右上角控制区：锁角标浮在这一角，不再占用行内宽度，名字因此能吃满整行 */}
@@ -47,30 +43,7 @@ export function ObjectList() {
         ))}
       </div>
 
-      <div className="st asset-st">ADD ASSET</div>
-      <div id="assetPalette" className="asset-palette">
-        {ASSET_ORDER.map((category) => (
-          <button
-            key={category}
-            type="button"
-            className="obj addasset"
-            title={`Add ${ASSET_PRESETS[category].label}`}
-            onClick={() => addAsset(category)}
-          >
-            ＋ {ASSET_PRESETS[category].label}
-          </button>
-        ))}
-      </div>
-
       <div className="st cam-st">CAMERAS</div>
-      <div className="btn-pair">
-        <button type="button" className="obj addobj" onClick={addCamera}>
-          ＋ CAMERA
-        </button>
-        <button type="button" className="obj addobj" onClick={addDroneCamera}>
-          ＋ DRONE
-        </button>
-      </div>
       <div id="cameraList">
         {cameras.map((camera) => (
           <button

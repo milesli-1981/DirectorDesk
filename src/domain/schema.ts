@@ -169,7 +169,15 @@ export type CameraMotionType =
   | "DOLLY_ZOOM"
   | "CRANE"
   | "DRONE"
-  | "OTS";
+  | "OTS"
+  | "PAN"
+  | "TILT"
+  | "TRUCK"
+  | "STEADICAM"
+  | "HANDHELD";
+
+/** 目标类型：单对象 / 过肩 / 群组 / 主观 / 环境。决定 cameraSolver 如何取景。 */
+export type CameraTargetType = "OBJECT" | "OTS" | "GROUP" | "POV" | "LOCATION";
 
 /**
  * 动作片段的种类（与 engine/poses.ts 的 POSE_PRESETS 键一致）。
@@ -231,6 +239,22 @@ export interface CameraObject {
   roll?: number;
   /** 相机平台：ground = 地面机（默认）；drone = 无人机，自带基础飞行高度、不受地面约束。 */
   kind?: "ground" | "drone";
+  /** 航拍 / 升降高度（米），暂存为相机数据（cameraSolver 当前用 DRONE 基准高度）。 */
+  altitude?: number;
+  /** 由模板库创建时记下来源模板 id（便于回看 / 再编辑）。 */
+  templateId?: string;
+  /** 喂给视频模型的自然语言描述，可在 Inspector 编辑后复制。 */
+  prompt?: string;
+  /** 目标类型：OBJECT 单对象 / OTS 过肩 / GROUP 多对象同框 / POV 主观视线 / LOCATION 固定环境。默认 OBJECT。 */
+  targetType?: CameraTargetType;
+  /** GROUP：参与取景的对象集合（双人同框 / 群像），相机自动框住全部。 */
+  groupIds?: string[];
+  /** 相机级默认：PAN 原地水平旋转角（度）。 */
+  panDeg?: number;
+  /** 相机级默认：TILT 原地俯仰角（度）。 */
+  tiltDeg?: number;
+  /** 相机级默认：TRUCK 横向平移距离（米，正负=左右）。 */
+  truckDist?: number;
 }
 
 /**
@@ -259,6 +283,12 @@ export interface CameraMove {
   dollyScale: number;
   /** CRANE：结束时相对基准机位的附加高度（米）。 */
   craneHeight: number;
+  /** PAN：原地水平旋转角度（度），机位不动、只改注视方向。 */
+  panDeg?: number;
+  /** TILT：原地俯仰角度（度），机位不动、只改注视方向。 */
+  tiltDeg?: number;
+  /** TRUCK：纯横向平移距离（米，正负=左右），垂直视线方向。 */
+  truckDist?: number;
   /** 段级覆盖：景别 / 视角 / 方位 / 镜头。为空则沿用 CameraObject 默认值。 */
   framing?: CameraFraming;
   view?: CameraView;
@@ -368,6 +398,19 @@ export const MOTION_LABELS: Record<CameraMotionType, string> = {
   CRANE: "CRANE",
   DRONE: "DRONE",
   OTS: "OTS 过肩",
+  PAN: "PAN 平摇",
+  TILT: "TILT 俯仰",
+  TRUCK: "TRUCK 横移",
+  STEADICAM: "STEADICAM 斯坦尼康",
+  HANDHELD: "HANDHELD 手持",
+};
+
+export const TARGET_TYPE_LABELS: Record<CameraTargetType, string> = {
+  OBJECT: "单对象 OBJECT",
+  OTS: "过肩 OTS",
+  GROUP: "群组 GROUP",
+  POV: "主观 POV",
+  LOCATION: "环境 LOCATION",
 };
 
 export const OTS_SIDE_LABELS: Record<OtsSide, string> = {
@@ -385,6 +428,11 @@ export const MOTION_HINTS: Record<CameraMotionType, string> = {
   CRANE: "升降：改变机位高度。",
   OTS: "过肩：机位置于前景演员身后，越过其肩膀拍主体，两人移动时自动保持过肩关系。",
   DRONE: "无人机自由飞行：同时绕圈 + 升降 + 推拉。",
+  PAN: "原地水平摇（yaw）：机位不动，只旋转注视方向扫过场景，用于甩镜 / 横扫。",
+  TILT: "原地俯仰（pitch）：机位不动，只上下旋转注视方向。",
+  TRUCK: "横向平移（垂直视线方向的轨道横移）：保持距离与透视，平行掠过主体。",
+  STEADICAM: "斯坦尼康式平滑跟随：三维连续跟随目标，比普通 FOLLOW 更顺滑稳定。",
+  HANDHELD: "手持微晃：机位叠加细微正弦抖动，模拟手持摄影的不稳定质感。",
 };
 
 export const LENS_OPTIONS = [24, 35, 50, 85];
