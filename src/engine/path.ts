@@ -25,6 +25,50 @@ export function pathChain(s: MoveSegment): ChainNode[] {
   ];
 }
 
+/** 点到线段的垂直距离（投影夹在段内）。 */
+function pointSegmentDistance(p: Vec2, a: Vec2, b: Vec2): number {
+  const dx = b.x - a.x;
+  const dz = b.z - a.z;
+  const lenSq = dx * dx + dz * dz;
+  if (lenSq === 0) return Math.hypot(p.x - a.x, p.z - a.z);
+  const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.z - a.z) * dz) / lenSq));
+  return Math.hypot(p.x - (a.x + t * dx), p.z - (a.z + t * dz));
+}
+
+/**
+ * Ramer–Douglas–Peucker 抽稀：在给定容差内，用最少的关键点还原折线形状。
+ *
+ * 手绘路径是逐帧采样的（几厘米一个点），直接存下来会让画布上冒出几十个可拖控制点，
+ * 既看不清也更难编辑。抽稀后只保留"真正拐弯"的点，首尾两点恒定保留
+ * （它们决定路径的起点 / 终点）。
+ */
+export function simplifyPath(points: Vec2[], epsilon = 0.35): Vec2[] {
+  if (points.length <= 2) return points.slice();
+  const keep = new Array<boolean>(points.length).fill(false);
+  keep[0] = true;
+  keep[points.length - 1] = true;
+
+  const stack: Array<[number, number]> = [[0, points.length - 1]];
+  while (stack.length > 0) {
+    const [first, last] = stack.pop() as [number, number];
+    if (last <= first + 1) continue;
+    let maxDist = -1;
+    let index = -1;
+    for (let i = first + 1; i < last; i += 1) {
+      const d = pointSegmentDistance(points[i], points[first], points[last]);
+      if (d > maxDist) {
+        maxDist = d;
+        index = i;
+      }
+    }
+    if (maxDist > epsilon && index > 0) {
+      keep[index] = true;
+      stack.push([first, index], [index, last]);
+    }
+  }
+  return points.filter((_, i) => keep[i]);
+}
+
 /**
  * 采样成折线。ARC 控制点会把前后两个节点合并成一条二次贝塞尔，
  * 其后紧随的直线段不会重复输出。

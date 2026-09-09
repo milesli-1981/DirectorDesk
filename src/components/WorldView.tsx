@@ -14,7 +14,7 @@ import {
   hitPathPoint,
   pathPolyline,
 } from "../engine/pick";
-import { objectFacing, objectPosition } from "../engine/solver";
+import { baseHeading, formationForwardShift, formationSlotOf, objectFacing, objectPosition } from "../engine/solver";
 import { actionPoseAt } from "../engine/actionPose";
 import { MODEL_CONFIG } from "../engine/modelConfig";
 import { HumanoidGLB, ModelBoundary } from "./HumanoidModel";
@@ -36,6 +36,9 @@ import { ASSET_ORDER, ASSET_PRESETS } from "../engine/assetPresets";
 import { groupTemplatesByCategory } from "../domain/templates";
 import {
   aspectValue,
+  FORMATION_LABELS,
+  FormationKind,
+  FORMATION_MORPH_SECONDS,
   FRAMING_LABELS,
   MOTION_LABELS,
   objectDisplayName,
@@ -80,24 +83,65 @@ function capturePointer(event: ThreeEvent<PointerEvent>) {
  * 视频导出用的是 canvas.captureStream，只会录到画布内容、DOM 覆盖层录不进去，
  * 所以只有渲染进场景的名牌才会出现在导出的成片里。
  */
+/** 圆角矩形路径（兼容不支持 ctx.roundRect 的环境）。 */
+function roundRectPath(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number,
+): void {
+  const radius = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.arcTo(x + w, y, x + w, y + h, radius);
+  ctx.arcTo(x + w, y + h, x, y + h, radius);
+  ctx.arcTo(x, y + h, x, y, radius);
+  ctx.arcTo(x, y, x + w, y, radius);
+  ctx.closePath();
+}
+
+/**
+ * 头顶名牌：把名字**画进 WebGL 场景**（sprite + CanvasTexture），而不是 DOM 覆盖层。
+ * 视频导出用的是 canvas.captureStream，只会录到画布内容、DOM 覆盖层录不进去，
+ * 所以只有渲染进场景的名牌才会出现在导出的成片里。
+ *
+ * 「绝对清晰」要点：① 贴图分辨率拉到 512×128，远高于显示尺寸，避免放大发虚；
+ * ② 关 mipmap + Linear 过滤，近处保持锐利；③ anisotropy 让斜看也不糊；
+ * ④ 半透明深色圆角背板 + 黑描边白字，亮 / 杂背景上都读得清。
+ */
 function NameTag({ text, height }: { text: string; height: number }) {
   const texture = useMemo(() => {
+    const w = 512;
+    const h = 128;
     const canvas = document.createElement("canvas");
-    canvas.width = 320;
-    canvas.height = 80;
+    canvas.width = w;
+    canvas.height = h;
     const ctx = canvas.getContext("2d");
     if (ctx) {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.font = "bold 44px system-ui, -apple-system, 'Segoe UI', sans-serif";
+      ctx.clearRect(0, 0, w, h);
+      ctx.font = "bold 72px system-ui, -apple-system, 'Segoe UI', sans-serif";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
+      // 背板：按文字宽度自适应，留出边距，深底保证对比度。
+      const tw = ctx.measureText(text).width;
+      const padX = 30;
+      const padY = 20;
+      const bw = Math.min(w - 8, tw + padX * 2);
+      const bh = h - padY * 2;
+      const bx = (w - bw) / 2;
+      const by = padY;
+      ctx.fillStyle = "rgba(8, 12, 18, 0.62)";
+      roundRectPath(ctx, bx, by, bw, bh, 20);
+      ctx.fill();
+      // 黑描边白字：任何背景都看得清。
       ctx.lineJoin = "round";
-      // 描边保证在亮背景（天空 / 灯）上也看得清
-      ctx.lineWidth = 8;
-      ctx.strokeStyle = "rgba(0, 0, 0, 0.85)";
-      ctx.strokeText(text, canvas.width / 2, canvas.height / 2);
+      ctx.lineWidth = 10;
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.9)";
+      ctx.strokeText(text, w / 2, h / 2);
       ctx.fillStyle = "#ffffff";
-      ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+      ctx.fillText(text, w / 2, h / 2);
     }
     const map = new THREE.CanvasTexture(canvas);
     map.colorSpace = THREE.SRGBColorSpace;
@@ -105,6 +149,8 @@ function NameTag({ text, height }: { text: string; height: number }) {
     map.generateMipmaps = false;
     map.minFilter = THREE.LinearFilter;
     map.magFilter = THREE.LinearFilter;
+    // 各向异性过滤：相机斜看名牌时也不糊。
+    map.anisotropy = 8;
     return map;
   }, [text]);
 
@@ -113,7 +159,7 @@ function NameTag({ text, height }: { text: string; height: number }) {
 
   // sprite 天然朝向相机（billboard），从任何机位看都是正的。
   return (
-    <sprite position={[0, height + 0.35, 0]} scale={[1.2, 0.3, 1]}>
+    <sprite position={[0, height + 0.35, 0]} scale={[1.3, 0.325, 1]}>
       {/*
         depthWrite 必须打开：景深（DOF）按深度缓冲算模糊量，若名牌不写深度，
         它会取身后背景的深度，导致人物明明在对焦上、文字却依旧被糊掉。
@@ -651,9 +697,11 @@ function PointMarker({
         <meshBasicMaterial color={isSelected ? "#ffffff" : "#55d88a"} side={THREE.DoubleSide} />
       </mesh>
 
-      <Html position={[point.x, 0.42, point.z]} center style={{ pointerEvents: "none" }} zIndexRange={[25, 0]}>
-        <span className="node-label">{point.id}</span>
-      </Html>
+      {isSelected ? (
+        <Html position={[point.x, 0.42, point.z]} center style={{ pointerEvents: "none" }} zIndexRange={[25, 0]}>
+          <span className="node-label">#{index + 1}</span>
+        </Html>
+      ) : null}
 
       {/* 选中中间点时给出操作入口：删除始终可用；ARC/LINE 切换在不合法时不渲染（而非 disabled）。 */}
       {isSelected ? (
@@ -1189,9 +1237,14 @@ function Interaction() {
     }
 
     // 手绘路径模式：在画布上拖拽，把轨迹写入当前选中的资产（无选中资产时不拦截，便于先点选）。
+    // set 资产是静态环境 / 障碍，不参与运动，禁用对其手绘路径。
     if (store.pathDrawMode) {
       const targetId = store.selectedKind === "object" ? store.selectedId : null;
-      if (targetId) {
+      const targetRole =
+        targetId && store.selectedKind === "object"
+          ? store.state.objects.find((o) => o.id === targetId)?.role
+          : undefined;
+      if (targetId && targetRole !== "set") {
         drawingRef.current = true;
         livePtsRef.current = [point];
         setLivePts([point]);
@@ -1285,6 +1338,21 @@ function Interaction() {
       const obj = store.state.objects.find((o) => o.id === drag.id);
       if (obj?.locked) return;
       if (Math.hypot(point.x - drag.origin.x, point.z - drag.origin.z) > 0.15) drag.moved = true;
+      // 团队成员：拖任何一个都是整队平移（位置由锚点承载），保持"队作为一个 unit"。
+      const team = (store.state.groups ?? []).find(
+        (g) => g.dynamics && g.members.includes(drag.id),
+      );
+      if (team && team.members.length >= 2 && team.members[0] !== drag.id) {
+        const anchor = store.state.objects.find((o) => o.id === team.members[0]);
+        if (anchor) {
+          store.moveObject(
+            team.members[0],
+            anchor.x + (point.x - drag.origin.x),
+            anchor.z + (point.z - drag.origin.z),
+          );
+          return;
+        }
+      }
       store.moveObject(drag.id, point.x, point.z);
     } else if (drag.kind === "point") {
       store.movePathPoint(drag.segmentId, drag.pointId, point.x, point.z);
@@ -1345,22 +1413,26 @@ function CameraZoom() {
   const zoom = useDirectorStore((s) => s.zoom);
   const setZoom = useDirectorStore((s) => s.setZoom);
   const viewMode = useDirectorStore((s) => s.viewMode);
-  const { camera } = useThree();
+  const { camera, controls } = useThree();
   const applied = useRef(zoom);
+  // 以 OrbitControls 的实时 target 为锚点（WASD 平移视角后不希望被拉回原点）。
+  const anchor = (): THREE.Vector3 => (controls as unknown as { target?: THREE.Vector3 } | null)?.target ?? TARGET;
 
   useEffect(() => {
     if (viewMode !== "director") return;
-    const direction = camera.position.clone().sub(TARGET);
+    const t = anchor();
+    const direction = camera.position.clone().sub(t);
     if (direction.lengthSq() < 1e-6) direction.set(0, 20.5, 16);
     direction.setLength(BASE_DISTANCE / zoom);
-    camera.position.copy(TARGET).add(direction);
-    camera.lookAt(TARGET);
+    camera.position.copy(t).add(direction);
+    camera.lookAt(t);
     applied.current = zoom;
-  }, [camera, zoom, viewMode]);
+  }, [camera, zoom, viewMode, anchor]);
 
   useFrame(() => {
     if (viewMode !== "director") return;
-    const distance = camera.position.distanceTo(TARGET);
+    const t = anchor();
+    const distance = camera.position.distanceTo(t);
     const next = Math.min(
       2,
       Math.max(0.5, Math.round((BASE_DISTANCE / Math.max(distance, 0.001)) * 10) / 10),
@@ -1368,6 +1440,77 @@ function CameraZoom() {
     if (Math.abs(next - applied.current) > 0.001) {
       applied.current = next;
       setZoom(next);
+    }
+  });
+
+  return null;
+}
+
+/* ----------------------------------------------------------- WASD 视角平移 */
+function ViewPanControls() {
+  const { camera, controls } = useThree();
+  const keys = useRef<Record<string, boolean>>({});
+
+  useEffect(() => {
+    const isTyping = () => {
+      const el = document.activeElement;
+      return (
+        !!el &&
+        (el.tagName === "INPUT" ||
+          el.tagName === "TEXTAREA" ||
+          (el as HTMLElement).isContentEditable)
+      );
+    };
+    const down = (e: KeyboardEvent) => {
+      if (isTyping()) return;
+      const k = e.key.toLowerCase();
+      if (["w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright"].includes(k)) {
+        keys.current[k] = true;
+        if (k.startsWith("arrow")) e.preventDefault();
+      }
+    };
+    const up = (e: KeyboardEvent) => {
+      keys.current[e.key.toLowerCase()] = false;
+    };
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    return () => {
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+    };
+  }, []);
+
+  useFrame((_, delta) => {
+    const { viewMode } = useDirectorStore.getState();
+    if (viewMode !== "director") return;
+    const k = keys.current;
+    let fwd = 0;
+    let side = 0;
+    if (k["w"] || k["arrowup"]) fwd += 1;
+    if (k["s"] || k["arrowdown"]) fwd -= 1;
+    if (k["d"] || k["arrowright"]) side += 1;
+    if (k["a"] || k["arrowleft"]) side -= 1;
+    if (fwd === 0 && side === 0) return;
+
+    // 地面前向（相机视线投影到 x/z 平面）+ 右向，使 WASD 始终相对当前视角。
+    const dir = new THREE.Vector3();
+    camera.getWorldDirection(dir);
+    dir.y = 0;
+    if (dir.lengthSq() < 1e-6) dir.set(0, 0, -1);
+    dir.normalize();
+    const right = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(0, 1, 0)).normalize();
+
+    // 速度随相机高度缩放，远近手感一致（zoom 越小、越高 → 平移越快）。
+    const speed = (camera.position.y / 20.5) * 16 * delta;
+    const move = new THREE.Vector3()
+      .addScaledVector(dir, fwd * speed)
+      .addScaledVector(right, side * speed);
+
+    camera.position.add(move);
+    const ctrl = controls as unknown as { target?: THREE.Vector3; update?: () => void } | null;
+    if (ctrl?.target) {
+      ctrl.target.add(move);
+      ctrl.update?.();
     }
   });
 
@@ -1418,6 +1561,7 @@ function WorldScene() {
         far={400}
       />
       <CameraZoom />
+      <ViewPanControls />
       <CameraRig />
       <ambientLight intensity={0.8} />
       <directionalLight position={[14, 24, 10]} intensity={1.1} />
@@ -1427,6 +1571,7 @@ function WorldScene() {
       <HandoffMarkers />
       <FollowLinks />
       <Actors />
+      <GroupGraph />
       <OcclusionHighlights />
       <CameraPaths />
       <CameraProxies />
@@ -1435,11 +1580,101 @@ function WorldScene() {
       {viewMode === "camera" ? <CameraDepthOfField /> : null}
       <OrbitControls
         makeDefault
-        target={[0, 0, 0]}
         enablePan={false}
         enableDamping={false}
         enabled={viewMode === "director" && !viewLocked && !dragging}
       />
+    </>
+  );
+}
+
+/**
+ * 团队标记（导演视图）：
+ * - **队旗**：常驻立在队首（锚点）位置，回答"这是哪个队 / 队在哪"，比脚下圆环醒目且不随编队变形。
+ * - **包围大圈**：仅在整队被选中时出现，框住整队 footprint。半径来自「静止编队」槽位，
+ *   不随播放 / 拖拽时的弹簧甩动而暴涨——选中圈代表队伍范围，而非瞬时形变。
+ * 成员之间的连线已移除：编队形状本身一眼可见，连线只是噪音。
+ */
+function GroupGraph() {
+  const state = useDirectorStore((s) => s.state);
+  const currentTime = useDirectorStore((s) => s.currentTime);
+  const selectedKind = useDirectorStore((s) => s.selectedKind);
+  const selectedId = useDirectorStore((s) => s.selectedId);
+  const showHelpers = useDirectorStore((s) => s.viewMode === "director");
+  if (!showHelpers) return null;
+  const groups = state.groups ?? [];
+  return (
+    <>
+      {groups.map((g) => {
+        if (g.members.length < 2 || !g.dynamics) return null;
+        const anchor = objectPosition(state, g.members[0], currentTime);
+        // 包围圆：以「静止编队」的质心为心、最远槽位 + 余量为半径。
+        // 用编队槽位（不含弹簧偏移）计算，所以圈只随编队/间距/人数变化而变，
+        // 不会因播放 / 拖拽时的弹簧甩动被撑大——选中圈代表队伍 footprint，而非瞬时形变。
+        const heading = baseHeading(state, g.members[0], currentTime);
+        const forward = { x: Math.sin(heading), z: Math.cos(heading) };
+        const right = { x: Math.cos(heading), z: -Math.sin(heading) };
+        // 选圈随编队过渡平滑变化：切换队形期间按 morphT 在旧/新阵型间插值，而非瞬变。
+        const morphT =
+          g.formationChangeAt == null
+            ? 1
+            : Math.max(0, Math.min(1, (currentTime - g.formationChangeAt) / FORMATION_MORPH_SECONDS));
+        const prevForm = g.prevFormation ?? g.formation ?? "column";
+        const curForm = g.formation ?? "column";
+        // 与求解器一致：新阵型整体前移，使变阵期间没有任何队员向后倒退。
+        const fwdShift =
+          g.formationChangeAt == null
+            ? 0
+            : formationForwardShift(prevForm, curForm, g.spacing ?? 1.2, g.members.length);
+        const slots = g.members.map((_, i) => {
+          const a = formationSlotOf(prevForm, g.spacing ?? 1.2, i, g.members.length);
+          const b = formationSlotOf(curForm, g.spacing ?? 1.2, i, g.members.length);
+          const bFwd = b.fwd + fwdShift;
+          return {
+            fwd: a.fwd + (bFwd - a.fwd) * morphT,
+            right: a.right + (b.right - a.right) * morphT,
+          };
+        });
+        const rest = slots.map((s) => ({
+          x: anchor.x + forward.x * s.fwd + right.x * s.right,
+          z: anchor.z + forward.z * s.fwd + right.z * s.right,
+        }));
+        const cx = rest.reduce((sum, p) => sum + p.x, 0) / rest.length;
+        const cz = rest.reduce((sum, p) => sum + p.z, 0) / rest.length;
+        const radius =
+          rest.reduce((max, p) => Math.max(max, Math.hypot(p.x - cx, p.z - cz)), 0) + 0.9;
+        const selected = selectedKind === "object" && g.members.includes(selectedId);
+        return (
+          <group key={g.id}>
+            {/* 队旗：杆 + 旗面（组色） */}
+            <group position={[anchor.x, 0, anchor.z]}>
+              <mesh position={[0, 0.9, 0]}>
+                <cylinderGeometry args={[0.035, 0.035, 1.8, 8]} />
+                <meshBasicMaterial color="#dfe7ef" />
+              </mesh>
+              <mesh position={[0.33, 1.52, 0]}>
+                <planeGeometry args={[0.66, 0.42]} />
+                <meshBasicMaterial color={g.color} side={THREE.DoubleSide} />
+              </mesh>
+            </group>
+            {selected ? (
+              <mesh
+                rotation={[-Math.PI / 2, 0, 0]}
+                position={[cx, 0.04, cz]}
+                scale={[radius, radius, 1]}
+              >
+                <ringGeometry args={[0.955, 1, 64]} />
+                <meshBasicMaterial
+                  color={g.color}
+                  transparent
+                  opacity={0.8}
+                  side={THREE.DoubleSide}
+                />
+              </mesh>
+            ) : null}
+          </group>
+        );
+      })}
     </>
   );
 }
@@ -1572,6 +1807,11 @@ export function WorldView() {
   const activeCameraId = useDirectorStore((s) => s.activeCameraId);
   const setActiveCamera = useDirectorStore((s) => s.setActiveCamera);
   const selectedId = useDirectorStore((s) => s.selectedId);
+  const selectedRole = useDirectorStore((s) =>
+    s.selectedKind === "object"
+      ? s.state.objects.find((o) => o.id === s.selectedId)?.role
+      : undefined,
+  );
   const selectedPoint = useDirectorStore((s) => s.selectedPoint);
   const viewLocked = useDirectorStore((s) => s.viewLocked);
   const toggleViewLocked = useDirectorStore((s) => s.toggleViewLocked);
@@ -1581,7 +1821,15 @@ export function WorldView() {
   const addCamera = useDirectorStore((s) => s.addCamera);
   const addDroneCamera = useDirectorStore((s) => s.addDroneCamera);
   const addCameraFromTemplate = useDirectorStore((s) => s.addCameraFromTemplate);
+  const addGroupAt = useDirectorStore((s) => s.addGroupAt);
   const [tplOpen, setTplOpen] = useState(false);
+  // 拖入「团队」时先弹面板配置人数 / 类型 / 编队，确认后一次性生成整队。
+  const [groupDraft, setGroupDraft] = useState<{
+    at: { x: number; z: number };
+    count: number;
+    category: AssetCategory;
+    formation: FormationKind;
+  } | null>(null);
   const templateGroups = groupTemplatesByCategory();
 
   const handleDropAdd = (kind: string, point: { x: number; z: number }) => {
@@ -1589,6 +1837,8 @@ export function WorldView() {
       addCamera();
     } else if (kind === "drone") {
       addDroneCamera();
+    } else if (kind === "group") {
+      setGroupDraft({ at: point, count: 4, category: "human", formation: "column" });
     } else {
       // kind 即 AssetCategory
       addAsset(kind as AssetCategory, point);
@@ -1597,87 +1847,6 @@ export function WorldView() {
 
   return (
     <main>
-      <div className="viewbar">
-        <div>
-          <b>{viewMode === "director" ? "DIRECTOR VIEW" : "CAMERA VIEW"}</b>
-          <small id="mode">{pathDrawMode ? "DRAW PATH" : selectedPoint ? "PATH EDIT" : "SELECT"}</small>
-          <small>{selectedId}</small>
-          {viewLocked && viewMode === "director" ? <small className="lock-flag">VIEW LOCKED</small> : null}
-        </div>
-        <div className="view-tools">
-          {/* 视角模式：始终可见，决定左 / 右两套控件的可见性。 */}
-          <div className="view-mode-toggle" role="tablist" aria-label="View Mode">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={viewMode === "director"}
-              className={`view-tab ${viewMode === "director" ? "active" : ""}`}
-              onClick={() => setViewMode("director")}
-            >
-              Director
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={viewMode === "camera"}
-              className={`view-tab ${viewMode === "camera" ? "active" : ""}`}
-              onClick={() => setViewMode("camera")}
-              disabled={cameras.length === 0}
-            >
-              Camera
-            </button>
-          </div>
-
-          {viewMode === "director" ? (
-            <>
-              {/* 导演视角：自由摆动镜头——需要「锁定」防误触、和缩放来观察。 */}
-              <LockBadge
-                locked={viewLocked}
-                title={
-                  viewLocked
-                    ? "视角已锁定（L）：拖拽不再改变视角"
-                    : "锁定视角（L）：锁定后拖拽不再改变视角，方便编辑路径"
-                }
-                onClick={toggleViewLocked}
-              />
-              <div className="zoomctl">
-                <button type="button" id="zout" title="Zoom out" onClick={() => setZoom(zoom - 0.1)}>
-                  −
-                </button>
-                <button type="button" id="zr" title="Reset to 100%" onClick={() => setZoom(1)}>
-                  {Math.round(zoom * 100)}%
-                </button>
-                <button type="button" id="zin" title="Zoom in" onClick={() => setZoom(zoom + 0.1)}>
-                  +
-                </button>
-              </div>
-              <button
-                type="button"
-                className={`tool-btn ${pathDrawMode ? "on" : ""}`}
-                title="手绘路径：开启后在画布上拖拽绘制选中资产的移动轨迹"
-                onClick={togglePathDraw}
-              >
-                ✏️ Path
-              </button>
-            </>
-          ) : (
-            /* 镜头视角：画面已锁死在构图上，缩放 / 视角锁定均无意义；
-               下拉框只在这里出现，用来在多台相机间切换。 */
-            <select
-              className="camera-select"
-              value={activeCameraId ?? ""}
-              onChange={(event) => setActiveCamera(event.target.value)}
-              disabled={cameras.length === 0}
-            >
-              {cameras.map((camera) => (
-                <option key={camera.id} value={camera.id}>
-                  {camera.name}
-                </option>
-              ))}
-            </select>
-          )}
-        </div>
-      </div>
       {viewMode === "director" ? (
         <div className="addbar">
           <span className="addbar-hint">拖拽到画布添加 →</span>
@@ -1722,6 +1891,18 @@ export function WorldView() {
           </button>
           <button
             type="button"
+            className="add-icon group-btn"
+            draggable
+            title="拖拽到画布添加 Group（团队：整队只画一条路线，队员按编队跟随）"
+            onDragStart={(event) => {
+              event.dataTransfer.setData("application/director-add", "group");
+              event.dataTransfer.effectAllowed = "copy";
+            }}
+          >
+            👥 Group
+          </button>
+          <button
+            type="button"
             className="add-icon tpl-btn"
             title="从机位模板库新建机位"
             onClick={() => setTplOpen((open) => !open)}
@@ -1753,6 +1934,86 @@ export function WorldView() {
           ) : null}
         </div>
       ) : null}
+
+      {/* 新建团队：拖入 Group 后配置人数 / 类型 / 编队 */}
+      {groupDraft ? (
+        <div className="modal-mask" onClick={() => setGroupDraft(null)}>
+          <div className="modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-title">新建团队 Group</div>
+            <p className="hint">
+              整队作为一个 unit：只给<b>组</b>设定一条路线，队员按编队跟随（匀速保持队形、变速变线弹簧回弹）。
+            </p>
+
+            <label className="modal-field">
+              <span>类型 Type</span>
+              <select
+                value={groupDraft.category}
+                onChange={(event) =>
+                  setGroupDraft({ ...groupDraft, category: event.target.value as AssetCategory })
+                }
+              >
+                {ASSET_ORDER.map((category) => (
+                  <option key={category} value={category}>
+                    {ASSET_PRESETS[category].label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="modal-field">
+              <span>人数 Count：{groupDraft.count}</span>
+              <input
+                type="range"
+                min={2}
+                max={12}
+                step={1}
+                value={groupDraft.count}
+                onChange={(event) =>
+                  setGroupDraft({ ...groupDraft, count: Number(event.target.value) })
+                }
+              />
+            </label>
+
+            <label className="modal-field">
+              <span>编队 Formation</span>
+              <select
+                value={groupDraft.formation}
+                onChange={(event) =>
+                  setGroupDraft({ ...groupDraft, formation: event.target.value as FormationKind })
+                }
+              >
+                {(Object.keys(FORMATION_LABELS) as FormationKind[]).map((kind) => (
+                  <option key={kind} value={kind}>
+                    {FORMATION_LABELS[kind]}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <div className="modal-actions">
+              <button type="button" className="obj" onClick={() => setGroupDraft(null)}>
+                取消
+              </button>
+              <button
+                type="button"
+                className="obj primary"
+                onClick={() => {
+                  addGroupAt(
+                    groupDraft.category,
+                    groupDraft.count,
+                    groupDraft.formation,
+                    groupDraft.at,
+                  );
+                  setGroupDraft(null);
+                }}
+              >
+                创建团队
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <div
         className="canvasWrap"
         onDragOver={(event) => {
@@ -1770,7 +2031,7 @@ export function WorldView() {
       >
         <Canvas
           dpr={[1, 2]}
-          gl={{ antialias: true }}
+          gl={{ antialias: true, preserveDrawingBuffer: true }}
           onCreated={({ gl, camera }) => {
             // 渲染器一创建就注册画布：不依赖子树挂载，且不受子组件 Suspense 影响。
             setCaptureCanvas(gl.domElement as HTMLCanvasElement);
@@ -1782,6 +2043,88 @@ export function WorldView() {
           <WorldScene />
           <CaptureBridge />
         </Canvas>
+
+        {/* 画布内左侧悬浮工具条：视图切换 + 锁定 + 缩放 / 路径 / 相机选择，竖向排列。 */}
+        <div className="view-floatbar">
+          <div className="vf-switch" role="tablist" aria-label="View Mode">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={viewMode === "director"}
+              className={`vf-opt ${viewMode === "director" ? "active" : ""}`}
+              onClick={() => setViewMode("director")}
+              title="导演视角：自由观察全场、编辑路径"
+            >
+              Director
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={viewMode === "camera"}
+              className={`vf-opt ${viewMode === "camera" ? "active" : ""}`}
+              onClick={() => setViewMode("camera")}
+              disabled={cameras.length === 0}
+              title="镜头视角：预览当前机位的构图画面"
+            >
+              Camera
+            </button>
+          </div>
+          {viewMode === "director" ? (
+            <>
+              <button
+                type="button"
+                className={`vf-lock ${viewLocked ? "on" : ""}`}
+                onClick={toggleViewLocked}
+                title={
+                  viewLocked
+                    ? "视角已锁定（L）：拖拽不再改变视角"
+                    : "锁定视角（L）：锁定后拖拽不再改变视角，方便编辑路径"
+                }
+              >
+                {viewLocked ? "🔒" : "🔓"}
+              </button>
+              <div className="vf-sep" />
+              <div className="vf-zoom" title="滚轮 / ± 缩放，WASD 或方向键平移视角">
+                <button type="button" title="Zoom out" onClick={() => setZoom(zoom - 0.1)}>
+                  −
+                </button>
+                <button type="button" title="Reset to 100%" onClick={() => setZoom(1)}>
+                  {Math.round(zoom * 100)}%
+                </button>
+                <button type="button" title="Zoom in" onClick={() => setZoom(zoom + 0.1)}>
+                  +
+                </button>
+              </div>
+              <button
+                type="button"
+                className={`vf-tool ${pathDrawMode ? "on" : ""}`}
+                disabled={selectedRole === "set"}
+                title={
+                  selectedRole === "set"
+                    ? "set 为静态环境 / 障碍，不参与运动，禁用路径绘制"
+                    : "手绘路径：开启后在画布上拖拽绘制选中资产的移动轨迹"
+                }
+                onClick={togglePathDraw}
+              >
+                ✏️ Path
+              </button>
+            </>
+          ) : (
+            <select
+              className="vf-camera"
+              value={activeCameraId ?? ""}
+              onChange={(event) => setActiveCamera(event.target.value)}
+              disabled={cameras.length === 0}
+            >
+              {cameras.map((camera) => (
+                <option key={camera.id} value={camera.id}>
+                  {camera.name}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+
         {viewMode === "camera" ? <FramingOverlay /> : null}
       </div>
     </main>

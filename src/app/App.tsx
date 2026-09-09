@@ -80,7 +80,7 @@ export function App() {
     setExportStatus("准备中…");
     try {
       await exportMultiCamVideos({ fps: 24, onProgress: setExportStatus });
-      setExportStatus("✓ 完成：已下载各相机 WebM");
+      setExportStatus("✓ 完成：已下载各相机视频（MP4）");
     } catch (error) {
       setExportStatus("✗ " + (error instanceof Error ? error.message : String(error)));
     } finally {

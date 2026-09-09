@@ -92,6 +92,9 @@ export function createDemoState(): DirectorState {
         name: "CAM_DRONE",
         color: "#8ad1ff",
         targetId: "M17",
+        // 以 GROUP 方式框住整支小队（TEAM_ALPHA），并实时跟随成员变化。
+        targetType: "GROUP",
+        groupId: "TEAM_ALPHA",
         framing: "wide",
         view: "high",
         side: "back_3_4",
@@ -153,6 +156,19 @@ export function createDemoState(): DirectorState {
       },
     ],
     actions: [],
+    // 演示组（Group Dynamics）：M17 领队，M18/M19 跟随；开启 dynamics 即受引力场影响。
+    groups: [
+      {
+        id: "TEAM_ALPHA",
+        name: "TEAM_ALPHA",
+        color: "#ff8fab",
+        members: ["M17", "M18", "M19"],
+        dynamics: true,
+        formation: "column",
+        spacing: 1.4,
+        noise: 0.35,
+      },
+    ],
   };
 }
 
@@ -421,6 +437,7 @@ export function createCommuteState(): DirectorState {
         intensity: 0.8,
       },
     ],
+    groups: [],
   };
 }
 
@@ -438,5 +455,6 @@ export function createBlankState(): DirectorState {
     cameraMoves: [],
     cameraJunctions: [],
     actions: [],
+    groups: [],
   };
 }

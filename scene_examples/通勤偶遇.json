@@ -329,7 +329,8 @@
           "kind": "walk",
           "intensity": 1
         }
-      ]
+      ],
+      "groups": []
     }
   }
 }

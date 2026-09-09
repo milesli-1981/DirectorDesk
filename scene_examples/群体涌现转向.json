@@ -1,0 +1,248 @@
+{
+  "manifest": {
+    "name": "团队编队片场",
+    "order": [
+      {
+        "id": "SCN_SWARM",
+        "name": "群体涌现转向"
+      }
+    ],
+    "activeSceneId": "SCN_SWARM"
+  },
+  "scenes": {
+    "SCN_SWARM": {
+      "revision": 1,
+      "duration": 10,
+      "aspectRatio": "16:9",
+      "objects": [
+        {
+          "id": "ALPHA_1",
+          "type": "actor",
+          "category": "human",
+          "role": "agent",
+          "x": -9,
+          "z": -2,
+          "rotation": 0,
+          "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 },
+          "color": "#ff5d73",
+          "name": "队长"
+        },
+        { "id": "ALPHA_2", "type": "actor", "category": "human", "role": "agent", "x": -9, "z": -3.3, "rotation": 0, "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 }, "color": "#ff5d73", "name": "队员2" },
+        { "id": "ALPHA_3", "type": "actor", "category": "human", "role": "agent", "x": -9, "z": -4.6, "rotation": 0, "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 }, "color": "#ff5d73", "name": "队员3" },
+        { "id": "ALPHA_4", "type": "actor", "category": "human", "role": "agent", "x": -9, "z": -5.9, "rotation": 0, "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 }, "color": "#ff5d73", "name": "队员4" },
+        { "id": "ALPHA_5", "type": "actor", "category": "human", "role": "agent", "x": -9, "z": -7.2, "rotation": 0, "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 }, "color": "#ff5d73", "name": "队员5" },
+
+        {
+          "id": "BRAVO_1",
+          "type": "actor",
+          "category": "human",
+          "role": "agent",
+          "x": -8,
+          "z": 8,
+          "rotation": 0,
+          "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 },
+          "color": "#67a7ff",
+          "name": "楔队首"
+        },
+        { "id": "BRAVO_2", "type": "actor", "category": "human", "role": "agent", "x": -9.2, "z": 6.8, "rotation": 0, "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 }, "color": "#67a7ff" },
+        { "id": "BRAVO_3", "type": "actor", "category": "human", "role": "agent", "x": -6.8, "z": 6.8, "rotation": 0, "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 }, "color": "#67a7ff" },
+        { "id": "BRAVO_4", "type": "actor", "category": "human", "role": "agent", "x": -9.2, "z": 5.6, "rotation": 0, "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 }, "color": "#67a7ff" },
+
+        {
+          "id": "CHARLIE_1",
+          "type": "actor",
+          "category": "human",
+          "role": "agent",
+          "x": 8,
+          "z": -4,
+          "rotation": 0,
+          "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 },
+          "color": "#63d39b",
+          "name": "横队首"
+        },
+        { "id": "CHARLIE_2", "type": "actor", "category": "human", "role": "agent", "x": 7, "z": -4, "rotation": 0, "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 }, "color": "#63d39b" },
+        { "id": "CHARLIE_3", "type": "actor", "category": "human", "role": "agent", "x": 9, "z": -4, "rotation": 0, "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 }, "color": "#63d39b" },
+        { "id": "CHARLIE_4", "type": "actor", "category": "human", "role": "agent", "x": 10, "z": -4, "rotation": 0, "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 }, "color": "#63d39b" },
+
+        {
+          "id": "DELTA_1",
+          "type": "actor",
+          "category": "human",
+          "role": "agent",
+          "x": -2,
+          "z": -8,
+          "rotation": 0,
+          "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 },
+          "color": "#f0a35a",
+          "name": "环阵首"
+        },
+        { "id": "DELTA_2", "type": "actor", "category": "human", "role": "agent", "x": -0.5, "z": -8, "rotation": 0, "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 }, "color": "#f0a35a" },
+        { "id": "DELTA_3", "type": "actor", "category": "human", "role": "agent", "x": -2, "z": -6.5, "rotation": 0, "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 }, "color": "#f0a35a" },
+        { "id": "DELTA_4", "type": "actor", "category": "human", "role": "agent", "x": -3.5, "z": -8, "rotation": 0, "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 }, "color": "#f0a35a" }
+      ],
+      "segments": [
+        {
+          "id": "SEG_ALPHA_1",
+          "type": "MOVE",
+          "object": "ALPHA_1",
+          "startX": -9,
+          "startZ": -2,
+          "endX": -1,
+          "endZ": -2,
+          "points": [],
+          "timeStart": 0,
+          "timeEnd": 3,
+          "ease": [0, 0, 1, 1]
+        },
+        {
+          "id": "SEG_ALPHA_2",
+          "type": "MOVE",
+          "object": "ALPHA_1",
+          "startX": -1,
+          "startZ": -2,
+          "endX": -1,
+          "endZ": 4,
+          "points": [],
+          "timeStart": 3,
+          "timeEnd": 6,
+          "ease": [0, 0, 1, 1]
+        },
+        {
+          "id": "SEG_ALPHA_3",
+          "type": "MOVE",
+          "object": "ALPHA_1",
+          "startX": -1,
+          "startZ": 4,
+          "endX": 6,
+          "endZ": 4,
+          "points": [],
+          "timeStart": 6,
+          "timeEnd": 9,
+          "ease": [0, 0, 1, 1]
+        },
+        {
+          "id": "SEG_BRAVO_1",
+          "type": "MOVE",
+          "object": "BRAVO_1",
+          "startX": -8,
+          "startZ": 8,
+          "endX": 5,
+          "endZ": 8,
+          "points": [],
+          "timeStart": 0,
+          "timeEnd": 9,
+          "ease": [0, 0, 1, 1]
+        }
+      ],
+      "handoffs": [],
+      "constraints": [],
+      "cameras": [
+        {
+          "id": "CAM_ALPHA",
+          "name": "CAM_ALPHA",
+          "color": "#c792ea",
+          "targetId": "ALPHA_1",
+          "framing": "medium",
+          "view": "eye_level",
+          "side": "back_3_4",
+          "lensMm": 50,
+          "motion": "FOLLOW"
+        },
+        {
+          "id": "CAM_SWARM",
+          "name": "CAM_SWARM",
+          "color": "#8ad1ff",
+          "targetId": "ALPHA_1",
+          "targetType": "GROUP",
+          "groupId": "TEAM_ALPHA",
+          "framing": "wide",
+          "view": "high",
+          "side": "back_3_4",
+          "lensMm": 24,
+          "motion": "DRONE",
+          "kind": "drone"
+        }
+      ],
+      "cameraMoves": [
+        {
+          "id": "MOVE_CAM_ALPHA_01",
+          "camera": "CAM_ALPHA",
+          "type": "FOLLOW",
+          "timeStart": 0,
+          "timeEnd": 10,
+          "targetId": "ALPHA_1",
+          "orbitDeg": 0,
+          "dollyScale": 1,
+          "craneHeight": 0,
+          "ease": [0.42, 0, 0.58, 1]
+        },
+        {
+          "id": "MOVE_CAM_SWARM_01",
+          "camera": "CAM_SWARM",
+          "type": "DRONE",
+          "timeStart": 0,
+          "timeEnd": 10,
+          "targetId": "ALPHA_1",
+          "orbitDeg": 200,
+          "dollyScale": 1.4,
+          "craneHeight": 11,
+          "ease": [0.42, 0, 0.58, 1]
+        }
+      ],
+      "cameraJunctions": [],
+      "actions": [
+        { "id": "ACT_A1", "object": "ALPHA_1", "timeStart": 0, "timeEnd": 9, "kind": "walk", "intensity": 1 },
+        { "id": "ACT_A2", "object": "ALPHA_2", "timeStart": 0, "timeEnd": 9, "kind": "walk", "intensity": 1 },
+        { "id": "ACT_A3", "object": "ALPHA_3", "timeStart": 0, "timeEnd": 9, "kind": "walk", "intensity": 1 },
+        { "id": "ACT_A4", "object": "ALPHA_4", "timeStart": 0, "timeEnd": 9, "kind": "walk", "intensity": 1 },
+        { "id": "ACT_A5", "object": "ALPHA_5", "timeStart": 0, "timeEnd": 9, "kind": "walk", "intensity": 1 },
+        { "id": "ACT_B1", "object": "BRAVO_1", "timeStart": 0, "timeEnd": 9, "kind": "walk", "intensity": 1 },
+        { "id": "ACT_B2", "object": "BRAVO_2", "timeStart": 0, "timeEnd": 9, "kind": "walk", "intensity": 1 },
+        { "id": "ACT_B3", "object": "BRAVO_3", "timeStart": 0, "timeEnd": 9, "kind": "walk", "intensity": 1 },
+        { "id": "ACT_B4", "object": "BRAVO_4", "timeStart": 0, "timeEnd": 9, "kind": "walk", "intensity": 1 }
+      ],
+      "groups": [
+        {
+          "id": "TEAM_ALPHA",
+          "name": "ALPHA 纵队",
+          "color": "#ff8fab",
+          "members": ["ALPHA_1", "ALPHA_2", "ALPHA_3", "ALPHA_4", "ALPHA_5"],
+          "dynamics": true,
+          "formation": "column",
+          "spacing": 1.3,
+          "noise": 0.4
+        },
+        {
+          "id": "TEAM_BRAVO",
+          "name": "BRAVO 楔队",
+          "color": "#8ad1ff",
+          "members": ["BRAVO_1", "BRAVO_2", "BRAVO_3", "BRAVO_4"],
+          "dynamics": true,
+          "formation": "wedge",
+          "spacing": 1.2,
+          "noise": 0.4
+        },
+        {
+          "id": "TEAM_CHARLIE",
+          "name": "CHARLIE 横队",
+          "color": "#7bd88f",
+          "members": ["CHARLIE_1", "CHARLIE_2", "CHARLIE_3", "CHARLIE_4"],
+          "dynamics": true,
+          "formation": "row",
+          "spacing": 1.2,
+          "noise": 0.3
+        },
+        {
+          "id": "TEAM_DELTA",
+          "name": "DELTA 环阵",
+          "color": "#ffb37b",
+          "members": ["DELTA_1", "DELTA_2", "DELTA_3", "DELTA_4"],
+          "dynamics": true,
+          "formation": "ring",
+          "spacing": 1.2,
+          "noise": 0.3
+        }
+      ]
+    }
+  }
+}

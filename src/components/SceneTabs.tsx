@@ -14,6 +14,7 @@ export function SceneTabs() {
   const removeScene = useDirectorStore((s) => s.removeScene);
   const duplicateScene = useDirectorStore((s) => s.duplicateScene);
   const reorderScene = useDirectorStore((s) => s.reorderScene);
+  const resetExamples = useDirectorStore((s) => s.resetExamples);
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
@@ -89,6 +90,18 @@ export function SceneTabs() {
         ))}
         <button type="button" className="tab-add" title="新建场景页" onClick={addScene}>
           ＋
+        </button>
+        <button
+          type="button"
+          className="tab-reset"
+          title="用磁盘上的最新示例覆盖同名场景页（这些页上的本地修改会丢失）"
+          onClick={() => {
+            if (window.confirm("用最新示例覆盖同名场景页？这些页上的本地修改会丢失。")) {
+              resetExamples();
+            }
+          }}
+        >
+          ↺
         </button>
       </div>
     </div>
