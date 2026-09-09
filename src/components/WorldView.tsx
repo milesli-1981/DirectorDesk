@@ -1,4 +1,4 @@
-import { Suspense, useEffect, MutableRefObject, useRef, useState } from "react";
+import { Suspense, useEffect, useMemo, MutableRefObject, useRef, useState } from "react";
 import { Canvas, ThreeEvent, useFrame, useThree } from "@react-three/fiber";
 import { setCaptureCanvas } from "../engine/videoExport";
 import { Html, Line, OrbitControls, PerspectiveCamera } from "@react-three/drei";
@@ -34,7 +34,14 @@ import { segmentRoutePoints } from "../engine/path";
 import { screenToGround, viewRef } from "../engine/viewBridge";
 import { ASSET_ORDER, ASSET_PRESETS } from "../engine/assetPresets";
 import { groupTemplatesByCategory } from "../domain/templates";
-import { aspectValue, FRAMING_LABELS, MOTION_LABELS, SIDE_LABELS, VIEW_LABELS } from "../domain/schema";
+import {
+  aspectValue,
+  FRAMING_LABELS,
+  MOTION_LABELS,
+  objectDisplayName,
+  SIDE_LABELS,
+  VIEW_LABELS,
+} from "../domain/schema";
 import { RadialRing } from "./RadialRing";
 import { LockBadge } from "./LockBadge";
 
@@ -49,7 +56,8 @@ type DragState =
   | { kind: "object"; id: string; moved: boolean; origin: Vec2 }
   | { kind: "point"; segmentId: string; pointId: string }
   | { kind: "endpoint"; segmentId: string; which: "start" | "end" }
-  | { kind: "new"; segmentId: string; origin: Vec2; current: Vec2 };
+  | { kind: "new"; segmentId: string; origin: Vec2; current: Vec2 }
+  | { kind: "draw"; objectId: string };
 
 function groundPoint(event: ThreeEvent<PointerEvent>): Vec2 | null {
   if (event.ray) {
@@ -66,6 +74,62 @@ function capturePointer(event: ThreeEvent<PointerEvent>) {
 }
 
 /* ------------------------------------------------------------------ Actors */
+
+/**
+ * 头顶名牌：把名字**画进 WebGL 场景**（sprite + CanvasTexture），而不是 DOM 覆盖层。
+ * 视频导出用的是 canvas.captureStream，只会录到画布内容、DOM 覆盖层录不进去，
+ * 所以只有渲染进场景的名牌才会出现在导出的成片里。
+ */
+function NameTag({ text, height }: { text: string; height: number }) {
+  const texture = useMemo(() => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 320;
+    canvas.height = 80;
+    const ctx = canvas.getContext("2d");
+    if (ctx) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.font = "bold 44px system-ui, -apple-system, 'Segoe UI', sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.lineJoin = "round";
+      // 描边保证在亮背景（天空 / 灯）上也看得清
+      ctx.lineWidth = 8;
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.85)";
+      ctx.strokeText(text, canvas.width / 2, canvas.height / 2);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+    }
+    const map = new THREE.CanvasTexture(canvas);
+    map.colorSpace = THREE.SRGBColorSpace;
+    // 关掉 mipmap：名牌在画面里通常很小，mipmap 会让文字发虚。
+    map.generateMipmaps = false;
+    map.minFilter = THREE.LinearFilter;
+    map.magFilter = THREE.LinearFilter;
+    return map;
+  }, [text]);
+
+  // 文字变化会重建贴图，旧贴图需要手动释放，避免显存泄漏。
+  useEffect(() => () => texture.dispose(), [texture]);
+
+  // sprite 天然朝向相机（billboard），从任何机位看都是正的。
+  return (
+    <sprite position={[0, height + 0.35, 0]} scale={[1.2, 0.3, 1]}>
+      {/*
+        depthWrite 必须打开：景深（DOF）按深度缓冲算模糊量，若名牌不写深度，
+        它会取身后背景的深度，导致人物明明在对焦上、文字却依旧被糊掉。
+        alphaTest 让全透明像素被丢弃，避免整块 sprite 矩形写出深度挡住后面的物体。
+        toneMapped=false 保证白字不被色调映射压灰。
+      */}
+      <spriteMaterial
+        map={texture}
+        transparent
+        alphaTest={0.1}
+        depthWrite
+        toneMapped={false}
+      />
+    </sprite>
+  );
+}
 
 function ActorView({ objectId }: { objectId: string }) {
   const object = useDirectorStore((s) => s.state.objects.find((o) => o.id === objectId));
@@ -192,7 +256,10 @@ function ActorView({ objectId }: { objectId: string }) {
         </mesh>
       ) : null}
 
-      {showHelpers ? (
+      {/* 人物：名牌画进场景，导演视图与成片里都可见；其它资产沿用 DOM 标签（仅导演视图） */}
+      {object.category === "human" ? (
+        <NameTag text={objectDisplayName(object)} height={h} />
+      ) : showHelpers ? (
         <Html
           position={[0, h + 0.4, 0]}
           center
@@ -200,7 +267,7 @@ function ActorView({ objectId }: { objectId: string }) {
           zIndexRange={[20, 0]}
         >
           <span className="obj-label" style={{ color: isSelected ? "#ffffff" : "#cdd8e2" }}>
-            {objectId}
+            {objectDisplayName(object)}
           </span>
         </Html>
       ) : null}
@@ -1065,6 +1132,9 @@ function CameraDepthOfField() {
 function Interaction() {
   const dragRef = useRef<DragState | null>(null);
   const [ghost, setGhost] = useState<Vec2 | null>(null);
+  const drawingRef = useRef(false);
+  const livePtsRef = useRef<Vec2[]>([]);
+  const [livePts, setLivePts] = useState<Vec2[]>([]);
   const controls = useThree((state) => state.controls) as { enabled: boolean } | null;
 
   // 拖拽对象 / 路径点时临时接管 OrbitControls，避免编辑路径同时把视角转走。
@@ -1093,6 +1163,11 @@ function Interaction() {
         const moved =
           Math.hypot(drag.current.x - drag.origin.x, drag.current.z - drag.origin.z) > 0.12;
         if (moved) store.addPathPoint(drag.segmentId, drag.current.x, drag.current.z);
+      } else if (drag.kind === "draw") {
+        const pts = livePtsRef.current;
+        if (pts.length >= 2) store.drawAssetPath(drag.objectId, pts);
+        livePtsRef.current = [];
+        setLivePts([]);
       }
       endDrag();
       setGhost(null);
@@ -1111,6 +1186,19 @@ function Interaction() {
     if (store.radialObjectId) {
       store.closeRing();
       return;
+    }
+
+    // 手绘路径模式：在画布上拖拽，把轨迹写入当前选中的资产（无选中资产时不拦截，便于先点选）。
+    if (store.pathDrawMode) {
+      const targetId = store.selectedKind === "object" ? store.selectedId : null;
+      if (targetId) {
+        drawingRef.current = true;
+        livePtsRef.current = [point];
+        setLivePts([point]);
+        beginDrag({ kind: "draw", objectId: targetId });
+        capturePointer(event);
+        return;
+      }
     }
 
     const tolerance = 1 / store.zoom;
@@ -1202,6 +1290,13 @@ function Interaction() {
       store.movePathPoint(drag.segmentId, drag.pointId, point.x, point.z);
     } else if (drag.kind === "endpoint") {
       store.moveEndpoint(drag.segmentId, drag.which, point.x, point.z);
+    } else if (drag.kind === "draw") {
+      const last = livePtsRef.current[livePtsRef.current.length - 1];
+      if (!last || Math.hypot(point.x - last.x, point.z - last.z) > 0.15) {
+        const next = [...livePtsRef.current, point];
+        livePtsRef.current = next;
+        setLivePts(next);
+      }
     } else {
       drag.current = point;
       setGhost(point);
@@ -1231,6 +1326,14 @@ function Interaction() {
             <span className="node-label ghost-label">NEW POINT</span>
           </Html>
         </group>
+      ) : null}
+
+      {livePts.length > 1 ? (
+        <Line
+          points={livePts.map((p) => [p.x, 0.07, p.z] as [number, number, number])}
+          color="#55d88a"
+          lineWidth={2.5}
+        />
       ) : null}
     </>
   );
@@ -1472,6 +1575,8 @@ export function WorldView() {
   const selectedPoint = useDirectorStore((s) => s.selectedPoint);
   const viewLocked = useDirectorStore((s) => s.viewLocked);
   const toggleViewLocked = useDirectorStore((s) => s.toggleViewLocked);
+  const pathDrawMode = useDirectorStore((s) => s.pathDrawMode);
+  const togglePathDraw = useDirectorStore((s) => s.togglePathDraw);
   const addAsset = useDirectorStore((s) => s.addAsset);
   const addCamera = useDirectorStore((s) => s.addCamera);
   const addDroneCamera = useDirectorStore((s) => s.addDroneCamera);
@@ -1495,7 +1600,7 @@ export function WorldView() {
       <div className="viewbar">
         <div>
           <b>{viewMode === "director" ? "DIRECTOR VIEW" : "CAMERA VIEW"}</b>
-          <small id="mode">{selectedPoint ? "PATH EDIT" : "SELECT"}</small>
+          <small id="mode">{pathDrawMode ? "DRAW PATH" : selectedPoint ? "PATH EDIT" : "SELECT"}</small>
           <small>{selectedId}</small>
           {viewLocked && viewMode === "director" ? <small className="lock-flag">VIEW LOCKED</small> : null}
         </div>
@@ -1546,6 +1651,14 @@ export function WorldView() {
                   +
                 </button>
               </div>
+              <button
+                type="button"
+                className={`tool-btn ${pathDrawMode ? "on" : ""}`}
+                title="手绘路径：开启后在画布上拖拽绘制选中资产的移动轨迹"
+                onClick={togglePathDraw}
+              >
+                ✏️ Path
+              </button>
             </>
           ) : (
             /* 镜头视角：画面已锁死在构图上，缩放 / 视角锁定均无意义；

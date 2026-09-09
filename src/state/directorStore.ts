@@ -23,9 +23,9 @@ import {
   Vec2,
   ViewMode,
 } from "../domain/schema";
-import { createBlankState, createDemoState } from "../engine/demoShot";
+import { createBlankState } from "../engine/demoShot";
 import { normalizePathPointModes, pathInsertIndex } from "../engine/path";
-import { contentEndTime } from "../engine/timeline";
+import { contentEndTime, rawContentEnd } from "../engine/timeline";
 import { ASSET_PRESETS } from "../engine/assetPresets";
 import { separateSetAsset } from "../engine/collision";
 import { AssetCategory, DirectorObject } from "../domain/schema";
@@ -190,6 +190,8 @@ interface DirectorStore {
   activeCameraId: string | null;
   /** 锁视角：开启后拖拽不再改变 Director View 的机位。 */
   viewLocked: boolean;
+  /** 手绘路径模式：开启后可在画布上拖拽绘制选中资产的移动轨迹。 */
+  pathDrawMode: boolean;
   /** 是否正在拖拽场景对象 / 路径点，用于临时接管 OrbitControls。 */
   dragging: boolean;
 
@@ -200,6 +202,7 @@ interface DirectorStore {
   setViewMode: (mode: ViewMode) => void;
   setActiveCamera: (cameraId: string) => void;
   toggleViewLocked: () => void;
+  togglePathDraw: () => void;
   setDragging: (dragging: boolean) => void;
 
   selectObject: (objectId: string) => void;
@@ -236,6 +239,10 @@ interface DirectorStore {
   toggleCurve: (segmentId: string, pointId: string) => void;
   deletePoint: (segmentId: string, pointId: string) => void;
   addSegment: (objectId: string, afterSegmentId?: string) => void;
+  /** 用一组有序坐标点直接覆盖某 segment 的路径（起点/终点取首尾点）。 */
+  setSegmentPoints: (segmentId: string, points: { x: number; z: number }[]) => void;
+  /** 手绘路径：为资产创建/复用最后的 MOVE segment，并写入拖拽得到的轨迹点。 */
+  drawAssetPath: (objectId: string, points: { x: number; z: number }[]) => void;
   setHandoffMode: (handoffId: string, mode: HandoffMode) => void;
   setCameraJunctionMode: (junctionId: string, mode: HandoffMode) => void;
   deleteSegment: (segmentId: string) => void;
@@ -289,9 +296,13 @@ interface DirectorStore {
   /** 基于某条过肩 move 生成正反打：互换前景 / 主体、翻转肩侧，并保持同一侧轴线。 */
   addReverseShot: (moveId: string) => void;
   setAspectRatio: (ratio: AspectRatio) => void;
+  /**
+   * 设置本场景的最大时长（秒）。成片导出与时间轴刻度都以此为准。
+   * 下限受已有内容约束（不允许把片段截掉），上限防止误输入超大值。
+   */
+  setDuration: (seconds: number) => void;
 
   executeIntent: (objectId: string, action: IntentAction) => void;
-  reset: () => void;
   // —— 撤销 / 重做历史 ——
   past: DirectorState[];
   future: DirectorState[];
@@ -508,6 +519,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
     viewMode: "director",
     activeCameraId: "CAM_A",
     viewLocked: false,
+    pathDrawMode: false,
     dragging: false,
 
     // 播放需要连续时间，不能在这里做 0.1s 量化。
@@ -535,6 +547,8 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
     setActiveCamera: (cameraId) => set({ activeCameraId: cameraId }),
 
     toggleViewLocked: () => set((store) => ({ viewLocked: !store.viewLocked })),
+
+    togglePathDraw: () => set((store) => ({ pathDrawMode: !store.pathDrawMode })),
 
     setDragging: (dragging) => set({ dragging }),
 
@@ -1101,6 +1115,48 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
       });
     },
 
+    setSegmentPoints: (segmentId, points) => {
+      const store = get();
+      const state = store.state;
+      const segment = state.segments.find((item) => item.id === segmentId);
+      if (!segment) return;
+      let counter = 0;
+      const pts: PathPoint[] = points.map((point) => ({
+        id: `pp_${Date.now().toString(36)}_${counter++}`,
+        type: "path",
+        shape: "LINE",
+        x: round1(point.x),
+        z: round1(point.z),
+      }));
+      const patch: Partial<MoveSegment> = { points: normalizePathPointModes(pts) };
+      if (pts.length > 0) {
+        patch.startX = pts[0].x;
+        patch.startZ = pts[0].z;
+        patch.endX = pts[pts.length - 1].x;
+        patch.endZ = pts[pts.length - 1].z;
+      }
+      patchSegment(segmentId, patch);
+    },
+
+    drawAssetPath: (objectId, points) => {
+      const store = get();
+      const state = store.state;
+      const objectSegments = state.segments
+        .filter((item) => item.object === objectId)
+        .sort((a, b) => a.timeStart - b.timeStart);
+      let segment = objectSegments[objectSegments.length - 1];
+      if (!segment) {
+        store.addSegment(objectId, undefined);
+        const after = get().state.segments
+          .filter((item) => item.object === objectId)
+          .sort((a, b) => a.timeStart - b.timeStart);
+        segment = after[after.length - 1];
+      }
+      if (!segment) return;
+      get().setSegmentPoints(segment.id, points);
+      set({ selectedItem: segment.id });
+    },
+
     setHandoffMode: (handoffId, mode) => {
       const store = get();
       const state = store.state;
@@ -1514,6 +1570,20 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         state: { ...store.state, revision: store.state.revision + 1, aspectRatio: ratio },
       })),
 
+    setDuration: (seconds) =>
+      set((store) => {
+        const current = store.state;
+        if (!Number.isFinite(seconds)) return {};
+        // 下限：不能小于已有内容的末尾，否则会把片段截掉（向上取整到 0.1s，便于输入）。
+        const min = Math.max(1, Math.ceil(rawContentEnd(current) * 10) / 10);
+        const duration = clamp(round1(seconds), min, 600);
+        if (duration === current.duration) return {};
+        return {
+          state: { ...current, revision: current.revision + 1, duration },
+          currentTime: Math.min(store.currentTime, duration),
+        };
+      }),
+
     addAction: (objectId, time) => {
       const store = get();
       const { state } = store;
@@ -1705,23 +1775,6 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
 
       set({ radialObjectId: null, selectedItem: action });
     },
-
-    reset: () =>
-      set((store) => ({
-        state: { ...createDemoState(), revision: store.state.revision + 1 },
-        currentTime: 0,
-        playing: false,
-        zoom: 1,
-        selectedKind: "object",
-        selectedId: "M17",
-        selectedItem: null,
-        selectedPoint: null,
-        radialObjectId: null,
-        viewMode: "director",
-        activeCameraId: "CAM_A",
-        viewLocked: false,
-        dragging: false,
-      })),
 
     undo: () => {
       const { past, future, state } = get();

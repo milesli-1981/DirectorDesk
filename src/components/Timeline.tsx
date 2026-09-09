@@ -1,11 +1,20 @@
-import { Fragment, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useDirectorStore } from "../state/directorStore";
-import { AssetCategory, EaseCurve, HandoffMode, TimelineItem } from "../domain/schema";
+import {
+  AssetCategory,
+  EaseCurve,
+  HandoffMode,
+  objectDisplayName,
+  TimelineItem,
+} from "../domain/schema";
 import { buildTimelineItems, itemRange } from "../engine/timeline";
 import { easeVal, normalizeEase } from "../engine/ease";
 
-const PX_PER_SEC = 100;
+const MAX_PX_PER_SEC = 100;
+const MIN_PX_PER_SEC = 12;
 const LABEL_WIDTH = 124;
+/* 右侧留给 add-leg 等行内控件的宽度，避免刻度铺满把按钮挤出可视区 */
+const LANE_TAIL = 32;
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
@@ -66,7 +75,7 @@ function TimelineReadout() {
   );
 }
 
-function Playhead() {
+function Playhead({ pxPerSec }: { pxPerSec: number }) {
   const currentTime = useDirectorStore((s) => s.currentTime);
   const setTime = useDirectorStore((s) => s.setTime);
   const duration = useDirectorStore((s) => s.state.duration);
@@ -78,7 +87,7 @@ function Playhead() {
     if (!scrollEl) return;
     const rect = scrollEl.getBoundingClientRect();
     const x = clientX - rect.left + scrollEl.scrollLeft - LABEL_WIDTH;
-    setTime(clamp(x / PX_PER_SEC, 0, duration));
+    setTime(clamp(x / pxPerSec, 0, duration));
   };
 
   // 可拖动的抓手：按下后捕获指针，移动即定位播放头。
@@ -99,7 +108,7 @@ function Playhead() {
   };
 
   return (
-    <div className="ph" style={{ left: LABEL_WIDTH + currentTime * PX_PER_SEC }}>
+    <div className="ph" style={{ left: LABEL_WIDTH + currentTime * pxPerSec }}>
       <div className="ph-hit" ref={gripRef} onPointerDown={onGripDown} title="拖动以定位播放头" />
       <div className="ph-grip" />
     </div>
@@ -121,6 +130,23 @@ export function Timeline() {
   const addAction = useDirectorStore((s) => s.addAction);
   const setActionTime = useDirectorStore((s) => s.setActionTime);
   const setCameraJunctionMode = useDirectorStore((s) => s.setCameraJunctionMode);
+
+  // 时间刻度按可视宽度自适应：整段时长刚好铺满可滚动区，因此不会出现横向滚动条。
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [laneWidth, setLaneWidth] = useState(0);
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+    const measure = () => setLaneWidth(element.clientWidth - LABEL_WIDTH - LANE_TAIL);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  const pxPerSec = useMemo(
+    () => clamp(laneWidth / Math.max(1, state.duration), MIN_PX_PER_SEC, MAX_PX_PER_SEC),
+    [laneWidth, state.duration],
+  );
   const reorderObject = useDirectorStore((s) => s.reorderObject);
 
   const items = useMemo(() => buildTimelineItems(state), [state]);
@@ -160,13 +186,13 @@ export function Timeline() {
     if ((event.target as Element).closest?.(".clip, .label")) return;
     const element = event.currentTarget;
     const rect = element.getBoundingClientRect();
-    setTime((event.clientX - rect.left + element.scrollLeft - LABEL_WIDTH) / PX_PER_SEC);
+    setTime((event.clientX - rect.left + element.scrollLeft - LABEL_WIDTH) / pxPerSec);
   };
 
   const handleClipMove = (event: React.PointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
     if (!drag) return;
-    const delta = (event.clientX - drag.originX) / PX_PER_SEC;
+    const delta = (event.clientX - drag.originX) / pxPerSec;
     const length = drag.end - drag.start;
     let nextStart = drag.start;
     let nextEnd = drag.end;
@@ -203,8 +229,8 @@ export function Timeline() {
         key={item.id}
         className={`clip ${item.kind} ${selectedItem === item.source ? "sel" : ""}`}
         style={{
-          left: range.start * PX_PER_SEC,
-          width: Math.max(28, (range.end - range.start) * PX_PER_SEC),
+          left: range.start * pxPerSec,
+          width: Math.max(28, (range.end - range.start) * pxPerSec),
           backgroundImage: spark,
           backgroundRepeat: spark ? "no-repeat" : undefined,
           backgroundPosition: spark ? "right 4px center" : undefined,
@@ -249,15 +275,15 @@ export function Timeline() {
       <div className="tlbar">
         <TimelineReadout />
       </div>
-      <div className="scroll" id="scroll" onPointerDown={handleScrub}>
+      <div className="scroll" id="scroll" ref={scrollRef} onPointerDown={handleScrub}>
         <div className="ruler" id="ruler">
           {Array.from({ length: state.duration + 1 }, (_, index) => (
-            <div key={index} className="tick" style={{ left: index * PX_PER_SEC }}>
+            <div key={index} className="tick" style={{ left: index * pxPerSec }}>
               {index}s
             </div>
           ))}
         </div>
-        <Playhead />
+        <Playhead pxPerSec={pxPerSec} />
         <div className="tracks" id="tracks">
           {state.objects
             .filter((object) => object.role === "agent" || items.some((item) => item.track === object.id))
@@ -270,7 +296,9 @@ export function Timeline() {
                   <div className={`row asset-node ${dragRowId === object.id ? "row-dragging" : ""}`}>
                     <div
                       className="label asset-label"
-                      title={`${noun} · ${object.id}`}
+                      title={`${noun} · ${objectDisplayName(object)}${
+                        object.name?.trim() ? `（${object.id}）` : ""
+                      }`}
                       draggable
                       onDragStart={handleRowDragStart(object.id)}
                       onDragOver={handleRowDragOver(object.id)}
@@ -286,7 +314,7 @@ export function Timeline() {
                         {isCollapsed ? "▸" : "▾"}
                       </button>
                       <span className="node-dot" style={{ background: object.color }} />
-                      <span className="node-name">{noun} {object.id}</span>
+                      <span className="node-name">{noun} {objectDisplayName(object)}</span>
                     </div>
                     {/* 运动轨道：只放 MOVE / Constraint，动作片段单独一行避免重叠。 */}
                     <div className="lane" data-track={object.id}>
@@ -360,7 +388,7 @@ export function Timeline() {
                       <div
                         key={junction.id}
                         className="cam-junction"
-                        style={{ left: boundary * PX_PER_SEC, borderColor: color, color }}
+                        style={{ left: boundary * pxPerSec, borderColor: color, color }}
                         title={`Camera junction: ${junction.mode} — click to cycle stop/smooth/cut`}
                         onPointerDown={(event) => event.stopPropagation()}
                         onClick={() => {

@@ -94,17 +94,28 @@ export async function recordCameraPov(
     recorder.onstop = () => resolve();
   });
 
+  // 录制必须按「真实经过时间」推进播放头，不能交给 App 的播放循环：
+  // 那个循环把每帧 delta 钳在 50ms 内（防切后台跳帧），一旦重场景掉到 20fps 以下，
+  // 时间就会走得比真实时间慢——录出来变长、而且像慢动作。
+  const { state } = useDirectorStore.getState();
+  // 成片长度 = 时间轴配置的总时长（state.duration），而不是只到最后一个有内容的帧：
+  // 否则会出现「配了 5s、内容只排到 3s、成片就只有 3s」——内容之后的空档同样属于成片。
+  // contentEndTime 仅在 duration 异常为 0 时兜底。
+  const end = state.duration > 0 ? state.duration : contentEndTime(state);
   recorder.start();
-  // 与录制同步开始播放，确保从 t=0 采起。
-  useDirectorStore.setState({ playing: true });
-
-  // 等到播放结束（App 播放循环到达内容末尾会停止并把播放头归零）。
+  const startedAt = performance.now();
   await new Promise<void>((resolve) => {
-    const check = () => {
-      if (!useDirectorStore.getState().playing) return resolve();
-      setTimeout(check, 80);
+    const step = () => {
+      const elapsed = (performance.now() - startedAt) / 1000;
+      if (elapsed >= end) {
+        // 停在内容末尾，保持最后一帧，等 recorder.stop() 收尾。
+        useDirectorStore.setState({ currentTime: end });
+        return resolve();
+      }
+      useDirectorStore.setState({ currentTime: elapsed });
+      requestAnimationFrame(step);
     };
-    check();
+    requestAnimationFrame(step);
   });
 
   recorder.stop();

@@ -83,11 +83,12 @@ export function roundTime(value: number): number {
 }
 
 /**
- * 场景中最后一个有内容的时刻：segment / constraint / camera move 的最大 timeEnd。
+ * 场景中最后一个有内容的时刻：segment / constraint / camera move / action 的最大 timeEnd。
  * 播放应在此处结束，而不是硬编码的 state.duration。
  * 没有任何内容时回退到 state.duration；结果夹到 [0, duration]。
  */
-export function contentEndTime(state: DirectorState): number {
+/** 内容的真实末尾（不按 state.duration 夹取）：segment / constraint / camera move / action 的最大 timeEnd。 */
+export function rawContentEnd(state: DirectorState): number {
   let end = 0;
   state.segments.forEach((segment) => {
     if (segment.timeEnd > end) end = segment.timeEnd;
@@ -98,6 +99,15 @@ export function contentEndTime(state: DirectorState): number {
   state.cameraMoves.forEach((move) => {
     if (move.timeEnd > end) end = move.timeEnd;
   });
+  // 动作片段同样是内容：漏掉它会让「内容末尾」被算早（成片被截短）。
+  state.actions.forEach((action) => {
+    if (action.timeEnd > end) end = action.timeEnd;
+  });
+  return end;
+}
+
+export function contentEndTime(state: DirectorState): number {
+  const end = rawContentEnd(state);
   if (end <= 0) return state.duration;
   return Math.min(end, state.duration);
 }

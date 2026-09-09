@@ -60,6 +60,12 @@ export interface Pose {
  */
 export interface DirectorObject {
   id: string;
+  /**
+   * 显示名（可在 item list 双击修改）。为空时回退显示 id。
+   * id 始终是场景内的稳定标识（被 segment / constraint / camera target 引用），
+   * 改名只影响显示，不动 id，因此无需同步任何引用。
+   */
+  name?: string;
   /** 兼容保留：actor / landmark / prop。新逻辑以 category + role 为主。 */
   type: ObjectKind;
   category: AssetCategory;
@@ -75,6 +81,11 @@ export interface DirectorObject {
   locked?: boolean;
   /** human 类资产的静态姿势基线（本地欧拉角）；缺省 = 标准站姿。 */
   pose?: Pose;
+}
+
+/** 资产显示名：优先用用户改过的 name，未命名则回退 id（id 始终是稳定标识）。 */
+export function objectDisplayName(object: { id: string; name?: string }): string {
+  return object.name?.trim() || object.id;
 }
 
 /** Path Point = 路径控制点。ARC 点是控制点，路径不一定穿过它。 */

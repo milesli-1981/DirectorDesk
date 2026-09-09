@@ -17,6 +17,7 @@ import {
   LENS_OPTIONS,
   MOTION_HINTS,
   MOTION_LABELS,
+  objectDisplayName,
   OtsSide,
   OTS_SIDE_LABELS,
   SIDE_LABELS,
@@ -121,6 +122,7 @@ export function Inspector() {
   const setSegmentEase = useDirectorStore((s) => s.setSegmentEase);
   const setCameraMoveEase = useDirectorStore((s) => s.setCameraMoveEase);
   const setAspectRatio = useDirectorStore((s) => s.setAspectRatio);
+  const setDuration = useDirectorStore((s) => s.setDuration);
   const setHandoffMode = useDirectorStore((s) => s.setHandoffMode);
   const setCameraJunctionMode = useDirectorStore((s) => s.setCameraJunctionMode);
   const deleteSegment = useDirectorStore((s) => s.deleteSegment);
@@ -205,44 +207,14 @@ export function Inspector() {
         }
       : null;
 
-  const title = camera ? camera.name : (object?.id ?? "—");
+  // 用显示名（改名后即时联动），未命名的资产回退到 id。
+  const title = camera ? camera.name : object ? objectDisplayName(object) : "—";
 
   return (
     <aside className="right">
       <div className="st">INSPECTOR</div>
       <div className="title">{title}</div>
-      <div className="sub">{camera ? "Camera Intent" : "Director State"}</div>
-
-      <div className="field">
-        <div className="lab">Current Intent</div>
-        <div id="intentInfo">
-          {camera ? (
-            <>
-              <span className="pill">CAMERA</span> TARGET {camera.targetId} ·{" "}
-              {FRAMING_LABELS[camera.framing]} / {SIDE_LABELS[camera.side]} /{" "}
-              {VIEW_LABELS[camera.view]} · {camera.lensMm}mm
-            </>
-          ) : constraint ? (
-            <>
-              <span className="pill">{constraint.type}</span> {constraint.subject} →{" "}
-              {constraint.target} · {constraint.timeStart.toFixed(1)}–
-              {constraint.timeEnd.toFixed(1)}s
-            </>
-          ) : segment ? (
-            <>
-              <span className="pill">{segment.type}</span> {segment.object} ·{" "}
-              {segment.timeStart.toFixed(1)}–{segment.timeEnd.toFixed(1)}s
-            </>
-          ) : move ? (
-            <>
-              <span className="pill">{move.type}</span> {move.camera} ·{" "}
-              {move.timeStart.toFixed(1)}–{move.timeEnd.toFixed(1)}s
-            </>
-          ) : (
-            "No timeline intent selected."
-          )}
-        </div>
-      </div>
+      {camera && <div className="sub">Camera Intent</div>}
 
       <div className="field">
         <div className="lab">Selected Timeline Item</div>
@@ -350,15 +322,6 @@ export function Inspector() {
               <p className="hint">这里只设人物的静态基线姿势；关节微调请在选中某个动作片段后，于「Action」面板的 Joints 区调整。</p>
             </div>
           ) : null}
-          <div className="mini-btns">
-            <button
-              type="button"
-              className="ghost-button danger-button"
-              onClick={() => removeAsset(object.id)}
-            >
-              Delete Asset
-            </button>
-          </div>
           <p className="hint">锁定后不可通过拖拽移动位置（防误触），仍可点选以便解锁；agent = 可运动、可作相机目标，set = 环境遮挡体与路径障碍</p>
         </div>
       ) : null}
@@ -799,15 +762,6 @@ export function Inspector() {
                 {viewMode === "camera" && activeCameraId === camera.id ? "Exit Camera View" : "Camera View"}
               </button>
             </div>
-            <div className="mini-btns" style={{ marginTop: 8 }}>
-              <button
-                type="button"
-                className="ghost-button danger-button"
-                onClick={() => removeCamera(camera.id)}
-              >
-                Delete Camera
-              </button>
-            </div>
           </div>
         </>
       ) : null}
@@ -1084,9 +1038,18 @@ export function Inspector() {
         </select>
       </div>
 
+      {/* 场景最大时长：成片导出与时间轴刻度都以此为基准。 */}
       <div className="field">
-        <div className="lab">State Revision</div>
-        <div id="rev">{state.revision}</div>
+        <div className="lab">Scene Duration (s)</div>
+        <input
+          type="number"
+          min={1}
+          max={600}
+          step={0.5}
+          value={state.duration}
+          title="本场景的最大时长；成片导出与时间轴刻度以此为准。不能小于已有内容的末尾。"
+          onChange={(event) => setDuration(Number(event.target.value))}
+        />
       </div>
 
       <div className="field">

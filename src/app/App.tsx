@@ -13,7 +13,6 @@ export function App() {
   const playing = useDirectorStore((s) => s.playing);
   const togglePlay = useDirectorStore((s) => s.togglePlay);
   const setTime = useDirectorStore((s) => s.setTime);
-  const reset = useDirectorStore((s) => s.reset);
   const undo = useDirectorStore((s) => s.undo);
   const redo = useDirectorStore((s) => s.redo);
   const canUndo = useDirectorStore((s) => s.past.length > 0);
@@ -168,9 +167,6 @@ export function App() {
           </button>
           <button type="button" id="redo" onClick={redo} disabled={!canRedo} title="重做 (Ctrl+Shift+Z)">
             ↷ Redo
-          </button>
-          <button type="button" id="reset" onClick={reset}>
-            Reset
           </button>
           <button type="button" id="export" onClick={handleExport}>
             Export
