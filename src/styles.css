@@ -1396,22 +1396,6 @@ pre {
   color: #fff;
 }
 
-/* Inspector 相机面板：prompt 编辑框 */
-.prompt-box {
-  width: 100%;
-  min-height: 84px;
-  resize: vertical;
-  box-sizing: border-box;
-  background: rgba(0, 0, 0, 0.25);
-  color: var(--ap-text);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: var(--ap-r-sm);
-  padding: 6px 8px;
-  font-size: 12px;
-  line-height: 1.45;
-  font-family: var(--ap-font);
-}
-
 /* GROUP 成员多选 chips */
 .grp-ids {
   display: flex;
@@ -1446,7 +1430,7 @@ pre {
   position: absolute;
   top: 12px;
   left: 12px;
-  z-index: 40;
+  z-index: 100;
   display: flex;
   flex-direction: column;
   gap: 8px;

@@ -141,6 +141,8 @@ export function Inspector() {
   const camera = selectedKind === "camera" ? state.cameras.find((c) => c.id === selectedId) : undefined;
   // 组是对象的一类：选中某个组成员（如团队队首）时，按成员关系找到其所属组，配置在下方展示。
   const group = object ? (state.groups ?? []).find((g) => g.members.includes(object.id)) : undefined;
+  // 未选中任何对象 / 相机时，整个 Inspector（标题、占位 “—”、Selected Timeline Item）都不显示。
+  const showInspector = !!(object || camera);
   // 组 Block 尺寸：以锚点（members[0]）的 footprint 为代表，改动时统一写回所有成员。
   const groupFootprint = group
     ? state.objects.find((o) => o.id === group.members[0])?.footprint ?? { w: 1, d: 1, h: 1 }
@@ -232,13 +234,30 @@ export function Inspector() {
 
   return (
     <aside className="right">
-      <div className="st">INSPECTOR</div>
-      <div className="title">{title}</div>
-      {camera && <div className="sub">Camera Intent</div>}
-      {group && <div className="sub">Group Dynamics（对象 / 团队）</div>}
-
+      {/* 场景级设置：始终显示，不依赖是否选中对象 */}
       <div className="field">
-        <div className="lab">Selected Timeline Item</div>
+        <div className="lab">Master Aspect Ratio</div>
+        <select
+          value={state.aspectRatio}
+          onChange={(event) => setAspectRatio(event.target.value as AspectRatio)}
+        >
+          {ASPECT_OPTIONS.map((option) => (
+            <option key={option.label} value={option.label}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {showInspector ? (
+        <>
+          <div className="st">INSPECTOR</div>
+          <div className="title">{title}</div>
+          {camera && <div className="sub">Camera Intent</div>}
+          {group && <div className="sub">Group Dynamics（对象 / 团队）</div>}
+
+          <div className="field">
+            <div className="lab">Selected Timeline Item</div>
         <div id="itemInfo">
           {selectedItem ?? "—"}
           {segment ? ` · ${pointCount} path point${pointCount === 1 ? "" : "s"}` : ""}
@@ -764,25 +783,6 @@ export function Inspector() {
               ) : null}
             </SubGroup>
 
-            <SubGroup
-              title="Prompt（喂给视频模型）"
-              hint="模板自带的自然语言描述，可编辑后复制；与结构化 spec 一起喂给 MiniMax / Kling / Runway 等视频模型。"
-            >
-              <textarea
-                className="prompt-box"
-                rows={5}
-                value={camera.prompt ?? ""}
-                onChange={(event) => updateCamera(camera.id, { prompt: event.target.value })}
-              />
-              <button
-                type="button"
-                className="obj"
-                onClick={() => navigator.clipboard?.writeText(camera.prompt ?? "")}
-              >
-                复制 prompt
-              </button>
-            </SubGroup>
-
             {cameraOts ? (
               <SubGroup
                 title="过肩 OTS"
@@ -1169,20 +1169,6 @@ export function Inspector() {
       ) : null}
 
       <div className="field">
-        <div className="lab">Master Aspect Ratio</div>
-        <select
-          value={state.aspectRatio}
-          onChange={(event) => setAspectRatio(event.target.value as AspectRatio)}
-        >
-          {ASPECT_OPTIONS.map((option) => (
-            <option key={option.label} value={option.label}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      <div className="field">
         <div className="lab">
           Director State JSON
           <button type="button" className="ghost-button" onClick={() => setShowJson((v) => !v)}>
@@ -1198,6 +1184,8 @@ export function Inspector() {
           Segment/Constraint/CameraMove directly. Play reads the same state.
         </div>
       </div>
+      </>
+      ) : null}
     </aside>
   );
 }

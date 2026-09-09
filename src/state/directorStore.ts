@@ -378,7 +378,6 @@ interface DirectorStore {
         | "otsOffset"
         | "altitude"
         | "templateId"
-        | "prompt"
         | "targetType"
         | "groupIds"
         | "groupId"
@@ -1773,7 +1772,6 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         kind: template.kind ?? "ground",
         altitude: template.altitude,
         templateId: template.id,
-        prompt: template.prompt,
         targetType: template.target.type,
         groupIds: template.target.type === "GROUP" ? [...template.target.ref] : undefined,
         roll: template.roll,

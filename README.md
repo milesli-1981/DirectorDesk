@@ -67,6 +67,7 @@
   - 顶栏 `Render Video`：对当前场景逐台相机渲染其 POV（Camera View），确定性离线逐帧渲染，每台相机输出一条视频（`<场景名>_<相机名>.mp4`，对齐 Baseline §1352 多机位批量）。
   - 直出 MP4：使用 WebCodecs（`VideoEncoder` + H.264/avc）逐帧编码 + `mp4-muxer` 封装，画幅精确遮幅、确定可复现；浏览器不支持 WebCodecs 时自动回退 WebM（MediaRecorder），保证总能出片。
   - 导出期间切换为 Camera View 逐帧推进，结束后恢复导演视图与播放头。
+  - 也封装为 **Previs MCP Server**（`mcp-server/`）：对外暴露 `render_previs(sceneJson)` 工具，LLM 可在对话里把场景 JSON 直接渲染成预演视频（详见下文「MCP / Previs MCP Server」）。
 - 运动求解
   - 位置 = Segment（路径里程 × 速度曲线）
   - 路径被静态环境（set 资产）阻挡时自动绕行：拐角可见图 + Dijkstra；端点落在障碍内会推到外边缘
@@ -101,6 +102,8 @@ http://localhost:4173
 ## 目录
 
 ```text
+mcp-server/         # Previs MCP Server：把场景 JSON 渲染成视频，供 LLM 在对话里出片
+skills/             # previs skill：简版 brief → compileSpec.mjs → DirectorState JSON
 src/
 ├── app/           # 应用壳：布局、播放循环、快捷键
 ├── components/    # ObjectList / WorldView / Inspector / EaseEditor / Timeline / RadialRing
@@ -108,6 +111,63 @@ src/
 ├── engine/        # ease / path / solver / pick / timeline / demoShot
 └── state/         # Zustand Store
 ```
+
+## MCP / Previs MCP Server
+
+把「导演场景 JSON → 预演视频」的能力包装成 MCP 工具，供 LLM 在对话里直接出片（`mcp-server/`，细节见其独立 README）。
+
+### 工具 `render_previs`
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `scene` | string (JSON) | `DirectorState` 单场景，或 `{ manifest, scenes }` 整片场 |
+| `camera` | string? | 相机 id；省略则录第一台相机 |
+| `fps` | number? | 帧率，默认 24（1–60） |
+| `appUrl` | string? | Web App 地址，默认取 `PREVIS_APP_URL` / `http://localhost:5173` |
+
+返回视频文件的本地绝对路径，并附带 `file://` 资源；渲染为**实时 1x**，耗时 ≈ 场景时长。
+
+### 原理（复用现有渲染，零重写）
+
+```text
+LLM ──(MCP/stdio)──> render_previs(sceneJson)
+                        │
+                        ▼
+                  MCP server（mcp-server/index.mjs）
+                    ├─ 起本地 HTTP 接收器（视频落盘到临时文件）
+                    ├─ Playwright 启动无头 Chromium，加载 Web App (?headless=1)
+                    ├─ 调 window.previsRender({ scene, camera, fps, receiver })
+                    │     App：导入场景 → 录制指定相机 POV（MediaRecorder）→ 上传接收器
+                    └─ 返回视频文件绝对路径（file:// 资源）
+```
+
+Web App 侧只需 `?headless=1` 时挂上 `window.previsRender`（见 `src/engine/headlessApi.ts`）。
+
+### 运行与接入
+
+1. 跑起 Web App（MCP server 需要能访问它）：仓库根 `npm run dev`，默认 `http://localhost:5173`。
+2. 安装 MCP server 依赖：`cd mcp-server && npm install --ignore-scripts && npx playwright install chromium`。
+3. 启动：`cd mcp-server && npm start`（stdio 传输）。
+
+客户端（`Claude Desktop` / `CodeBuddy` 等）配置示例：
+
+```json
+{
+  "mcpServers": {
+    "directdesk-previs": {
+      "command": "node",
+      "args": ["/绝对路径/mcp-server/index.mjs"],
+      "env": { "PREVIS_APP_URL": "http://localhost:5173" }
+    }
+  }
+}
+```
+
+### 配合 Skill 出片
+
+`skills/previs/` 提供 `SKILL.md`（SOP + 简版场景 spec 速查 + 镜头工艺要点）与 `compileSpec.mjs`（把简版 brief 编译成 `DirectorState` JSON），降低 LLM 手写完整 schema 的负担。
+
+流程：**用户创意 → brief → `compileSpec.mjs` → `DirectorState` JSON → `render_previs` → 视频**。
 
 ## 数据关系
 
@@ -129,5 +189,6 @@ SOLVER → PREVIEW
 
 - 本地持久化：已重新实现为片场/场景页 per-page localStorage（v3），见上文「场景持久化」与 Baseline §73。
 - Previs Export：已重新实现为 Previs 视频导出（多机位批量、WebCodecs 直出 MP4 + WebM 兜底），见上文「视频导出」与 Baseline §74。
+- MCP 对外能力：场景 JSON → 视频已封装为 `render_previs` MCP 工具（`mcp-server/`），并配 `skills/previs/` 的 brief 编译器，见上文「MCP / Previs MCP Server」。
 - 多机位：已在 Camera 章节实现（多相机 + 各自 Camera Track + 交接）。
 - 待接回：Camera Solver（独立镜头求解）、Undo-Redo、Camera Interest、AI Direction Package——建议在 Segment / Constraint 模型稳定后继续。

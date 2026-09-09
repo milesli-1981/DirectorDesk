@@ -254,8 +254,6 @@ export interface CameraObject {
   altitude?: number;
   /** 由模板库创建时记下来源模板 id（便于回看 / 再编辑）。 */
   templateId?: string;
-  /** 喂给视频模型的自然语言描述，可在 Inspector 编辑后复制。 */
-  prompt?: string;
   /** 目标类型：OBJECT 单对象 / OTS 过肩 / GROUP 多对象同框 / POV 主观视线 / LOCATION 固定环境。默认 OBJECT。 */
   targetType?: CameraTargetType;
   /** GROUP：参与取景的对象集合（双人同框 / 群像），相机自动框住全部。 */
