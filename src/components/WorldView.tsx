@@ -15,7 +15,7 @@ import {
   pathPolyline,
 } from "../engine/pick";
 import { baseHeading, formationForwardShift, formationSlotOf, objectFacing, objectPosition, routeObstacles } from "../engine/solver";
-import { actionPoseAt } from "../engine/actionPose";
+import { actionPoseAt, staticPoseWeight } from "../engine/actionPose";
 import { MODEL_CONFIG } from "../engine/modelConfig";
 import { HumanoidGLB, ModelBoundary } from "./HumanoidModel";
 import {
@@ -397,8 +397,10 @@ function HumanoidRig({
     const actionSample = actionPoseAt(state, objectId, currentTime);
     const aJ = actionSample.pose.joints;
     const j = pose?.joints ?? {};
-    const combinedX = (n: JointName) => (j[n]?.[0] ?? 0) + (aJ[n]?.[0] ?? 0);
+    const combinedX = (n: JointName) => (j[n]?.[0] ?? 0) * sw + (aJ[n]?.[0] ?? 0);
     const loco = actionSample.locomotionScale;
+    // 静态基线只对站定的角色生效：起步后随速度衰减到 0，让位给步态（见 staticPoseWeight）。
+    const sw = staticPoseWeight(speed);
 
     // 步态：显式 walk/run 片段优先；否则按 MOVE 的速度自动判定（低速走、高速跑）。
     // 注意 MOVE 决定"去哪里"，步态只决定身体怎么动，二者互不覆盖。
@@ -417,7 +419,7 @@ function HumanoidRig({
       if (ref.current) {
         const v = j[n] ?? [0, 0, 0];
         const av = aJ[n] ?? [0, 0, 0];
-        ref.current.rotation.set(v[0] + av[0], v[1] + av[1], v[2] + av[2]);
+        ref.current.rotation.set(v[0] * sw + av[0], v[1] * sw + av[1], v[2] * sw + av[2]);
       }
     };
 

@@ -82,3 +82,22 @@ export function actionPoseAt(
 
   return { pose: { joints }, locomotionScale: 1 - locoSuppress, gait };
 }
+
+/** 静态基线姿势淡出的速度下限/上限（m/s）。 */
+const STATIC_POSE_MIN = 0.3;
+const STATIC_POSE_MAX = 1.2;
+
+/**
+ * 静态基线姿势（object.pose）在给定速度下的权重。
+ *
+ * 「Pose（静态基线姿势）」只对**站定**的角色成立：角色一旦起步走/跑，就该由步态接管，
+ * 否则会同时叠加静态关节角与走跑摆动——观感就是"一边走一边坐着"，腿部既不自然也看不出步态。
+ * 因此在低速全额生效、进入步态后平滑衰减到 0；中间用 smoothstep 过渡，避免起步/停步
+ * 的瞬间姿势突变（啪一下塌成静态姿势）。
+ */
+export function staticPoseWeight(speed: number): number {
+  if (speed <= STATIC_POSE_MIN) return 1;
+  if (speed >= STATIC_POSE_MAX) return 0;
+  const t = (speed - STATIC_POSE_MIN) / (STATIC_POSE_MAX - STATIC_POSE_MIN);
+  return 1 - t * t * (3 - 2 * t); // smoothstep
+}
