@@ -7,7 +7,10 @@ import {
   CameraView,
   DirectorObject,
   DirectorState,
+  CameraStyle,
   OtsSide,
+  STYLE_PRESETS,
+  StyleParams,
   Vec3,
 } from "../domain/schema";
 import { easeVal, normalizeEase } from "./ease";
@@ -33,6 +36,16 @@ const FRAMING_DISTANCE: Record<CameraFraming, number> = {
   close_up: 3.2,
   extreme_close_up: 1.4,
 };
+
+// 距离表的「标定焦距」：FRAMING_DISTANCE 视为在该焦距下的取景距离。换镜头时距离按
+// lensMm / REFERENCE_LENS_MM 缩放，使主体在画面中的大小恒定（景别 = 主体大小，镜头只决定观感，
+// 换镜头主体大小不变），详见设计稿「主体大小不变量」。默认相机 50mm 下画面与旧版完全一致。
+const REFERENCE_LENS_MM = 50;
+
+/** 由景别 + 镜头焦距反解基准取景距离（含 dolly 距离系数）。 */
+function framingDistance(framing: CameraFraming, lensMm: number, distanceScale = 1): number {
+  return FRAMING_DISTANCE[framing] * (lensMm / REFERENCE_LENS_MM) * distanceScale;
+}
 
 const VIEW_HEIGHT: Record<CameraView, number> = {
   ground: 0.35,
@@ -90,6 +103,21 @@ function sceneCenter(state: DirectorState): Vec3 {
   return [cx, 1.3, cz];
 }
 
+/** 解析当前生效的稳定方式（风格轴）：段级覆盖 > 相机默认 > 旧场景 motion:"HANDHELD" 兼容 > 默认锁定。 */
+function styleOf(camera: CameraObject, options: Placement): CameraStyle {
+  return options.style ?? camera.style ?? (camera.motion === "HANDHELD" ? "handheld" : "locked");
+}
+
+/** 无人机机位自带云台增稳，稳定方式恒为「无抖动」，忽略 style 选择（避免「无人机 + 手持」矛盾组合）。 */
+function shakePreset(camera: CameraObject, style: CameraStyle): StyleParams {
+  return camera.kind === "drone" ? STYLE_PRESETS.locked : STYLE_PRESETS[style];
+}
+
+/** 风格轴带来的滚转漂移（度），叠加到相机 roll 上（位置抖动在 placeCamera 内处理）。 */
+function styleRollDrift(sp: StyleParams, time: number): number {
+  return sp.rollDrift ? Math.sin(time * (sp.rollFreq + 0.7) + 0.5) * sp.rollDrift : 0;
+}
+
 interface Placement {
   targetId?: string;
   /** OTS：本段所越过的前景演员。 */
@@ -109,8 +137,8 @@ interface Placement {
   tiltDeg?: number;
   /** TRUCK：横向平移距离（米，正负=左右）。 */
   truckDist?: number;
-  /** HANDHELD：叠加手持微晃。 */
-  handheld?: boolean;
+  /** 风格轴：稳定方式覆盖（为空沿用相机默认）。 */
+  style?: CameraStyle;
   /** 段级覆盖（framing/view/side/lens），为空沿用 CameraObject 默认。 */
   framing?: CameraFraming;
   view?: CameraView;
@@ -131,7 +159,8 @@ function placeStandard(
   droneLift: number,
   altitude: number,
 ): { position: Vec3; target: Vec3 } {
-  const baseDistance = FRAMING_DISTANCE[framing] * (options.distanceScale ?? 1);
+  const lens = options.lensMm ?? camera.lensMm;
+  const baseDistance = framingDistance(framing, lens, options.distanceScale ?? 1);
   const yaw = facing + ((SIDE_ANGLE[side] + (options.orbitDeg ?? 0)) * Math.PI) / 180;
   let horizontal = baseDistance;
   let height = VIEW_HEIGHT[view] + droneLift + altitude + (options.craneHeight ?? 0);
@@ -191,7 +220,7 @@ function placeCamera(
       const vfov = (lensFovDeg(lens) * Math.PI) / 180;
       const hfovH = 2 * Math.atan(Math.tan(vfov / 2) * aspectValue(state.aspectRatio));
       const fitDist = (radius + 2) / Math.tan(hfovH / 2);
-      const baseDistance = FRAMING_DISTANCE[framing] * (options.distanceScale ?? 1);
+      const baseDistance = framingDistance(framing, lens, options.distanceScale ?? 1);
       const horizontal = Math.max(baseDistance, fitDist);
       // 队伍朝向用锚点（members[0]）的行进方向，而非 targetId（可能是组 id，非对象）。
       const anchorId = groupMemberIds[0];
@@ -202,7 +231,7 @@ function placeCamera(
       const yaw = ((facing + SIDE_ANGLE[side]) * Math.PI) / 180;
       const groupTarget: Vec3 = [cx, 1.3, cz];
       if (view === "overhead") {
-        const h = FRAMING_DISTANCE[framing] + 4 + droneLift + altitude + (options.craneHeight ?? 0);
+        const h = framingDistance(framing, lens) + 4 + droneLift + altitude + (options.craneHeight ?? 0);
         position = [cx, h, cz + 0.001];
         target = groupTarget;
       } else {
@@ -322,12 +351,17 @@ function placeCamera(
     target = [target[0] + rx * truckDist, target[1], target[2] + rz * truckDist];
   }
 
-  // ---- HANDHELD：手持微晃（叠加细微正弦抖动）----
-  const isHandheld = options.handheld ?? camera.motion === "HANDHELD";
-  if (isHandheld) {
-    const jx = Math.sin(time * 7.3) * 0.06 + Math.sin(time * 3.1) * 0.04;
-    const jy = Math.sin(time * 5.7 + 1.3) * 0.05;
-    const jz = Math.cos(time * 6.1) * 0.06 + Math.sin(time * 2.7) * 0.03;
+  // ---- 风格轴（Style）：稳定方式 / 手持设备质感 ----
+  // 与 motion 正交：motion 是「怎么动」，style 是「什么质感」。locked/drone 无抖动；
+  // gimbal 极轻漂浮；handheld 有机微晃 + 滚转漂移；vlog 走拍 bob。滚转漂移在
+  // solveCamera/resolveMove 里叠加到 roll，这里只处理位置抖动。
+  const style = styleOf(camera, options);
+  const sp = shakePreset(camera, style);
+  if (sp.shakeAmp > 0 || sp.bobAmp > 0) {
+    const a = sp.shakeAmp;
+    const jx = Math.sin(time * (sp.shakeFreq + 1.3)) * a + Math.sin(time * (sp.shakeFreq * 0.42 + 3.1)) * a * 0.6;
+    const jy = Math.sin(time * (sp.bobFreq + 1.3)) * sp.bobAmp + Math.sin(time * (sp.bobFreq * 0.4)) * sp.bobAmp * 0.4;
+    const jz = Math.cos(time * (sp.shakeFreq + 1.4)) * a + Math.sin(time * (sp.shakeFreq * 0.4 + 2.7)) * a * 0.5;
     position = [position[0] + jx, position[1] + jy, position[2] + jz];
   }
 
@@ -347,6 +381,9 @@ function resolveMove(
   // 否则沿用相机默认是否为过肩——避免给过肩相机加一条 FOLLOW 段就丢掉过肩关系。
   const otsWanted = move.type === "OTS" || !!move.shoulderId ? true : undefined;
 
+  const style = move.style ?? camera.style ?? (camera.motion === "HANDHELD" ? "handheld" : "locked");
+  const sp = shakePreset(camera, style);
+
   if (move.type === "STATIC") {
     // 锁死机位：用片段开始时刻的构图，之后不再改变。
     const { position, target } = placeCamera(state, camera, move.timeStart, {
@@ -359,8 +396,9 @@ function resolveMove(
       view: move.view,
       side: move.side,
       lensMm: move.lensMm,
+      style,
     });
-    return { position, target, lensMm: baseLens, fovDeg: lensFovDeg(baseLens), roll, move };
+    return { position, target, lensMm: baseLens, fovDeg: lensFovDeg(baseLens), roll: roll + styleRollDrift(sp, move.timeStart), move };
   }
 
   const span = move.timeEnd - move.timeStart || 1;
@@ -390,10 +428,10 @@ function resolveMove(
     panDeg: move.type === "PAN" ? (move.panDeg ?? 0) * progress : 0,
     tiltDeg: move.type === "TILT" ? (move.tiltDeg ?? 0) * progress : 0,
     truckDist: move.type === "TRUCK" ? (move.truckDist ?? 0) * progress : 0,
-    handheld: move.type === "HANDHELD",
+    style,
   });
 
-  return { position, target, lensMm, fovDeg: lensFovDeg(lensMm), roll, move };
+  return { position, target, lensMm, fovDeg: lensFovDeg(lensMm), roll: roll + styleRollDrift(sp, time), move };
 }
 
 function lerp3(a: Vec3, b: Vec3, t: number): Vec3 {
@@ -411,15 +449,14 @@ export function solveCamera(
 
   const move = activeCameraMove(state, cameraId, time);
   if (!move) {
-    const { position, target } = placeCamera(state, camera, time, {
-      handheld: camera.motion === "HANDHELD",
-    });
+    const style = camera.style ?? (camera.motion === "HANDHELD" ? "handheld" : "locked");
+    const { position, target } = placeCamera(state, camera, time, { style });
     return {
       position,
       target,
       lensMm: camera.lensMm,
       fovDeg: lensFovDeg(camera.lensMm),
-      roll: camera.roll ?? 0,
+      roll: (camera.roll ?? 0) + styleRollDrift(shakePreset(camera, style), time),
     };
   }
 

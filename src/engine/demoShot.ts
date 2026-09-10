@@ -456,5 +456,6 @@ export function createBlankState(): DirectorState {
     cameraJunctions: [],
     actions: [],
     groups: [],
+    customActions: [],
   };
 }

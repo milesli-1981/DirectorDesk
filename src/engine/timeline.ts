@@ -40,12 +40,17 @@ export function buildTimelineItems(state: DirectorState): TimelineItem[] {
 
   // 动作片段：与 segments / constraints 同挂在该演员的对象轨道上。
   (state.actions ?? []).forEach((clip) => {
+    // 自定义动作显示用户起的名称（而不是 "custom"），便于在时间轴上辨认。
+    const customName =
+      clip.kind === "custom"
+        ? (state.customActions ?? []).find((p) => p.id === clip.customId)?.name
+        : undefined;
     items.push({
       id: `clip_${clip.id}`,
       track: clip.object,
       source: clip.id,
       kind: "action",
-      label: `${clip.kind} · ${Math.round(clip.intensity * 100)}%`,
+      label: `${customName ?? clip.kind} · ${Math.round(clip.intensity * 100)}%`,
     });
   });
 

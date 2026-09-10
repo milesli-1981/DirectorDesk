@@ -241,7 +241,8 @@ header {
   margin-bottom: 4px;
 }
 .modal-field select,
-.modal-field input[type="range"] {
+.modal-field input[type="range"],
+.modal-field input[type="text"] {
   width: 100%;
   background: #151d26;
   color: #cbd7e3;
@@ -1575,6 +1576,13 @@ pre {
   font-size: 13px;
   font-weight: 600;
   color: #cdd8e2;
+}
+
+/* 自定义动作弹窗：关节区上方的说明行 */
+.modal .joint-hint {
+  margin: 10px 0 4px;
+  font-size: 11px;
+  color: #8fa0b0;
 }
 
 .modal .joint-row {

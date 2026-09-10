@@ -22,6 +22,7 @@ import {
   StageManifest,
   ActionClip,
   ActionKind,
+  Pose,
   Vec2,
   ViewMode,
 } from "../domain/schema";
@@ -73,7 +74,11 @@ function loadSceneState(id: string): DirectorState | null {
     const parsed = JSON.parse(raw) as DirectorState;
     if (!parsed || !Array.isArray(parsed.objects) || !Array.isArray(parsed.cameraMoves)) return null;
     // 读盘即兜底清理孤儿路径等悬空引用，保证任何来源的存档都干净。
-    return sanitizeState({ ...parsed, actions: parsed.actions ?? [] });
+    return sanitizeState({
+      ...parsed,
+      actions: parsed.actions ?? [],
+      customActions: parsed.customActions ?? [],
+    });
   } catch {
     return null;
   }
@@ -350,6 +355,10 @@ interface DirectorStore {
   setActionTime: (actionId: string, start: number, end: number) => void;
   updateAction: (actionId: string, patch: Partial<ActionClip>) => void;
   deleteAction: (actionId: string) => void;
+  // —— 自定义动作库（命名的关节姿势，随场景持久化、可被多片段复用）——
+  /** 新建或更新（传 id 即覆盖同名 / 改名）一条自定义动作，返回其 id。 */
+  saveCustomAction: (name: string, joints: Pose["joints"], id?: string) => string;
+  deleteCustomAction: (id: string) => void;
 
   setSegmentTime: (segmentId: string, start: number, end: number) => void;
   setConstraintTime: (constraintId: string, start: number, end: number) => void;
@@ -384,6 +393,7 @@ interface DirectorStore {
         | "panDeg"
         | "tiltDeg"
         | "truckDist"
+        | "style"
       >
     >,
   ) => void;
@@ -411,6 +421,17 @@ interface DirectorStore {
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 const round1 = (value: number) => Math.round(value * 10) / 10;
+
+function nextCustomActionId(state: DirectorState): string {
+  const list = state.customActions ?? [];
+  let index = list.length + 1;
+  let id = `POSE_${String(index).padStart(2, "0")}`;
+  while (list.some((p) => p.id === id)) {
+    index += 1;
+    id = `POSE_${String(index).padStart(2, "0")}`;
+  }
+  return id;
+}
 
 function nextActionId(state: DirectorState): string {
   let index = (state.actions?.length ?? 0) + 1;
@@ -692,6 +713,9 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
       set({
         selectedKind: "camera",
         selectedId: cameraId,
+        // 选中相机即把它设为镜头视图当前相机：避免「Inspector 在改 A、camera view 却显示 B」
+        // 的脱节（两者曾是两个独立字段），否则改配置看起来像「不起作用」。
+        activeCameraId: cameraId,
         selectedPoint: null,
       }),
 
@@ -1159,6 +1183,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
             ...sanitizeState(parsed),
             actions: parsed.actions ?? [],
             groups: parsed.groups ?? [],
+            customActions: parsed.customActions ?? [],
             revision: (parsed.revision ?? 0) + 1,
           },
           currentTime: 0,
@@ -2091,6 +2116,41 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           ),
         },
       })),
+
+    saveCustomAction: (name, joints, id) => {
+      const store = get();
+      const list = store.state.customActions ?? [];
+      const trimmed = name.trim();
+      const targetId = id ?? nextCustomActionId(store.state);
+      const record = { id: targetId, name: trimmed, joints };
+      const next = list.some((p) => p.id === targetId)
+        ? list.map((p) => (p.id === targetId ? record : p))
+        : [...list, record];
+      set({
+        state: {
+          ...store.state,
+          revision: store.state.revision + 1,
+          customActions: next,
+        },
+      });
+      return targetId;
+    },
+
+    deleteCustomAction: (id) =>
+      set((store) => {
+        const list = store.state.customActions ?? [];
+        return {
+          state: {
+            ...store.state,
+            revision: store.state.revision + 1,
+            customActions: list.filter((p) => p.id !== id),
+            // 引用它的片段退回标准站姿，避免出现悬空 customId。
+            actions: (store.state.actions ?? []).map((a) =>
+              a.customId === id ? { ...a, kind: "stand" as ActionKind, customId: undefined } : a,
+            ),
+          },
+        };
+      }),
 
     deleteAction: (actionId) =>
       set((store) => ({

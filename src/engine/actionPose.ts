@@ -47,7 +47,12 @@ export function actionPoseAt(
   let gait: GaitMode = "auto";
 
   for (const clip of active) {
-    const preset = POSE_PRESETS[clip.kind] ?? { joints: {} };
+    // custom：关节角完全取自「自定义动作库」里那条命名记录；customId 悬空时按标准站姿处理。
+    const customPose =
+      clip.kind === "custom"
+        ? (state.customActions ?? []).find((p) => p.id === clip.customId)
+        : undefined;
+    const preset = customPose ? { joints: customPose.joints } : POSE_PRESETS[clip.kind] ?? { joints: {} };
     // 片段自带的关节覆盖优先于 kind 预设。
     const override = clip.pose?.joints ?? {};
     const map: Pose["joints"] = { ...preset.joints, ...override };

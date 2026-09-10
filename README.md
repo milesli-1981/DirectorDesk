@@ -75,6 +75,12 @@
   - 无驱动时保持最近一次驱动结束姿态，不弹回 ORIGIN
   - Body Motion（步态循环）与整体位移（Motion Curve）分离
 
+- Actions（动作片段 / 自定义动作）
+  - 演员在时间轴上有一条独立的「动作」行（`DirectorState.actions`），与 segments（位移）、constraints（意图）并列，作为第四层叠加到求解结果上。
+  - 内置 `kind`：stand / sit / crouch / wave / point / talk（静态或周期性手势）+ walk / run（步态：只决定「怎么走」，「去哪里」由 MOVE 决定）。
+  - **自定义动作是 kind 的一个选项**：Inspector 的 Kind 下拉里选「＋ 自定义…」→ 弹窗中调关节角 → **命名 → 保存**，写入 `DirectorState.customActions`（随场景自动持久化）并自动应用到当前片段。
+  - 保存后按名称出现在任意演员的 Kind 下拉里可直接复用；片段只记 `customId`，**改一次库、所有引用它的片段同步生效**。片段已应用自定义动作时，面板给出「编辑」入口回到弹窗继续调整（同 id 覆盖，含改名）。
+  - 时间轴 clip 标签显示用户起的名称（而非 `custom`），便于辨认。
 - 组 / Group Dynamics（引力场，Baseline §58，最小原型）
   - 组不是文件夹，而是可被导演直接控制的**主体**：组内成员之间存在「引力场」关系——开启 `dynamics` 后，成员被拉向群体质心，并受「领队」（速度最大者）在引力半径内吸引，形成关系驱动、而非同步动画的群体运动。
   - 数据模型：`DirectorState.groups: DirectorGroup[]`（`id / name / color / members / dynamics / cohesion / influenceRadius`）；`CameraObject.groupId` 可直接引用组，相机以 GROUP 取景并实时跟随成员变化。

@@ -6,19 +6,21 @@ import {
   CameraFraming,
   CameraMotionType,
   CameraSide,
+  CameraStyle,
   CameraView,
   EaseCurve,
   Footprint,
   FormationKind,
   FORMATION_LABELS,
   HandoffMode,
-  JointName,
   Pose,
   ActionKind,
   FRAMING_LABELS,
   LENS_OPTIONS,
   MOTION_HINTS,
   MOTION_LABELS,
+  STYLE_HINTS,
+  STYLE_LABELS,
   objectDisplayName,
   OtsSide,
   OTS_SIDE_LABELS,
@@ -42,6 +44,10 @@ const ACTION_KINDS: ActionKind[] = [
   "walk",
   "run",
 ];
+/** Kind 下拉里自定义动作的取值前缀：下拉值拼接成 `custom:<id>`，便于与内置 kind 区分。 */
+const CUSTOM_PREFIX = "custom:";
+/** 「＋ 自定义…」哨兵值：选中它不是取值，而是打开编辑弹窗。 */
+const NEW_CUSTOM = "__new_custom__";
 // 对象面板只展示静态基线姿势；步态类（walk/run）没有静态关节角度，只在动作片段里选。
 const STATIC_POSE_NAMES = POSE_PRESET_NAMES.filter((name) => name !== "walk" && name !== "run");
 
@@ -54,20 +60,6 @@ const MOTION_TYPES: CameraMotionType[] = [
   "CRANE",
   "DRONE",
   "OTS",
-];
-
-/** 可在 Inspector 微调的关节（其余如 root 不暴露）。 */
-const POSE_SLIDER_JOINTS: { joint: JointName; label: string }[] = [
-  { joint: "hipL", label: "Hip L" },
-  { joint: "hipR", label: "Hip R" },
-  { joint: "kneeL", label: "Knee L" },
-  { joint: "kneeR", label: "Knee R" },
-  { joint: "shoulderL", label: "Shoulder L" },
-  { joint: "shoulderR", label: "Shoulder R" },
-  { joint: "elbowL", label: "Elbow L" },
-  { joint: "elbowR", label: "Elbow R" },
-  { joint: "spine", label: "Spine" },
-  { joint: "neck", label: "Neck" },
 ];
 
 const poseEquals = (pose: Pose | undefined, preset: Pose) =>
@@ -157,9 +149,17 @@ export function Inspector() {
   const cameraOts = !!camera && (camera.motion === "OTS" || !!camera.shoulderId);
   const moveOts = !!move && (move.type === "OTS" || !!move.shoulderId);
   const action = state.actions?.find((item) => item.id === selectedItem);
+  // 当前片段引用的自定义动作：kind === "custom" 时按 customId 到库里查（悬空则为 undefined）。
+  const customAction =
+    action && action.kind === "custom"
+      ? (state.customActions ?? []).find((item) => item.id === action.customId)
+      : undefined;
   const actionObject = action ? state.objects.find((o) => o.id === action.object) : undefined;
   const updateAction = useDirectorStore((s) => s.updateAction);
   const deleteAction = useDirectorStore((s) => s.deleteAction);
+  const saveCustomAction = useDirectorStore((s) => s.saveCustomAction);
+  // 自定义动作库（命名的关节姿势）：selector 直接取原始引用，避免每次返回新数组触发重渲染。
+  const customActions = useDirectorStore((s) => s.state.customActions) ?? [];
   // 该相机上被 CameraMove 写死的段级覆盖：相机级同名属性在那些时间段内不生效。
   const overriddenByMoves = camera
     ? (["framing", "view", "side", "lensMm", "roll", "shoulderId", "otsOffset"] as const).filter((key) =>
@@ -200,7 +200,10 @@ export function Inspector() {
 
   const json = useMemo(() => JSON.stringify(state, null, 2), [state]);
   const [showJson, setShowJson] = useState(false);
-  const [customizeOpen, setCustomizeOpen] = useState(false);
+  // 自定义动作弹窗：新建（空）/ 编辑（带已有记录）。由 Kind 下拉的「自定义」选项驱动。
+  const [customize, setCustomize] = useState<{ mode: "create" } | { mode: "edit"; id: string } | null>(
+    null,
+  );
 
   const pointCount = segment ? segment.points.length : 0;
   const selectedPointShape = segment?.points.find((point) => point.id === selectedPoint)?.shape;
@@ -537,16 +540,59 @@ export function Inspector() {
           <div className="lab">Action（动作片段）</div>
           <Field label="Kind">
             <select
-              value={action.kind}
-              onChange={(event) => updateAction(action.id, { kind: event.target.value as ActionKind })}
+              // 选「＋ 自定义…」只是开弹窗、并不真的改 kind。弹窗开关时换 key 让下拉重挂载，
+              // 否则它会停在哨兵项上、显示的与真实 kind 不一致（尤其取消之后）。
+              key={
+                customize
+                  ? "customizing"
+                  : action.kind === "custom"
+                    ? `custom:${action.customId ?? ""}`
+                    : action.kind
+              }
+              value={action.kind === "custom" ? `custom:${action.customId ?? ""}` : action.kind}
+              onChange={(event) => {
+                const value = event.target.value;
+                // 「＋ 自定义…」：不当作取值，而是打开弹窗编辑并命名保存。
+                if (value === NEW_CUSTOM) {
+                  setCustomize({ mode: "create" });
+                  return;
+                }
+                if (value.startsWith(CUSTOM_PREFIX)) {
+                  updateAction(action.id, {
+                    kind: "custom",
+                    customId: value.slice(CUSTOM_PREFIX.length) || undefined,
+                  });
+                  return;
+                }
+                updateAction(action.id, { kind: value as ActionKind, customId: undefined });
+              }}
             >
               {ACTION_KINDS.map((kind) => (
                 <option key={kind} value={kind}>
                   {kind}
                 </option>
               ))}
+              {customActions.map((preset) => (
+                <option key={preset.id} value={`${CUSTOM_PREFIX}${preset.id}`}>
+                  {preset.name}
+                </option>
+              ))}
+              <option value={NEW_CUSTOM}>＋ 自定义…</option>
             </select>
           </Field>
+          {action.kind === "custom" && customAction ? (
+            <div className="row2">
+              <label>自定义</label>
+              <button
+                type="button"
+                className="ghost-button"
+                title="重新编辑这条自定义动作的关节角"
+                onClick={() => setCustomize({ mode: "edit", id: customAction.id })}
+              >
+                编辑「{customAction.name}」
+              </button>
+            </div>
+          ) : null}
           <div className="row2">
             <label>Intensity</label>
             <input
@@ -574,47 +620,39 @@ export function Inspector() {
               Delete Action
             </button>
           </div>
-          <div className="lab">
-            Joints（关节微调 · 覆盖本片段预设）
-            <button type="button" className="ghost-button" onClick={() => setCustomizeOpen(true)}>
-              Customize
-            </button>
-          </div>
-          {POSE_SLIDER_JOINTS.map(({ joint, label }) => {
-            const angle = action.pose?.joints[joint]?.[0] ?? 0;
-            return (
-              <div className="row2" key={joint}>
-                <label>{label}</label>
-                <input
-                  type="range"
-                  min={-Math.PI}
-                  max={Math.PI}
-                  step={0.05}
-                  value={angle}
-                  onChange={(event) => {
-                    const v = Number(event.target.value);
-                    const joints = { ...(action.pose?.joints ?? {}) };
-                    if (v === 0) delete joints[joint];
-                    else joints[joint] = [v, 0, 0];
-                    updateAction(action.id, { pose: { joints } });
-                  }}
-                />
-                <span className="val">{Math.round((angle * 180) / Math.PI)}°</span>
-              </div>
-            );
-          })}
-
-          {customizeOpen && action && (
+          {/* 自定义动作统一走 Kind 下拉：选「＋ 自定义…」在弹窗里编辑 → 命名 → 入库持久化。
+              不再把关节编辑区直接铺在面板里（避免与库的版本脱节、也避免产生无名脏数据）。 */}
+          {customize && action ? (
             <PoseCustomizeModal
-              joints={action.pose?.joints ?? {}}
-              onChange={(joints) => updateAction(action.id, { pose: { joints } })}
-              onClose={() => setCustomizeOpen(false)}
+              mode={customize.mode}
+              joints={
+                customize.mode === "edit"
+                  ? customActions.find((item) => item.id === customize.id)?.joints ?? {}
+                  : {}
+              }
+              initialName={
+                customize.mode === "edit"
+                  ? customActions.find((item) => item.id === customize.id)?.name ?? ""
+                  : ""
+              }
+              onSave={(name, joints) => {
+                const id = saveCustomAction(
+                  name,
+                  joints,
+                  customize.mode === "edit" ? customize.id : undefined,
+                );
+                updateAction(action.id, { kind: "custom", customId: id, pose: undefined });
+                setCustomize(null);
+              }}
+              onClose={() => setCustomize(null)}
             />
-          )}
+          ) : null}
 
           <p className="hint">
             MOVE 决定「去哪里」，动作只决定「身体怎么动」：walk / run 选择步态（不选时按速度自动判定，低速走、高速跑），
             sit / crouch 会停止腿部摆动。在时间轴该演员的「动作」行点 ＋A 新增片段，拖动 clip 改时间、拖边缘修剪时长。
+            需要自创姿势时在 Kind 里选「＋ 自定义…」：在弹窗中调关节角 → 命名 → 保存进**自定义动作库**（随场景持久化），
+            之后任意演员都能按名称直接复用，改库即改所有引用它的片段。
           </p>
         </div>
       ) : null}
@@ -868,6 +906,34 @@ export function Inspector() {
                   ))}
                 </select>
               </Field>
+              {camera.kind === "drone" ? (
+                <>
+                  <Field label="Style 稳定方式">
+                    <select value="drone" disabled>
+                      <option value="drone">Drone 增稳（云台）</option>
+                    </select>
+                  </Field>
+                  <p className="hint">无人机机位自带云台增稳，风格固定为「Drone 增稳」，无需选择。</p>
+                </>
+              ) : (
+                <>
+                  <Field label="Style 稳定方式">
+                    <select
+                      value={camera.style ?? "locked"}
+                      onChange={(event) =>
+                        updateCamera(camera.id, { style: event.target.value as CameraStyle })
+                      }
+                    >
+                      {(["locked", "gimbal", "handheld", "vlog"] as CameraStyle[]).map((value) => (
+                        <option key={value} value={value}>
+                          {STYLE_LABELS[value]}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <p className="hint">{STYLE_HINTS[camera.style ?? "locked"]}</p>
+                </>
+              )}
             </SubGroup>
           </div>
 
@@ -1111,6 +1177,21 @@ export function Inspector() {
           ) : null}
 
           <SubGroup title="风格 Style">
+            <Field label="Style 稳定方式（覆盖）">
+              <select
+                value={moveCamera?.kind === "drone" ? "locked" : move.style ?? "locked"}
+                disabled={moveCamera?.kind === "drone"}
+                onChange={(event) =>
+                  patchCameraMove(move.id, { style: event.target.value as CameraStyle })
+                }
+              >
+                {(["locked", "gimbal", "handheld", "vlog"] as CameraStyle[]).map((value) => (
+                  <option key={value} value={value}>
+                    {STYLE_LABELS[value]}
+                  </option>
+                ))}
+              </select>
+            </Field>
             <Field label={`Roll ${move.roll ?? 0}°（荷兰角）`}>
               <input
                 type="range"
