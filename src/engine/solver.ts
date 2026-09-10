@@ -5,6 +5,7 @@ import {
   DirectorState,
   FORMATION_MORPH_SECONDS,
   FormationKind,
+  MoveSegment,
   Vec2,
 } from "../domain/schema";
 import { segmentPosition, segmentRoutePoints } from "./path";
@@ -418,7 +419,11 @@ function groupInfluenceOffset(state: DirectorState, objectId: string, time: numb
   return { x: dx + fx + cx, z: dz + fz + cz };
 }
 
-/** 基础（不含引力场）朝向：用 applyDynamics=false 的位置差求运动方向，避免反馈。 */
+/** 基础（不含引力场）朝向：先用 applyDynamics=false 的位置差求运动方向，避免反馈；
+ * 差分近零（默认缓动在 u=0/u=1 斜率为 0，waypoint 附近 anchor 必有一段近零速区间）时，
+ * 不再回落到 subject.rotation（demo.rotation=0 会让 column 队员沿 +x 轴坍缩到节点），
+ * 改为从路径几何取切线：active 段的方向，两段交接瞬间用前后段方向的角平分线。
+ */
 export function baseHeading(state: DirectorState, id: string, time: number): number {
   const s = 0.08;
   const a = objectPosition(state, id, Math.max(0, time - s), new Set(), undefined, false);
@@ -426,8 +431,49 @@ export function baseHeading(state: DirectorState, id: string, time: number): num
   const dx = b.x - a.x;
   const dz = b.z - a.z;
   if (Math.hypot(dx, dz) > 1e-4) return Math.atan2(dx, dz);
-  const subject = state.objects.find((o) => o.id === id);
-  return subject ? (subject.rotation * Math.PI) / 180 : 0;
+
+  const obj = state.objects.find((o) => o.id === id);
+  const segments = obj?.segments ?? [];
+  const obstacles = routeObstacles(state, id);
+  const segDir = (seg: MoveSegment): { x: number; z: number } => {
+    const route = segmentRoutePoints(seg, obstacles);
+    const a0 = route[0];
+    const b0 = route[route.length - 1];
+    return { x: b0.x - a0.x, z: b0.z - a0.z };
+  };
+
+  const active = segments.find((seg) => time >= seg.timeStart && time <= seg.timeEnd);
+  if (active) {
+    const nextSeg = segments[segments.indexOf(active) + 1];
+    // 两段交接瞬间：用前后段方向的角平分线，让 column 平滑过弯而不塌到节点。
+    if (
+      nextSeg &&
+      Math.abs(time - active.timeEnd) < 1e-6 &&
+      Math.abs(time - nextSeg.timeStart) < 1e-6
+    ) {
+      const d = segDir(active);
+      const dn = segDir(nextSeg);
+      const bx = d.x + dn.x;
+      const bz = d.z + dn.z;
+      if (Math.hypot(bx, bz) > 1e-4) return Math.atan2(bx, bz);
+      return Math.atan2(dn.x, dn.z);
+    }
+    const d = segDir(active);
+    if (Math.hypot(d.x, d.z) > 1e-4) return Math.atan2(d.x, d.z);
+  }
+
+  // 无 active 段（段间隙 / 全段前后）：优先用下一段方向（出向），再上一段，最后回落到 rotation。
+  const next = segments.find((seg) => time < seg.timeStart);
+  if (next) {
+    const dn = segDir(next);
+    if (Math.hypot(dn.x, dn.z) > 1e-4) return Math.atan2(dn.x, dn.z);
+  }
+  const prev = [...segments].reverse().find((seg) => time > seg.timeEnd);
+  if (prev) {
+    const dp = segDir(prev);
+    if (Math.hypot(dp.x, dp.z) > 1e-4) return Math.atan2(dp.x, dp.z);
+  }
+  return obj ? (obj.rotation * Math.PI) / 180 : 0;
 }
 
 /**
