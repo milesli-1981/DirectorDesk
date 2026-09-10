@@ -25,10 +25,11 @@ export const MODEL_CONFIG: Partial<Record<AssetCategory, ModelConfig>> = {
     url: "/models/Xbot.glb",
     // Xbot（Mixamo / three.js 官方示例）：正常人体比例，无盔甲、非大头。
     // 自带片段：idle / walk / run / agree(点头) / headShake(摇头) / sad_pose / sneak_pose(潜行下蹲)。
-    // 朝向修正：本项目约定「模型正面 = 本地 +Z、相机/行走前向 = (sin,cos)」。该 GLB 实际正面朝本地 +X，
-    // 与约定差 90°，故旋转 -90° 把正面对齐到 +Z。修正后：相机 Side（front/side/back）与角色正脸、
-    // 行走朝向三者统一。若换其它模型发现侧脸/背对镜头，按需改为 ±90 / 180。
-    facingFixDeg: -90,
+    // 朝向：本项目约定「模型正面 = 本地 +Z、相机/行走前向 = (sin,cos)」，该模型正面朝 +Z，与约定一致。
+    // 注意：facingFixDeg 同时作用于行走朝向与相机取景，改它会让角色相对行进方向侧身，
+    // 不要用它去修相机 Side 错位（Side 由 cameraSolver 的 SIDE_ANGLE 决定）。
+    // 若换其它模型发现背对镜头，才按需改为 180。
+    facingFixDeg: 0,
     clips: {
       idle: ["idle"],
       walk: ["walking", "walk"],

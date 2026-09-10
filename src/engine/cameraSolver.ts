@@ -224,7 +224,8 @@ function placeCamera(
         anchorId && state.objects.some((o) => o.id === anchorId)
           ? baseHeading(state, anchorId, time)
           : objectFacing(state, targetId, time);
-      const yaw = ((facing + SIDE_ANGLE[side]) * Math.PI) / 180;
+      // facing 是弧度、SIDE_ANGLE 是角度，必须各自换算后再相加（不可整体当角度换算）。
+      const yaw = facing + (SIDE_ANGLE[side] * Math.PI) / 180;
       const groupTarget: Vec3 = [cx, 1.3, cz];
       if (view === "overhead") {
         const h = framingDistance(framing) + 4 + droneLift + altitude + (options.craneHeight ?? 0);
