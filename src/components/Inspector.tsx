@@ -125,6 +125,7 @@ export function Inspector() {
   const updateGroup = useDirectorStore((s) => s.updateGroup);
   const setGroupCount = useDirectorStore((s) => s.setGroupCount);
   const setGroupFootprint = useDirectorStore((s) => s.setGroupFootprint);
+  const setGroupPose = useDirectorStore((s) => s.setGroupPose);
   const setCameraGroup = useDirectorStore((s) => s.setCameraGroup);
   const renameGroup = useDirectorStore((s) => s.renameGroup);
   const removeGroup = useDirectorStore((s) => s.removeGroup);
@@ -139,6 +140,10 @@ export function Inspector() {
   const groupFootprint = group
     ? state.objects.find((o) => o.id === group.members[0])?.footprint ?? { w: 1, d: 1, h: 1 }
     : undefined;
+  // 组静态基线姿势：与 Block 尺寸同理，以锚点（members[0]）为代表展示，改动统一写回所有成员。
+  const groupAnchor = group ? state.objects.find((o) => o.id === group.members[0]) : undefined;
+  const groupPose = groupAnchor?.pose;
+  const groupIsHuman = groupAnchor?.category === "human";
   const segment = state.segments.find((item) => item.id === selectedItem);
   const constraint = state.constraints.find((item) => item.id === selectedItem);
   const move = state.cameraMoves.find((item) => item.id === selectedItem);
@@ -338,6 +343,30 @@ export function Inspector() {
                   value={groupFootprint.h}
                   onChange={(event) => setGroupFootprint(group.id, { h: Number(event.target.value) })}
                 />
+              </div>
+            </div>
+          )}
+          {groupIsHuman && (
+            <div className="grp-block">
+              <div className="lab">Pose（全体队员统一）</div>
+              <div className="mini-btns">
+                {STATIC_POSE_NAMES.map((name) => (
+                  <button
+                    key={name}
+                    type="button"
+                    className={`ghost-button ${poseEquals(groupPose, POSE_PRESETS[name]) ? "on" : ""}`}
+                    onClick={() => setGroupPose(group.id, clonePose(POSE_PRESETS[name]))}
+                  >
+                    {name}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={() => setGroupPose(group.id, { joints: {} })}
+                >
+                  reset
+                </button>
               </div>
             </div>
           )}

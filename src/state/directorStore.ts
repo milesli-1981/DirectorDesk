@@ -320,6 +320,8 @@ interface DirectorStore {
   updateGroup: (groupId: string, patch: Partial<DirectorGroup>) => void;
   /** 组 Block 尺寸：统一写回组内所有成员的 footprint（w=宽 d=深 h=高）。 */
   setGroupFootprint: (groupId: string, patch: Partial<Footprint>) => void;
+  /** 组静态基线姿势：统一写回组内所有成员的 pose（pose 是逐对象属性，团队需整体生效）。 */
+  setGroupPose: (groupId: string, pose: Pose) => void;
   /** 让某台相机以 GROUP 方式取景指定组（实时跟随成员变化）。 */
   setCameraGroup: (cameraId: string, groupId?: string) => void;
   exportScene: () => string;
@@ -1149,6 +1151,26 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
             objects: state.objects.map((object) =>
               memberSet.has(object.id)
                 ? { ...object, footprint: { ...object.footprint, ...patch } }
+                : object,
+            ),
+          },
+        };
+      }),
+
+    setGroupPose: (groupId, pose) =>
+      set((store) => {
+        const state = store.state;
+        const group = (state.groups ?? []).find((g) => g.id === groupId);
+        if (!group || group.members.length === 0) return {};
+        const memberSet = new Set(group.members);
+        return {
+          state: {
+            ...state,
+            revision: state.revision + 1,
+            // 每人持独立副本：共享同一份 joints 引用会被后续逐个改动互相串改。
+            objects: state.objects.map((object) =>
+              memberSet.has(object.id)
+                ? { ...object, pose: { joints: { ...pose.joints } } }
                 : object,
             ),
           },
