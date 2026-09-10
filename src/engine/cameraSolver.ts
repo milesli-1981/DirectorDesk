@@ -37,14 +37,11 @@ const FRAMING_DISTANCE: Record<CameraFraming, number> = {
   extreme_close_up: 1.4,
 };
 
-// 距离表的「标定焦距」：FRAMING_DISTANCE 视为在该焦距下的取景距离。换镜头时距离按
-// lensMm / REFERENCE_LENS_MM 缩放，使主体在画面中的大小恒定（景别 = 主体大小，镜头只决定观感，
-// 换镜头主体大小不变），详见设计稿「主体大小不变量」。默认相机 50mm 下画面与旧版完全一致。
-const REFERENCE_LENS_MM = 50;
-
-/** 由景别 + 镜头焦距反解基准取景距离（含 dolly 距离系数）。 */
-function framingDistance(framing: CameraFraming, lensMm: number, distanceScale = 1): number {
-  return FRAMING_DISTANCE[framing] * (lensMm / REFERENCE_LENS_MM) * distanceScale;
+// 取景距离只由「景别」决定，与镜头焦距无关：换镜头即真实变焦——长焦主体变大、背景压缩，
+// 广角主体变小、容纳更多环境，符合摄影直觉。只有 DOLLY_ZOOM 段会用 distanceScale 同步补偿
+// 距离（镜头拉长 + 距离拉远），从而「主体大小不变、只变透视」，实现希区柯克式变焦。
+function framingDistance(framing: CameraFraming, distanceScale = 1): number {
+  return FRAMING_DISTANCE[framing] * distanceScale;
 }
 
 const VIEW_HEIGHT: Record<CameraView, number> = {
@@ -159,8 +156,7 @@ function placeStandard(
   droneLift: number,
   altitude: number,
 ): { position: Vec3; target: Vec3 } {
-  const lens = options.lensMm ?? camera.lensMm;
-  const baseDistance = framingDistance(framing, lens, options.distanceScale ?? 1);
+  const baseDistance = framingDistance(framing, options.distanceScale ?? 1);
   const yaw = facing + ((SIDE_ANGLE[side] + (options.orbitDeg ?? 0)) * Math.PI) / 180;
   let horizontal = baseDistance;
   let height = VIEW_HEIGHT[view] + droneLift + altitude + (options.craneHeight ?? 0);
@@ -220,7 +216,7 @@ function placeCamera(
       const vfov = (lensFovDeg(lens) * Math.PI) / 180;
       const hfovH = 2 * Math.atan(Math.tan(vfov / 2) * aspectValue(state.aspectRatio));
       const fitDist = (radius + 2) / Math.tan(hfovH / 2);
-      const baseDistance = framingDistance(framing, lens, options.distanceScale ?? 1);
+      const baseDistance = framingDistance(framing, options.distanceScale ?? 1);
       const horizontal = Math.max(baseDistance, fitDist);
       // 队伍朝向用锚点（members[0]）的行进方向，而非 targetId（可能是组 id，非对象）。
       const anchorId = groupMemberIds[0];
@@ -231,7 +227,7 @@ function placeCamera(
       const yaw = ((facing + SIDE_ANGLE[side]) * Math.PI) / 180;
       const groupTarget: Vec3 = [cx, 1.3, cz];
       if (view === "overhead") {
-        const h = framingDistance(framing, lens) + 4 + droneLift + altitude + (options.craneHeight ?? 0);
+        const h = framingDistance(framing) + 4 + droneLift + altitude + (options.craneHeight ?? 0);
         position = [cx, h, cz + 0.001];
         target = groupTarget;
       } else {
