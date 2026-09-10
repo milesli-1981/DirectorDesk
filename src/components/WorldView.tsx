@@ -1592,7 +1592,8 @@ function WorldScene() {
 
 /**
  * 团队标记（导演视图）：
- * - **队旗**：常驻立在队首（锚点）位置，回答"这是哪个队 / 队在哪"，比脚下圆环醒目且不随编队变形。
+ * - **脚下红色标记**：常驻在队首（锚点）脚下的红色圆环 + 实心点，回答"这是哪个队 / 队在哪"。
+ *   取代原先立在队首的「队旗」：贴地标记不遮挡角色与机位视线，也不随编队变形。
  * - **包围大圈**：仅在整队被选中时出现，框住整队 footprint。半径来自「静止编队」槽位，
  *   不随播放 / 拖拽时的弹簧甩动而暴涨——选中圈代表队伍范围，而非瞬时形变。
  * 成员之间的连线已移除：编队形状本身一眼可见，连线只是噪音。
@@ -1648,15 +1649,26 @@ function GroupGraph() {
         const selected = selectedKind === "object" && g.members.includes(selectedId);
         return (
           <group key={g.id}>
-            {/* 队旗：杆 + 旗面（组色） */}
+            {/* 队首脚下标记：红色地面圆环 + 实心点。取代原「队旗」——贴地不遮挡角色 /
+                机位视线，俯视与侧视都一眼可见。 */}
             <group position={[anchor.x, 0, anchor.z]}>
-              <mesh position={[0, 0.9, 0]}>
-                <cylinderGeometry args={[0.035, 0.035, 1.8, 8]} />
-                <meshBasicMaterial color="#dfe7ef" />
+              <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.03, 0]}>
+                <ringGeometry args={[0.42, 0.55, 48]} />
+                <meshBasicMaterial
+                  color="#ff3b30"
+                  transparent
+                  opacity={0.85}
+                  side={THREE.DoubleSide}
+                />
               </mesh>
-              <mesh position={[0.33, 1.52, 0]}>
-                <planeGeometry args={[0.66, 0.42]} />
-                <meshBasicMaterial color={g.color} side={THREE.DoubleSide} />
+              <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.035, 0]}>
+                <circleGeometry args={[0.2, 32]} />
+                <meshBasicMaterial
+                  color="#ff3b30"
+                  transparent
+                  opacity={0.95}
+                  side={THREE.DoubleSide}
+                />
               </mesh>
             </group>
             {selected ? (
