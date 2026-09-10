@@ -170,6 +170,77 @@ export function segmentPosition(s: MoveSegment, time: number, rects: Rect[] = []
   return { x: a.x + (b.x - a.x) * f, z: a.z + (b.z - a.z) * f };
 }
 
+/** 折线的弧长查找表：cum[i] = 第 i 个点处的累计弧长（cum[0] = 0）。 */
+export interface ArcLut {
+  pts: Vec2[];
+  cum: number[];
+  total: number;
+}
+
+/** 由折线构造弧长前缀和，供「按弧长采样」复用，避免每帧重复累加。 */
+export function buildArcLut(pts: Vec2[]): ArcLut {
+  const cum: number[] = [];
+  for (let i = 0; i < pts.length; i += 1) {
+    if (i === 0) {
+      cum.push(0);
+      continue;
+    }
+    const d = Math.hypot(pts[i].x - pts[i - 1].x, pts[i].z - pts[i - 1].z);
+    cum.push(cum[i - 1] + d);
+  }
+  return { pts, cum, total: cum.length ? cum[cum.length - 1] : 0 };
+}
+
+/**
+ * 给定弧长 s 取折线上的点，超出首尾时沿首/末段方向外推（s<0 往后延、s>total 往前延）。
+ *
+ * 这是「路径相对编队」的基石：队员 i 取 s = s_anchor - i*spacing，就永远落在这条折线上，
+ * 过弯时自然贴着路径走（蛇形跟随），而不再像世界空间刚性偏移那样被甩离或坍缩到节点。
+ */
+export function pointAtArcLength(lut: ArcLut, s: number): Vec2 {
+  const { pts: p, cum: lens, total } = lut;
+  if (p.length === 0) return { x: 0, z: 0 };
+  if (p.length === 1) return { x: p[0].x, z: p[0].z };
+
+  if (s <= 0) {
+    const a = p[0];
+    const b = p[1];
+    const st = lens[1] - lens[0] || 1;
+    const f = s / st;
+    return { x: a.x + (b.x - a.x) * f, z: a.z + (b.z - a.z) * f };
+  }
+  if (s >= total) {
+    const n = p.length;
+    const a = p[n - 2] ?? p[0];
+    const b = p[n - 1];
+    const st = lens[n - 1] - lens[n - 2] || 1;
+    const f = 1 + (s - total) / st;
+    return { x: a.x + (b.x - a.x) * f, z: a.z + (b.z - a.z) * f };
+  }
+
+  let i = 1;
+  while (i < lens.length && lens[i] < s) i += 1;
+  const f = (s - lens[i - 1]) / (lens[i] - lens[i - 1] || 1);
+  const a = p[i - 1];
+  const b = p[i];
+  return { x: a.x + (b.x - a.x) * f, z: a.z + (b.z - a.z) * f };
+}
+
+/**
+ * 弧长 s 处的路径切线朝向（atan2(dx, dz)，与 solver 的 forward=(sin,cos) 约定一致）。
+ *
+ * 在 s 两侧小窗口各采一点求方向：折点/拐角处自然得到角平分线，且**不受缓动端点零速
+ * 影响**——瞬时速度差分在 waypoint 处会退化（速度为 0）并回落到默认值，这里不会。
+ */
+export function tangentAtArcLength(lut: ArcLut, s: number): number {
+  const a = pointAtArcLength(lut, s - 0.05);
+  const b = pointAtArcLength(lut, s + 0.05);
+  const dx = b.x - a.x;
+  const dz = b.z - a.z;
+  if (Math.hypot(dx, dz) > 1e-6) return Math.atan2(dx, dz);
+  return 0;
+}
+
 /** 新点必须插入最近的局部路径区间，而不是简单 append。 */
 export function pathInsertIndex(s: MoveSegment, x: number, z: number): number {
   const ch = pathChain(s);

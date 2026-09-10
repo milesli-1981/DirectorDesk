@@ -8,8 +8,15 @@ import {
   MoveSegment,
   Vec2,
 } from "../domain/schema";
-import { segmentPosition, segmentRoutePoints } from "./path";
+import {
+  ArcLut,
+  pointAtArcLength,
+  segmentPosition,
+  segmentRoutePoints,
+  tangentAtArcLength,
+} from "./path";
 import { Rect, setRects } from "./occlusion";
+import { easeVal, normalizeEase } from "./ease";
 
 /**
  * 编队能否「骑过」某障碍：队伍横向跨度足够，障碍两侧都留得下人。
@@ -187,6 +194,87 @@ function formationSlot(
   }
 }
 
+/** 某对象跨所有 segment 的连续路径（含绕障），供「沿路径弧长参数化」的编队使用。 */
+interface ObjectRoute {
+  lut: ArcLut;
+  segs: MoveSegment[];
+  /** 每段终点在整条路径上的弧长，与 segs 一一对应。 */
+  segEnds: number[];
+}
+
+const objectRouteCache = new Map<string, ObjectRoute>();
+
+/**
+ * 取对象跨所有 segment 的连续路径 LUT（按 state.revision 缓存，避免每帧重算绕障）。
+ *
+ * 陷阱：obstacles 必须按【锚点】算。routeObstacles 会剔除「编队骑得过去」的小障碍，
+ * 而对非锚点队员 canStraddle 恒为 false（保留全部障碍）——若按队员取会得到与锚点不同的
+ * 折线，队形会散。故整队统一用锚点 id 取一份折线。
+ */
+export function objectRoute(state: DirectorState, objectId: string): ObjectRoute {
+  const key = `${state.revision}|${objectId}`;
+  const hit = objectRouteCache.get(key);
+  if (hit) return hit;
+
+  const segs = state.segments
+    .filter((s) => s.object === objectId)
+    .sort((a, b) => a.timeStart - b.timeStart);
+  const rects = routeObstacles(state, objectId);
+
+  const pts: Vec2[] = [];
+  const cum: number[] = [];
+  const segEnds: number[] = [];
+  for (const seg of segs) {
+    for (const p of segmentRoutePoints(seg, rects)) {
+      const last = pts[pts.length - 1];
+      if (!last) {
+        pts.push(p);
+        cum.push(0);
+        continue;
+      }
+      const d = Math.hypot(p.x - last.x, p.z - last.z);
+      if (d < 1e-6) continue; // 跨段接缝（相邻段首尾重合）去重，避免 0 长度段
+      pts.push(p);
+      cum.push(cum[cum.length - 1] + d);
+    }
+    segEnds.push(cum.length ? cum[cum.length - 1] : 0);
+  }
+
+  const route: ObjectRoute = {
+    lut: { pts, cum, total: cum.length ? cum[cum.length - 1] : 0 },
+    segs,
+    segEnds,
+  };
+  if (objectRouteCache.size > 128) objectRouteCache.clear();
+  objectRouteCache.set(key, route);
+  return route;
+}
+
+/** 锚点在某时刻已走过的弧长：前面整段累加 + 本段按缓动的里程。 */
+export function anchorArcLength(route: ObjectRoute, time: number): number {
+  const { segs, segEnds } = route;
+  if (!segs.length) return 0;
+  if (time <= segs[0].timeStart) return 0;
+  const last = segs.length - 1;
+  if (time >= segs[last].timeEnd) return segEnds[last];
+
+  for (let k = 0; k < segs.length; k += 1) {
+    const s = segs[k];
+    if (time >= s.timeStart && time <= s.timeEnd) {
+      const prevEnd = k > 0 ? segEnds[k - 1] : 0;
+      const segLen = segEnds[k] - prevEnd;
+      const span = s.timeEnd - s.timeStart || 1;
+      const u = (time - s.timeStart) / span;
+      return prevEnd + easeVal(normalizeEase(s.ease), u) * segLen;
+    }
+  }
+  // 段间空隙：沿用上一段终点
+  for (let k = segs.length - 1; k >= 0; k -= 1) {
+    if (time > segs[k].timeEnd) return segEnds[k];
+  }
+  return 0;
+}
+
 /**
  * 团队编队 + 惯性弹簧（Group Dynamics）。
  *
@@ -237,11 +325,14 @@ function groupInfluenceOffset(state: DirectorState, objectId: string, time: numb
     };
   };
 
-  // —— 编队期望位：锚点位置 + 按队伍朝向旋转后的槽位 ——
+  // —— 编队期望位：路径相对（弧长参数化）——
+  // 队员 i 不在锚点旁做世界空间刚性偏移，而是沿同一条路径落后锚点 |slot.fwd| 弧长，
+  // 再按该处切线做 slot.right 的侧移。过弯时整队沿路径蛇形跟随、永远贴线，不会像刚性
+  // 编队那样绕锚点旋转被甩离路径、或在缓动端点（零速）处坍缩到节点。
   const anchor = base(anchorId, time);
-  const heading = baseHeading(state, anchorId, time);
-  const forward = { x: Math.sin(heading), z: Math.cos(heading) };
-  const right = { x: Math.cos(heading), z: -Math.sin(heading) };
+  const route = objectRoute(state, anchorId);
+  const useArc = route.segs.length > 0;
+  const sAnchor = useArc ? anchorArcLength(route, time) : 0;
 
   // —— 局部避让（Local Avoidance）· 侧向分流绕行 ——
   // 静态 set 仅作障碍（agent 间不做避让）。只让「自己期望位」与障碍冲突的队员让位，
@@ -263,17 +354,28 @@ function groupInfluenceOffset(state: DirectorState, objectId: string, time: numb
   const mw = (meObj?.footprint.w ?? 0.5) / 2;
   const md = (meObj?.footprint.d ?? 0.5) / 2;
   const slot = blendedSlot(objectId); // 纯编队槽位（不含避让），供滞后低通使用
-  const desiredPure = {
-    x: anchor.x + forward.x * slot.fwd + right.x * slot.right,
-    z: anchor.z + forward.z * slot.fwd + right.z * slot.right,
-  };
+  // 队员自身所在弧长（column 的 fwd 为负 → 落在锚点后方沿路径回退）。
+  const sMe = sAnchor + slot.fwd;
+  const arcPoint = useArc ? pointAtArcLength(route.lut, sMe) : null;
+  const heading = useArc
+    ? tangentAtArcLength(route.lut, sMe)
+    : baseHeading(state, anchorId, time);
+  const forward = { x: Math.sin(heading), z: Math.cos(heading) };
+  const right = { x: Math.cos(heading), z: -Math.sin(heading) };
+  const desiredPure = arcPoint
+    ? { x: arcPoint.x + right.x * slot.right, z: arcPoint.z + right.z * slot.right }
+    : {
+        x: anchor.x + forward.x * slot.fwd + right.x * slot.right,
+        z: anchor.z + forward.z * slot.fwd + right.z * slot.right,
+      };
   const dpos = desiredPure;
 
-  // 世界点 → 编队局部坐标（相对锚点）：f = 沿队伍朝向的前后，l = 侧向。
+  // 世界点 → 编队局部坐标（相对队员自己的编队原点）：f = 沿路径切线的前后，l = 侧向。
   // forward / right 已正交且为单位向量，故点积即投影；队员期望位的侧向坐标恒等于 slot.right。
+  const localOrigin = arcPoint ?? anchor;
   const toLocal = (px: number, pz: number) => {
-    const dx = px - anchor.x;
-    const dz = pz - anchor.z;
+    const dx = px - localOrigin.x;
+    const dz = pz - localOrigin.z;
     return { f: dx * forward.x + dz * forward.z, l: dx * right.x + dz * right.z };
   };
   // 轴对齐矩形投影到局部侧轴上的半长（支撑函数）。
@@ -345,16 +447,11 @@ function groupInfluenceOffset(state: DirectorState, objectId: string, time: numb
   const TAU = 0.16 * rankScale; // 反应时间常数（秒）：越大缓冲越久
   const LAG = Math.min(0.9, 0.5 * rankScale); // 滞后占比：越大越靠后、落后越多
 
-  const pNow = base(anchorId, time);
-  const hNow = baseHeading(state, anchorId, time);
-  const fN = { x: Math.sin(hNow), z: Math.cos(hNow) };
-  const rN = { x: Math.cos(hNow), z: -Math.sin(hNow) };
-  const dNow = {
-    x: pNow.x + fN.x * slot.fwd + rN.x * slot.right,
-    z: pNow.z + fN.z * slot.fwd + rN.z * slot.right,
-  };
+  // 当前期望位 = 上面算出的 desiredPure（弧长采样点 或 刚性偏移，二者其一）。
+  const dNow = desiredPure;
 
   // 对「编队期望点」做时间低通（指数权重），得到平滑滞后的目标。
+  // 弧长版：对过去的锚点弧长重采样——天然贴合路径，且比原来 11 次 objectPosition 便宜得多。
   const dt = 0.1;
   const N = 10; // 记忆窗口 ≈1s
   let lx = 0;
@@ -363,12 +460,28 @@ function groupInfluenceOffset(state: DirectorState, objectId: string, time: numb
   for (let k = 0; k <= N; k += 1) {
     const tk = Math.max(0, time - k * dt);
     const wk = Math.exp(-(time - tk) / TAU);
-    const pa = base(anchorId, tk);
-    const ha = baseHeading(state, anchorId, tk);
-    const fa = { x: Math.sin(ha), z: Math.cos(ha) };
-    const ra = { x: Math.cos(ha), z: -Math.sin(ha) };
-    lx += (pa.x + fa.x * slot.fwd + ra.x * slot.right) * wk;
-    lz += (pa.z + fa.z * slot.fwd + ra.z * slot.right) * wk;
+    let pxk: number;
+    let pzk: number;
+    let rax: number;
+    let raz: number;
+    if (useArc) {
+      const sK = anchorArcLength(route, tk) + slot.fwd;
+      const pk = pointAtArcLength(route.lut, sK);
+      const hk = tangentAtArcLength(route.lut, sK);
+      pxk = pk.x;
+      pzk = pk.z;
+      rax = Math.cos(hk);
+      raz = -Math.sin(hk);
+    } else {
+      const pa = base(anchorId, tk);
+      const ha = baseHeading(state, anchorId, tk);
+      pxk = pa.x + Math.sin(ha) * slot.fwd;
+      pzk = pa.z + Math.cos(ha) * slot.fwd;
+      rax = Math.cos(ha);
+      raz = -Math.sin(ha);
+    }
+    lx += (pxk + rax * slot.right) * wk;
+    lz += (pzk + raz * slot.right) * wk;
     wsum += wk;
   }
   const lagged = { x: lx / wsum, z: lz / wsum };
@@ -433,7 +546,10 @@ export function baseHeading(state: DirectorState, id: string, time: number): num
   if (Math.hypot(dx, dz) > 1e-4) return Math.atan2(dx, dz);
 
   const obj = state.objects.find((o) => o.id === id);
-  const segments = obj?.segments ?? [];
+  // 段挂在 DirectorState.segments 上（DirectorObject 并没有 segments 字段），按 object 过滤。
+  const segments = obj
+    ? state.segments.filter((s) => s.object === id).sort((a, b) => a.timeStart - b.timeStart)
+    : [];
   const obstacles = routeObstacles(state, id);
   const segDir = (seg: MoveSegment): { x: number; z: number } => {
     const route = segmentRoutePoints(seg, obstacles);
@@ -487,7 +603,19 @@ function groupHeadingInfluence(state: DirectorState, objectId: string, time: num
   if (!group || group.members.length < 2) return null;
   const anchorId = group.members[0];
   if (objectId === anchorId) return null;
-  return baseHeading(state, anchorId, time);
+
+  // 路径相对：每个队员朝向**自己所在弧长处**的路径切线，而不是统一对齐锚点朝向。
+  // 纵队过弯时后排因此沿路径自然转向，不会整队朝同一方向（看着像横着走）。
+  const route = objectRoute(state, anchorId);
+  if (!route.segs.length) return baseHeading(state, anchorId, time);
+  const slot = formationSlot(
+    group.formation ?? "column",
+    group.spacing ?? 1.2,
+    group.members.indexOf(objectId),
+    group.members.length,
+  );
+  const sMe = anchorArcLength(route, time) + slot.fwd;
+  return tangentAtArcLength(route.lut, sMe);
 }
 
 /** 解析任意对象在任意时刻的世界位置。stack 用于打断循环引用；applyDynamics=false 时跳过组引力场（供 FOLLOW / 引力场自身计算基础位置，避免反馈）。 */
