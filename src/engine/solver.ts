@@ -349,6 +349,7 @@ function groupInfluenceOffset(state: DirectorState, objectId: string, time: numb
   // 关键：避让位移只加在「最终期望位」上，绝不参与下方「队首滞后低通」——否则惯性会把避让
   // 抵消掉（过去未避让的位置被低通记住，生成反向甩动把人拽回障碍里），看着就像没避开。
   const CLEAR = 0.25; // 与障碍间的余量，避免贴边穿模
+  const LEAD = 1.0; // 提前量：为「让位」留出渐入渐出的距离，避免一碰障碍就瞬移出去
   const sets = setRects(state);
   const meObj = state.objects.find((o) => o.id === objectId);
   const mw = (meObj?.footprint.w ?? 0.5) / 2;
@@ -395,8 +396,9 @@ function groupInfluenceOffset(state: DirectorState, objectId: string, time: numb
   let pushX = 0;
   let pushZ = 0;
   for (const r of sets) {
-    const hw = r.w / 2 + mw + CLEAR; // 膨胀盒半宽（含自身尺寸 + 余量）
-    const hh = r.d / 2 + md + CLEAR;
+    // 检测盒在膨胀盒基础上再放大 LEAD：让让位量有一段距离可以渐入渐出（否则是阶跃）。
+    const hw = r.w / 2 + mw + CLEAR + LEAD; // 含自身尺寸 + 余量 + 提前量
+    const hh = r.d / 2 + md + CLEAR + LEAD;
     const dxr = dpos.x - r.x;
     const dzr = dpos.z - r.z;
     const penX = hw - Math.abs(dxr); // >0 表示落入本轴膨胀盒
@@ -422,14 +424,22 @@ function groupInfluenceOffset(state: DirectorState, objectId: string, time: numb
     }
     if (latPush <= 0) continue; // 本侧无人剐蹭 → 保持原编队不动
     latPush *= side;
+    // 让位量原本只由【侧向穿透】决定、与「进入多深」无关，配合入盒的二值闸门 →
+    // 一踏进盒子就全额生效，观感就是瞬移。改为按【进入深度】smoothstep 渐入渐出：
+    // 刚入盒为 0，抵达真实障碍前已全额让开，出盒再平滑回到 0（出口也不会瞬移回编队）。
+    const rampDist = LEAD + mw + CLEAR;
+    const depth = Math.min(penX, penZ); // 到最近面的距离：入盒 0 → 盒内渐深 → 出盒回 0
+    const rt = rampDist > 0 ? Math.min(1, Math.max(0, depth / rampDist)) : 1;
+    const ramp = rt * rt * (3 - 2 * rt); // smoothstep：位移与速度都连续
     if (Math.abs(latPush) <= MAX_LAT_PUSH) {
       // 只改侧向、前向坐标不变：保住前进进度，出障碍后自然回到编队槽位。
-      pushX += right.x * latPush;
-      pushZ += right.z * latPush;
+      pushX += right.x * latPush * ramp;
+      pushZ += right.z * latPush * ramp;
     } else {
-      // 侧移过大（长墙等）：回退到原世界轴最小穿透推出。
-      if (penX < penZ) pushX += (dxr >= 0 ? 1 : -1) * penX;
-      else pushZ += (dzr >= 0 ? 1 : -1) * penZ;
+      // 侧移过大（长墙等）：回退到原世界轴最小穿透推出。penX 含 LEAD，扣掉才是相对
+      // 膨胀盒的穿透量；该量本身随穿透连续变化，故不再叠加 ramp。
+      if (penX < penZ) pushX += (dxr >= 0 ? 1 : -1) * Math.max(0, penX - LEAD);
+      else pushZ += (dzr >= 0 ? 1 : -1) * Math.max(0, penZ - LEAD);
     }
   }
   // 最终期望位 = 编队期望位 + 避让位移（直接叠加，已随期望位平滑变化，不被低通抵消）。
