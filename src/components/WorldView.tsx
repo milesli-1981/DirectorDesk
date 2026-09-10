@@ -14,7 +14,7 @@ import {
   hitPathPoint,
   pathPolyline,
 } from "../engine/pick";
-import { baseHeading, formationForwardShift, formationSlotOf, objectFacing, objectPosition } from "../engine/solver";
+import { baseHeading, formationForwardShift, formationSlotOf, objectFacing, objectPosition, routeObstacles } from "../engine/solver";
 import { actionPoseAt } from "../engine/actionPose";
 import { MODEL_CONFIG } from "../engine/modelConfig";
 import { HumanoidGLB, ModelBoundary } from "./HumanoidModel";
@@ -29,7 +29,7 @@ import { cameraAxis } from "../engine/axis";
 import { EffectComposer, DepthOfField } from "@react-three/postprocessing";
 import type { DepthOfFieldEffect } from "postprocessing";
 import { bokehScaleForLens, focusRangeForLens, liveShot } from "../engine/shotFocus";
-import { blockingAssets, setRects } from "../engine/occlusion";
+import { blockingAssets } from "../engine/occlusion";
 import { segmentRoutePoints } from "../engine/path";
 import { screenToGround, viewRef } from "../engine/viewBridge";
 import { ASSET_ORDER, ASSET_PRESETS } from "../engine/assetPresets";
@@ -561,8 +561,10 @@ function SegmentPaths() {
         const points = pathPolyline(segment);
         if (points.length < 2) return null;
         // 障碍感知「导航层」：环境（set 资产）如何重塑该 segment 的行动路线（橙色虚线）。
-        // 与运动求解共用 segmentRoutePoints，因此这条线就是 agent 真正走的路线。
-        const rects = setRects(state);
+        // 与运动求解共用 segmentRoutePoints **与同一份障碍集合**，因此这条线就是 agent
+        // 真正走的路线——群队锚点会把「编队骑得过去」的小障碍排除掉，两边必须一致，
+        // 否则会看到橙色线绕行、人却直穿过去。
+        const rects = routeObstacles(state, segment.object);
         const route = segmentRoutePoints(segment, rects);
         const routePoints = route.map((p) => [p.x, 0.13, p.z] as [number, number, number]);
         return (

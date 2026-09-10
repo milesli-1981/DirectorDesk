@@ -8,7 +8,48 @@ import {
   Vec2,
 } from "../domain/schema";
 import { segmentPosition, segmentRoutePoints } from "./path";
-import { setRects } from "./occlusion";
+import { Rect, setRects } from "./occlusion";
+
+/**
+ * 编队能否「骑过」某障碍：队伍横向跨度足够，障碍两侧都留得下人。
+ *
+ * 用途：让**锚点**的全局路线规划忽略这类小障碍。否则哪怕一个小箱子，只要压在队伍
+ * 行进线上，`pathfinding.avoidObstacles` 就会先用可见图 + Dijkstra 把整条线路掰弯绕开，
+ * 「石头中间、队伍两边分流」这个局部行为就永远触发不到。
+ * 去掉这几个障碍后线路保持笔直，由队员在 local avoidance 里从两侧分流绕过（见下方
+ * groupInfluenceOffset 的侧向分流）。锚点自己则靠同款侧向避让小幅让开，不会走进石头。
+ *
+ * 保守起见用障碍**对角线**估计横向占位（任意来向都成立）；纵队 span≈0，必然判否，
+ * 因此纵队仍走旧的全局绕障（否则队首会直接穿墙）。
+ */
+function canStraddle(state: DirectorState, o: DirectorObject, r: Rect): boolean {
+  const group = (state.groups ?? []).find((g) => g.dynamics && g.members[0] === o.id);
+  if (!group || group.members.length < 2) return false;
+  const count = group.members.length;
+  const spacing = group.spacing ?? 1.2;
+  const kind = group.formation ?? "column";
+  let min = Infinity;
+  let max = -Infinity;
+  for (let i = 0; i < count; i += 1) {
+    const s = formationSlot(kind, spacing, i, count).right;
+    if (s < min) min = s;
+    if (s > max) max = s;
+  }
+  // 两侧各要留出人体半宽 + 贴边余量（合计约 1.1m）。
+  return max - min > Math.hypot(r.w, r.d) + 1.1;
+}
+
+/**
+ * 某对象做路径规划时应考虑的静态障碍。
+ * 群队锚点要排除「编队骑得过去」的小障碍（见 canStraddle）；其余对象 / 障碍一律照旧。
+ * **可视化与运动求解都必须走这里**，否则橙色导航层会显示绕行、agent 却直穿过去。
+ */
+export function routeObstacles(state: DirectorState, objectId: string): Rect[] {
+  const all = setRects(state);
+  const o = state.objects.find((item) => item.id === objectId);
+  if (!o) return all;
+  return all.filter((r) => !canStraddle(state, o, r));
+}
 
 /** 无驱动（Segment / Constraint）时的基础位置。 */
 function basePosition(state: DirectorState, o: DirectorObject, time: number): Vec2 {
@@ -21,7 +62,9 @@ function basePosition(state: DirectorState, o: DirectorObject, time: number): Ve
   if (time < ss[0].timeStart) return { x: o.x, z: o.z };
 
   // 环境（set 资产）参与运动求解：路径被挡时 agent 实际走绕行折线。
-  const obstacles = setRects(state);
+  // 例外：群队锚点要把「编队骑得过去」的小障碍排除掉——它们不该掰弯整条线路，
+  // 而由队员在 local avoidance 里从石头两侧分流绕过（见 canStraddle 注释）。
+  const obstacles = routeObstacles(state, o.id);
 
   const active = ss.find((s) => time >= s.timeStart && time <= s.timeEnd);
   if (active) return segmentPosition(active, time, obstacles);
@@ -159,8 +202,10 @@ function groupInfluenceOffset(state: DirectorState, objectId: string, time: numb
   if (!group || group.members.length < 2) return { x: 0, z: 0 };
 
   const anchorId = group.members[0];
-  // 锚点即团队路线本身（其自身 Segment 已对静态 set 绕行），不做任何偏移。
-  if (objectId === anchorId) return { x: 0, z: 0 };
+  // 锚点即团队路线本身：不做编队位移 / 惯性甩动 / 自然微扰（下方按 isAnchor 全部跳过）。
+  // 但它**要做侧向避让**：路线规划已把「骑得过去」的小障碍排除掉、线路笔直穿石而过，
+  // 若锚点完全不让位，队首就会直接走进石头里。
+  const isAnchor = objectId === anchorId;
 
   const index = group.members.indexOf(objectId);
   const base = (id: string, t: number): Vec2 =>
@@ -197,10 +242,18 @@ function groupInfluenceOffset(state: DirectorState, objectId: string, time: numb
   const forward = { x: Math.sin(heading), z: Math.cos(heading) };
   const right = { x: Math.cos(heading), z: -Math.sin(heading) };
 
-  // —— 局部避让（Local Avoidance）——
-  // 静态 set 仅作障碍（agent 间不做避让）。只让「自己期望位」与障碍冲突的队员让位：
-  // 例如环形队伍右侧遇障 → 仅右侧队员被推开内收，左侧完全保持原编队位置不动。
+  // —— 局部避让（Local Avoidance）· 侧向分流绕行 ——
+  // 静态 set 仅作障碍（agent 间不做避让）。只让「自己期望位」与障碍冲突的队员让位，
   // 不再把整队塌缩为单列——那会为了过地形而让本可不动的队员也跟着变阵。
+  //
+  // 旧实现按「世界 X / Z 中穿透更浅的轴」推出，与队伍朝向无关：斜向行进时常把队员沿
+  // 行进方向往后推（丢掉前进量，观感上就是"放弃原路线"），且不同队员可能沿不同轴被推、
+  // 甚至整队被挤向同一侧。现改为在【队伍局部坐标系】里决策：
+  //   1) 一律优先沿「侧向」让位，前向坐标保持不变 → 保住前进进度，不倒退、不抢到队首前；
+  //   2) 障碍窄到编队能「骑」过去（左右两端都伸到障碍轮廓之外）→ 分流：槽位在障碍中心
+  //      左侧的贴左沿、右侧的贴右沿，像水流绕石，过完自然合拢回编队；
+  //   3) 障碍过宽无法分流（长墙等）→ 整队绕同一侧；侧移距离过大则回退到原世界轴推出。
+  // 侧别由【编队槽位的侧向偏移】判定（时间的纯函数），因此无状态、可确定性复算、不会抖。
   // 关键：避让位移只加在「最终期望位」上，绝不参与下方「队首滞后低通」——否则惯性会把避让
   // 抵消掉（过去未避让的位置被低通记住，生成反向甩动把人拽回障碍里），看着就像没避开。
   const CLEAR = 0.25; // 与障碍间的余量，避免贴边穿模
@@ -214,6 +267,28 @@ function groupInfluenceOffset(state: DirectorState, objectId: string, time: numb
     z: anchor.z + forward.z * slot.fwd + right.z * slot.right,
   };
   const dpos = desiredPure;
+
+  // 世界点 → 编队局部坐标（相对锚点）：f = 沿队伍朝向的前后，l = 侧向。
+  // forward / right 已正交且为单位向量，故点积即投影；队员期望位的侧向坐标恒等于 slot.right。
+  const toLocal = (px: number, pz: number) => {
+    const dx = px - anchor.x;
+    const dz = pz - anchor.z;
+    return { f: dx * forward.x + dz * forward.z, l: dx * right.x + dz * right.z };
+  };
+  // 轴对齐矩形投影到局部侧轴上的半长（支撑函数）。
+  const halfLatOf = (r: { w: number; d: number }) =>
+    Math.abs(right.x) * (r.w / 2) + Math.abs(right.z) * (r.d / 2);
+  // 编队横向跨度（槽位侧向范围）：判断障碍能否被"骑"过去。
+  let latMin = Infinity;
+  let latMax = -Infinity;
+  for (const id of group.members) {
+    const s = blendedSlot(id).right;
+    if (s < latMin) latMin = s;
+    if (s > latMax) latMax = s;
+  }
+  const latCenter = (latMin + latMax) / 2;
+  const MAX_LAT_PUSH = 6; // 侧移超过此距离说明不是「小障碍」，回退到世界轴推出
+
   let pushX = 0;
   let pushZ = 0;
   for (const r of sets) {
@@ -223,8 +298,33 @@ function groupInfluenceOffset(state: DirectorState, objectId: string, time: numb
     const dzr = dpos.z - r.z;
     const penX = hw - Math.abs(dxr); // >0 表示落入本轴膨胀盒
     const penZ = hh - Math.abs(dzr);
-    if (penX > 0 && penZ > 0) {
-      // 沿穿透更浅的轴推出，使本队员与障碍保持 CLEAR 余量；其余队员不受影响。
+    if (!(penX > 0 && penZ > 0)) continue;
+
+    const halfLat = halfLatOf(r) + mw + CLEAR; // 障碍在侧向的半宽（含余量）
+    const oc = toLocal(r.x, r.z);
+    // 能"骑"过去：编队左右两端都伸到障碍轮廓之外，两侧都留得下人 → 分流贴两边过。
+    const straddle = latMin < oc.l - halfLat && latMax > oc.l + halfLat;
+    // 分流时按槽位在障碍中心的左 / 右各走一边；绕行时整队走远离障碍中心的那一侧。
+    const side = straddle ? (slot.right <= oc.l ? -1 : 1) : oc.l >= latCenter ? -1 : 1;
+    // 让位不是「把每个人都推到障碍那条边」——沿一维侧向推出必然落在同一条边界上，
+    // 同侧的一队人会被压成一列。改为【同侧整体平移】：取该侧最靠近障碍的队员所需位移，
+    // 同侧共用同一个位移量 → 最靠近的刚好贴边，其余保持原有相对间距依次外让。
+    let latPush = 0;
+    for (const id of group.members) {
+      const s = blendedSlot(id).right;
+      // 分流时只统计与我同侧的队员；不分流时全队一起算。
+      if (straddle && (side < 0 ? s > oc.l : s <= oc.l)) continue;
+      const pen = halfLat - Math.abs(s - oc.l);
+      if (pen > latPush) latPush = pen;
+    }
+    if (latPush <= 0) continue; // 本侧无人剐蹭 → 保持原编队不动
+    latPush *= side;
+    if (Math.abs(latPush) <= MAX_LAT_PUSH) {
+      // 只改侧向、前向坐标不变：保住前进进度，出障碍后自然回到编队槽位。
+      pushX += right.x * latPush;
+      pushZ += right.z * latPush;
+    } else {
+      // 侧移过大（长墙等）：回退到原世界轴最小穿透推出。
       if (penX < penZ) pushX += (dxr >= 0 ? 1 : -1) * penX;
       else pushZ += (dzr >= 0 ? 1 : -1) * penZ;
     }
@@ -287,8 +387,9 @@ function groupInfluenceOffset(state: DirectorState, objectId: string, time: numb
   const dx = desired.x - me.x;
   const dz = desired.z - me.z;
   // 弹簧 + 微扰是叠加在编队之上的「动态甩动」，这部分才用软上限约束，避免甩飞。
-  let fx = sx + nx;
-  let fz = sz + nz;
+  // 锚点不参与：它的路线就是团队路线本身，只允许下面的小障碍侧移。
+  let fx = isAnchor ? 0 : sx + nx;
+  let fz = isAnchor ? 0 : sz + nz;
   const fmag = Math.hypot(fx, fz);
   const maxOff = 2.0; // 与作者路径冲突的软上限（仅作用于甩动，不作用于编队贴合）
   if (fmag > maxOff) {
