@@ -437,7 +437,33 @@ function groupInfluenceOffset(state: DirectorState, objectId: string, time: numb
     // 一踏进盒子就全额生效，观感就是瞬移。改为按【进入深度】smoothstep 渐入渐出：
     // 刚入盒为 0，抵达真实障碍前已全额让开，出盒再平滑回到 0（出口也不会瞬移回编队）。
     const rampDist = LEAD + mw + CLEAR;
-    const depth = Math.min(penX, penZ); // 到最近面的距离：入盒 0 → 盒内渐深 → 出盒回 0
+    // 到最近面的距离：入盒 0 → 盒内渐深 → 出盒回 0。
+    //
+    // 关键：ramp 必须【同侧共用】（取同侧最深者）。若各按自己的深度算，贴障碍近的队员
+    // 拿到满 ramp、本来就快让开的只拿到一部分 → 同侧被推的距离不同 → 相对间距被压缩，
+    // 队员就叠在一起。这正是上面「同侧共用同一个位移量 → 其余保持原有相对间距」的本意，
+    // 逐人 ramp 会破坏它（且与 latPush 取同侧最大值不一致：位移共用、渐入却各自算）。
+    let depth = Math.min(penX, penZ);
+    for (const id of group.members) {
+      if (id === objectId) continue;
+      const s = blendedSlot(id);
+      const dS = straddle ? s.right - oc.l : latCenter - oc.l;
+      const sideJ = dS < -SIDE_EPS ? -1 : dS > SIDE_EPS ? 1 : -1;
+      if (sideJ !== side) continue;
+      const sMeJ = sAnchor + s.fwd;
+      const hJ = useArc ? tangentAtArcLength(route.lut, sMeJ) : heading;
+      const rJ = { x: Math.cos(hJ), z: -Math.sin(hJ) };
+      const apJ = useArc ? pointAtArcLength(route.lut, sMeJ) : null;
+      const dpJ = apJ
+        ? { x: apJ.x + rJ.x * s.right, z: apJ.z + rJ.z * s.right }
+        : {
+            x: anchor.x + Math.sin(hJ) * s.fwd + rJ.x * s.right,
+            z: anchor.z + Math.cos(hJ) * s.fwd + rJ.z * s.right,
+          };
+      const pxJ = hw - Math.abs(dpJ.x - r.x);
+      const pzJ = hh - Math.abs(dpJ.z - r.z);
+      if (pxJ > 0 && pzJ > 0) depth = Math.max(depth, Math.min(pxJ, pzJ));
+    }
     const rt = rampDist > 0 ? Math.min(1, Math.max(0, depth / rampDist)) : 1;
     const ramp = rt * rt * (3 - 2 * rt); // smoothstep：位移与速度都连续
     if (Math.abs(latPush) <= MAX_LAT_PUSH) {
