@@ -410,7 +410,16 @@ function groupInfluenceOffset(state: DirectorState, objectId: string, time: numb
     // 能"骑"过去：编队左右两端都伸到障碍轮廓之外，两侧都留得下人 → 分流贴两边过。
     const straddle = latMin < oc.l - halfLat && latMax > oc.l + halfLat;
     // 分流时按槽位在障碍中心的左 / 右各走一边；绕行时整队走远离障碍中心的那一侧。
-    const side = straddle ? (slot.right <= oc.l ? -1 : 1) : oc.l >= latCenter ? -1 : 1;
+    //
+    // 死区（SIDE_EPS）：队员正对障碍中心时，上面两个量之差会被浮点噪声左右——
+    // right.x = cos(heading) 在正东 / 正西行进时是 ~6e-17 而非 0，使 oc.l 带上一项
+    // ~6e-17 × (障碍x − 自身x)，于是 oc.l 随队员前进而缓慢变号。锚点 slot.right 恒为 0
+    // （formationSlot 对 index<=0 返回 0），一旦 oc.l 变号，「0 <= oc.l」随之翻转 →
+    // 队首越过石墩中心的瞬间突然横跳到另一侧（纵队更明显：全员 slot 相同，整队一起翻）。
+    // 差距小于 EPS 一律判为「正对」并固定取一侧，保证整段绕行方向稳定。
+    const SIDE_EPS = 1e-3;
+    const dSide = straddle ? slot.right - oc.l : latCenter - oc.l;
+    const side = dSide < -SIDE_EPS ? -1 : dSide > SIDE_EPS ? 1 : -1;
     // 让位不是「把每个人都推到障碍那条边」——沿一维侧向推出必然落在同一条边界上，
     // 同侧的一队人会被压成一列。改为【同侧整体平移】：取该侧最靠近障碍的队员所需位移，
     // 同侧共用同一个位移量 → 最靠近的刚好贴边，其余保持原有相对间距依次外让。
