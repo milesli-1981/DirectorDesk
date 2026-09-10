@@ -22,15 +22,21 @@ import {
   StageManifest,
   ActionClip,
   ActionKind,
+  Pose,
   Vec2,
   ViewMode,
 } from "../domain/schema";
 import { createBlankState } from "../engine/demoShot";
 import { normalizePathPointModes, pathInsertIndex, simplifyPath } from "../engine/path";
-import { contentEndTime, rawContentEnd } from "../engine/timeline";
+import { contentEndTime } from "../engine/timeline";
 import { ASSET_PRESETS } from "../engine/assetPresets";
 import { separateSetAsset } from "../engine/collision";
-import { AssetCategory, DirectorObject, FormationKind } from "../domain/schema";
+import {
+  AssetCategory,
+  DirectorObject,
+  FORMATION_MORPH_SECONDS,
+  FormationKind,
+} from "../domain/schema";
 import { formationSlotOf } from "../engine/solver";
 import { findTemplate } from "../domain/templates";
 
@@ -73,7 +79,11 @@ function loadSceneState(id: string): DirectorState | null {
     const parsed = JSON.parse(raw) as DirectorState;
     if (!parsed || !Array.isArray(parsed.objects) || !Array.isArray(parsed.cameraMoves)) return null;
     // 读盘即兜底清理孤儿路径等悬空引用，保证任何来源的存档都干净。
-    return sanitizeState({ ...parsed, actions: parsed.actions ?? [] });
+    return sanitizeState({
+      ...parsed,
+      actions: parsed.actions ?? [],
+      customActions: parsed.customActions ?? [],
+    });
   } catch {
     return null;
   }
@@ -315,6 +325,8 @@ interface DirectorStore {
   updateGroup: (groupId: string, patch: Partial<DirectorGroup>) => void;
   /** 组 Block 尺寸：统一写回组内所有成员的 footprint（w=宽 d=深 h=高）。 */
   setGroupFootprint: (groupId: string, patch: Partial<Footprint>) => void;
+  /** 组静态基线姿势：统一写回组内所有成员的 pose（pose 是逐对象属性，团队需整体生效）。 */
+  setGroupPose: (groupId: string, pose: Pose) => void;
   /** 让某台相机以 GROUP 方式取景指定组（实时跟随成员变化）。 */
   setCameraGroup: (cameraId: string, groupId?: string) => void;
   exportScene: () => string;
@@ -350,6 +362,10 @@ interface DirectorStore {
   setActionTime: (actionId: string, start: number, end: number) => void;
   updateAction: (actionId: string, patch: Partial<ActionClip>) => void;
   deleteAction: (actionId: string) => void;
+  // —— 自定义动作库（命名的关节姿势，随场景持久化、可被多片段复用）——
+  /** 新建或更新（传 id 即覆盖同名 / 改名）一条自定义动作，返回其 id。 */
+  saveCustomAction: (name: string, joints: Pose["joints"], id?: string) => string;
+  deleteCustomAction: (id: string) => void;
 
   setSegmentTime: (segmentId: string, start: number, end: number) => void;
   setConstraintTime: (constraintId: string, start: number, end: number) => void;
@@ -384,6 +400,7 @@ interface DirectorStore {
         | "panDeg"
         | "tiltDeg"
         | "truckDist"
+        | "style"
       >
     >,
   ) => void;
@@ -411,6 +428,17 @@ interface DirectorStore {
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 const round1 = (value: number) => Math.round(value * 10) / 10;
+
+function nextCustomActionId(state: DirectorState): string {
+  const list = state.customActions ?? [];
+  let index = list.length + 1;
+  let id = `POSE_${String(index).padStart(2, "0")}`;
+  while (list.some((p) => p.id === id)) {
+    index += 1;
+    id = `POSE_${String(index).padStart(2, "0")}`;
+  }
+  return id;
+}
 
 function nextActionId(state: DirectorState): string {
   let index = (state.actions?.length ?? 0) + 1;
@@ -517,6 +545,8 @@ function sanitizeState(s: DirectorState): DirectorState {
     segments,
     constraints: s.constraints.filter((c) => ids.has(c.subject) && ids.has(c.target)),
     handoffs: reconcileHandoffs(segments, s.handoffs),
+    // 引力场恒开：该开关不再对用户开放，任何来源的存档 / 导入都统一强制为 true。
+    groups: s.groups?.map((g) => (g.dynamics ? g : { ...g, dynamics: true })),
   };
 }
 
@@ -692,6 +722,9 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
       set({
         selectedKind: "camera",
         selectedId: cameraId,
+        // 选中相机即把它设为镜头视图当前相机：避免「Inspector 在改 A、camera view 却显示 B」
+        // 的脱节（两者曾是两个独立字段），否则改配置看起来像「不起作用」。
+        activeCameraId: cameraId,
         selectedPoint: null,
       }),
 
@@ -958,7 +991,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           name: `G${n}`,
           color: palette[(n - 1) % palette.length],
           members: [],
-          dynamics: false,
+          dynamics: true,
           formation: "column",
           spacing: 1.2,
           noise: 0.35,
@@ -1099,7 +1132,13 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           // 编队切换：记录切换时刻与上一阵型，供求解器按时间插值，避免瞬间变阵（不真实）。
           if (patch.formation !== undefined && patch.formation !== g.formation) {
             next.prevFormation = g.formation;
-            next.formationChangeAt = currentTime;
+            // 过渡按【场景时间】推进，所以只有时间真的在走（播放中）时才把过渡放在播放头之后；
+            // 暂停时场景时间不动，放在播放头之后就永远推不到头——点了切换却看不到任何变化
+            // （还会一直显示上一个阵型）。因此暂停时把整段过渡挪到播放头之前，
+            // 切完这一刻刚好走完：立刻看到新阵型，成片里依然是一段平滑变阵而非瞬移。
+            next.formationChangeAt = store.playing
+              ? currentTime
+              : currentTime - FORMATION_MORPH_SECONDS;
           }
           return next;
         });
@@ -1125,6 +1164,26 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
             objects: state.objects.map((object) =>
               memberSet.has(object.id)
                 ? { ...object, footprint: { ...object.footprint, ...patch } }
+                : object,
+            ),
+          },
+        };
+      }),
+
+    setGroupPose: (groupId, pose) =>
+      set((store) => {
+        const state = store.state;
+        const group = (state.groups ?? []).find((g) => g.id === groupId);
+        if (!group || group.members.length === 0) return {};
+        const memberSet = new Set(group.members);
+        return {
+          state: {
+            ...state,
+            revision: state.revision + 1,
+            // 每人持独立副本：共享同一份 joints 引用会被后续逐个改动互相串改。
+            objects: state.objects.map((object) =>
+              memberSet.has(object.id)
+                ? { ...object, pose: { joints: { ...pose.joints } } }
                 : object,
             ),
           },
@@ -1159,6 +1218,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
             ...sanitizeState(parsed),
             actions: parsed.actions ?? [],
             groups: parsed.groups ?? [],
+            customActions: parsed.customActions ?? [],
             revision: (parsed.revision ?? 0) + 1,
           },
           currentTime: 0,
@@ -2030,9 +2090,11 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
       set((store) => {
         const current = store.state;
         if (!Number.isFinite(seconds)) return {};
-        // 下限：不能小于已有内容的末尾，否则会把片段截掉（向上取整到 0.1s，便于输入）。
-        const min = Math.max(1, Math.ceil(rawContentEnd(current) * 10) / 10);
-        const duration = clamp(round1(seconds), min, 600);
+        // 下限只取 1s：Scene Duration 是「成片长度」，不是「内容长度」。
+        // 以前把它钳到内容末尾（rawContentEnd），于是只要还有片段排在后面就永远调不小，
+        // 表现就是「往小了设置不起作用」。调小只是让超出部分不参与播放 / 导出，
+        // 片段本身不会被删掉，把时长调回去它们就又回来了。
+        const duration = clamp(round1(seconds), 1, 600);
         if (duration === current.duration) return {};
         return {
           state: { ...current, revision: current.revision + 1, duration },
@@ -2051,7 +2113,6 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         timeStart: start,
         timeEnd: end,
         kind: "wave",
-        intensity: 1,
       };
       set({
         state: {
@@ -2091,6 +2152,41 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           ),
         },
       })),
+
+    saveCustomAction: (name, joints, id) => {
+      const store = get();
+      const list = store.state.customActions ?? [];
+      const trimmed = name.trim();
+      const targetId = id ?? nextCustomActionId(store.state);
+      const record = { id: targetId, name: trimmed, joints };
+      const next = list.some((p) => p.id === targetId)
+        ? list.map((p) => (p.id === targetId ? record : p))
+        : [...list, record];
+      set({
+        state: {
+          ...store.state,
+          revision: store.state.revision + 1,
+          customActions: next,
+        },
+      });
+      return targetId;
+    },
+
+    deleteCustomAction: (id) =>
+      set((store) => {
+        const list = store.state.customActions ?? [];
+        return {
+          state: {
+            ...store.state,
+            revision: store.state.revision + 1,
+            customActions: list.filter((p) => p.id !== id),
+            // 引用它的片段退回标准站姿，避免出现悬空 customId。
+            actions: (store.state.actions ?? []).map((a) =>
+              a.customId === id ? { ...a, kind: "stand" as ActionKind, customId: undefined } : a,
+            ),
+          },
+        };
+      }),
 
     deleteAction: (actionId) =>
       set((store) => ({
@@ -2215,7 +2311,6 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           timeStart: start,
           timeEnd: end,
           kind: "wave",
-          intensity: 1,
         };
         set({
           state: {
@@ -2223,9 +2318,11 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
             revision: state.revision + 1,
             actions: [...(state.actions ?? []), clip],
           },
-          selectedKind: "object",
-          selectedId: objectId,
+          // 互斥选择：新建动作片段后只选中该片段（时间轴轴），清掉对象选中（对象轴）。
+          // 否则同一次 set 同时设了两轴，订阅里的互斥清理会把刚建的片段又清掉。
           selectedItem: clip.id,
+          selectedKind: undefined,
+          selectedId: "",
           radialObjectId: null,
         });
         return;
@@ -2258,4 +2355,23 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
       });
     },
   };
+});
+
+// —— 互斥选择（对象 / 相机 轴 与 时间轴片段 轴 永远只有一个有效选中）——
+// 任一轴被「设成有效选中」时，清空另一轴，避免 Inspector 同时承载两个不同域的选中物
+// （如「路中石墩」与「SEG_02」被拼进同一行、误导为同一个选中物）。
+// 用订阅统一兜底：所有设置选中态的入口（selectObject / selectItem / 径向菜单 / 导入 等）都自动互斥，
+// 不必在每个调用点手动清另轴。订阅内再触发一次 setState 会被上面的分支守卫挡住，不会死循环。
+useDirectorStore.subscribe((state, prev) => {
+  const idChanged = state.selectedId !== prev.selectedId;
+  const itemChanged = state.selectedItem !== prev.selectedItem;
+  if (idChanged && state.selectedId) {
+    // 对象 / 相机 被新选中 → 清时间轴选中。
+    if (state.selectedItem) useDirectorStore.setState({ selectedItem: null, selectedPoint: null });
+  } else if (itemChanged && state.selectedItem) {
+    // 时间轴片段被新选中 → 清对象 / 相机选中。
+    if (state.selectedId || state.selectedKind) {
+      useDirectorStore.setState({ selectedKind: undefined, selectedId: "" });
+    }
+  }
 });

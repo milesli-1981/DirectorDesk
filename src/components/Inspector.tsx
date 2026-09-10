@@ -1,24 +1,24 @@
 import { useMemo, useState } from "react";
 import { useDirectorStore } from "../state/directorStore";
 import {
-  ASPECT_OPTIONS,
-  AspectRatio,
   CameraFraming,
   CameraMotionType,
   CameraSide,
+  CameraStyle,
   CameraView,
   EaseCurve,
   Footprint,
   FormationKind,
   FORMATION_LABELS,
   HandoffMode,
-  JointName,
   Pose,
   ActionKind,
   FRAMING_LABELS,
   LENS_OPTIONS,
   MOTION_HINTS,
   MOTION_LABELS,
+  STYLE_HINTS,
+  STYLE_LABELS,
   objectDisplayName,
   OtsSide,
   OTS_SIDE_LABELS,
@@ -42,6 +42,10 @@ const ACTION_KINDS: ActionKind[] = [
   "walk",
   "run",
 ];
+/** Kind 下拉里自定义动作的取值前缀：下拉值拼接成 `custom:<id>`，便于与内置 kind 区分。 */
+const CUSTOM_PREFIX = "custom:";
+/** 「＋ 自定义…」哨兵值：选中它不是取值，而是打开编辑弹窗。 */
+const NEW_CUSTOM = "__new_custom__";
 // 对象面板只展示静态基线姿势；步态类（walk/run）没有静态关节角度，只在动作片段里选。
 const STATIC_POSE_NAMES = POSE_PRESET_NAMES.filter((name) => name !== "walk" && name !== "run");
 
@@ -56,20 +60,6 @@ const MOTION_TYPES: CameraMotionType[] = [
   "OTS",
 ];
 
-/** 可在 Inspector 微调的关节（其余如 root 不暴露）。 */
-const POSE_SLIDER_JOINTS: { joint: JointName; label: string }[] = [
-  { joint: "hipL", label: "Hip L" },
-  { joint: "hipR", label: "Hip R" },
-  { joint: "kneeL", label: "Knee L" },
-  { joint: "kneeR", label: "Knee R" },
-  { joint: "shoulderL", label: "Shoulder L" },
-  { joint: "shoulderR", label: "Shoulder R" },
-  { joint: "elbowL", label: "Elbow L" },
-  { joint: "elbowR", label: "Elbow R" },
-  { joint: "spine", label: "Spine" },
-  { joint: "neck", label: "Neck" },
-];
-
 const poseEquals = (pose: Pose | undefined, preset: Pose) =>
   JSON.stringify(pose?.joints ?? {}) === JSON.stringify(preset.joints);
 
@@ -79,6 +69,120 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <span>{label}</span>
       {children}
     </label>
+  );
+}
+
+/**
+ * 与 Field 同一套栅格外观，但用 div 承载：内部是按钮 / 自定义控件时用这个。
+ * 若仍用 <label>，点击行标签文字会把点击派发给行内第一个可标注控件（按钮），
+ * 造成「点一下『人数』就减员」这类误触发。
+ */
+function Row({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="inspector-row">
+      <span>{label}</span>
+      {children}
+    </div>
+  );
+}
+
+/** 数值步进器：−  数值  ＋，用于「人数」这类小整数。外观沿用 ghost-button。 */
+function Stepper({
+  value,
+  min,
+  max,
+  onChange,
+  stepDownTitle,
+  stepUpTitle,
+}: {
+  value: number;
+  min: number;
+  max: number;
+  onChange: (v: number) => void;
+  stepDownTitle: string;
+  stepUpTitle: string;
+}) {
+  return (
+    <div className="stepper">
+      <button
+        type="button"
+        className="ghost-button"
+        disabled={value <= min}
+        title={stepDownTitle}
+        onClick={() => onChange(value - 1)}
+      >
+        −
+      </button>
+      <span className="stepper-num">{value}</span>
+      <button
+        type="button"
+        className="ghost-button"
+        disabled={value >= max}
+        title={stepUpTitle}
+        onClick={() => onChange(value + 1)}
+      >
+        ＋
+      </button>
+    </div>
+  );
+}
+
+/**
+ * 宽 / 深 / 高 单行控件：固定量程滑杆 + 可直接输入的数字框。
+ * 量程由调用方固定给定，不再随当前值自适应——否则拖动时刻度会翻倍、数值跳变。
+ * 需要精确值（如 1.8m）时直接在右侧数字框输入，失焦或回车生效并夹到合法区间。
+ */
+function DimRow({
+  label,
+  title,
+  value,
+  min,
+  max,
+  onChange,
+}: {
+  label: string;
+  title: string;
+  value: number;
+  min: number;
+  max: number;
+  onChange: (v: number) => void;
+}) {
+  // 编辑期间用本地文本接管，避免每敲一个字符就被 clamp / 格式化打断输入。
+  const [draft, setDraft] = useState<string | null>(null);
+  const commit = (raw: string) => {
+    const n = Number(raw);
+    if (Number.isFinite(n)) onChange(Math.min(max, Math.max(min, n)));
+    setDraft(null);
+  };
+  return (
+    <div className="dim-row" title={title}>
+      <span className="dim-label">{label}</span>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={0.1}
+        value={value}
+        onChange={(event) => {
+          setDraft(null);
+          onChange(Number(event.target.value));
+        }}
+      />
+      <input
+        className="dim-num"
+        type="number"
+        min={min}
+        max={max}
+        step={0.1}
+        value={draft ?? value.toFixed(1)}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={(event) => commit(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") event.currentTarget.blur();
+          if (event.key === "Escape") setDraft(null);
+        }}
+      />
+    </div>
   );
 }
 
@@ -124,7 +228,6 @@ export function Inspector() {
   const removeCamera = useDirectorStore((s) => s.removeCamera);
   const setSegmentEase = useDirectorStore((s) => s.setSegmentEase);
   const setCameraMoveEase = useDirectorStore((s) => s.setCameraMoveEase);
-  const setAspectRatio = useDirectorStore((s) => s.setAspectRatio);
   const setHandoffMode = useDirectorStore((s) => s.setHandoffMode);
   const setCameraJunctionMode = useDirectorStore((s) => s.setCameraJunctionMode);
   const deleteSegment = useDirectorStore((s) => s.deleteSegment);
@@ -133,7 +236,8 @@ export function Inspector() {
   const updateGroup = useDirectorStore((s) => s.updateGroup);
   const setGroupCount = useDirectorStore((s) => s.setGroupCount);
   const setGroupFootprint = useDirectorStore((s) => s.setGroupFootprint);
-  const setCameraGroup = useDirectorStore((s) => s.setCameraGroup);
+  const setGroupPose = useDirectorStore((s) => s.setGroupPose);
+
   const renameGroup = useDirectorStore((s) => s.renameGroup);
   const removeGroup = useDirectorStore((s) => s.removeGroup);
 
@@ -141,12 +245,19 @@ export function Inspector() {
   const camera = selectedKind === "camera" ? state.cameras.find((c) => c.id === selectedId) : undefined;
   // 组是对象的一类：选中某个组成员（如团队队首）时，按成员关系找到其所属组，配置在下方展示。
   const group = object ? (state.groups ?? []).find((g) => g.members.includes(object.id)) : undefined;
-  // 未选中任何对象 / 相机时，整个 Inspector（标题、占位 “—”、Selected Timeline Item）都不显示。
-  const showInspector = !!(object || camera);
+  // 真正接管位置的「团队」：只有它才把整队作为唯一编辑单位。
+  // 纯取景分组（dynamics=false）不接管成员位置，成员仍是独立资产，要保留单资产入口。
+  const team = group && group.dynamics && group.members.length >= 2 ? group : undefined;
+  // 未选中任何对象 / 相机时，整个 Inspector（标题、占位 "—"）都不显示。
+  // 注：下方时间轴片段选中态会重新放开 showInspector。
   // 组 Block 尺寸：以锚点（members[0]）的 footprint 为代表，改动时统一写回所有成员。
   const groupFootprint = group
     ? state.objects.find((o) => o.id === group.members[0])?.footprint ?? { w: 1, d: 1, h: 1 }
     : undefined;
+  // 组静态基线姿势：与 Block 尺寸同理，以锚点（members[0]）为代表展示，改动统一写回所有成员。
+  const groupAnchor = group ? state.objects.find((o) => o.id === group.members[0]) : undefined;
+  const groupPose = groupAnchor?.pose;
+  const groupIsHuman = groupAnchor?.category === "human";
   const segment = state.segments.find((item) => item.id === selectedItem);
   const constraint = state.constraints.find((item) => item.id === selectedItem);
   const move = state.cameraMoves.find((item) => item.id === selectedItem);
@@ -157,9 +268,20 @@ export function Inspector() {
   const cameraOts = !!camera && (camera.motion === "OTS" || !!camera.shoulderId);
   const moveOts = !!move && (move.type === "OTS" || !!move.shoulderId);
   const action = state.actions?.find((item) => item.id === selectedItem);
+  // 互斥选择下，时间轴片段（segment / move / constraint / action）也是合法的 Inspector 主体，
+  // 选中它们时对象轴已清空，故这里也要放行，否则片段编辑 UI（ease / handoff / joints 等）打不开。
+  const showInspector = !!(object || camera || segment || constraint || move || action);
+  // 当前片段引用的自定义动作：kind === "custom" 时按 customId 到库里查（悬空则为 undefined）。
+  const customAction =
+    action && action.kind === "custom"
+      ? (state.customActions ?? []).find((item) => item.id === action.customId)
+      : undefined;
   const actionObject = action ? state.objects.find((o) => o.id === action.object) : undefined;
   const updateAction = useDirectorStore((s) => s.updateAction);
   const deleteAction = useDirectorStore((s) => s.deleteAction);
+  const saveCustomAction = useDirectorStore((s) => s.saveCustomAction);
+  // 自定义动作库（命名的关节姿势）：selector 直接取原始引用，避免每次返回新数组触发重渲染。
+  const customActions = useDirectorStore((s) => s.state.customActions) ?? [];
   // 该相机上被 CameraMove 写死的段级覆盖：相机级同名属性在那些时间段内不生效。
   const overriddenByMoves = camera
     ? (["framing", "view", "side", "lensMm", "roll", "shoulderId", "otsOffset"] as const).filter((key) =>
@@ -198,9 +320,10 @@ export function Inspector() {
       state.handoffs.find((h) => h.nextSeg === segment.id)
     : undefined;
 
-  const json = useMemo(() => JSON.stringify(state, null, 2), [state]);
-  const [showJson, setShowJson] = useState(false);
-  const [customizeOpen, setCustomizeOpen] = useState(false);
+  // 自定义动作弹窗：新建（空）/ 编辑（带已有记录）。由 Kind 下拉的「自定义」选项驱动。
+  const [customize, setCustomize] = useState<{ mode: "create" } | { mode: "edit"; id: string } | null>(
+    null,
+  );
 
   const pointCount = segment ? segment.points.length : 0;
   const selectedPointShape = segment?.points.find((point) => point.id === selectedPoint)?.shape;
@@ -230,252 +353,231 @@ export function Inspector() {
       ? `👥 ${group.name}`
       : object
         ? objectDisplayName(object)
-        : "—";
+        : segment
+          ? segment.id
+          : constraint
+            ? constraint.id
+            : move
+              ? move.id
+              : action
+                ? action.id
+                : "—";
 
   return (
     <aside className="right">
-      {/* 场景级设置：始终显示，不依赖是否选中对象 */}
-      <div className="field">
-        <div className="lab">Master Aspect Ratio</div>
-        <select
-          value={state.aspectRatio}
-          onChange={(event) => setAspectRatio(event.target.value as AspectRatio)}
-        >
-          {ASPECT_OPTIONS.map((option) => (
-            <option key={option.label} value={option.label}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-      </div>
-
       {showInspector ? (
         <>
-          <div className="st">INSPECTOR</div>
-          <div className="title">{title}</div>
+          <div className="insp-head">
+            <span className="insp-eyebrow">INSPECTOR</span>
+            <span className="title">{title}</span>
+            <span id="itemInfo" className="item-info">
+              {segment
+                ? `${pointCount} path point${pointCount === 1 ? "" : "s"}${selectedPointShape ? ` · ${selectedPointShape}` : ""}`
+                : ""}
+            </span>
+          </div>
           {camera && <div className="sub">Camera Intent</div>}
           {group && <div className="sub">Group Dynamics（对象 / 团队）</div>}
-
-          <div className="field">
-            <div className="lab">Selected Timeline Item</div>
-        <div id="itemInfo">
-          {selectedItem ?? "—"}
-          {segment ? ` · ${pointCount} path point${pointCount === 1 ? "" : "s"}` : ""}
-          {selectedPointShape ? ` · ${selectedPointShape}` : ""}
-        </div>
-      </div>
+          {segment && <div className="sub">Camera Path</div>}
+          {move && <div className="sub">Camera Move</div>}
+          {constraint && <div className="sub">Constraint</div>}
+          {action && <div className="sub">Action</div>}
 
       {group ? (
         <div className="field">
           <div className="lab">Group — {group.members.length} 人</div>
-          <div className="row2">
-            <label>名称</label>
-            <input
-              type="text"
-              value={group.name}
-              onChange={(event) => renameGroup(group.id, event.target.value)}
-            />
-          </div>
-          <div className="row2">
-            <label>人数</label>
-            <div className="grp-count" style={{ border: "none", padding: 0 }}>
-              <button
-                type="button"
-                className="grp-btn"
-                disabled={group.members.length <= 1}
-                title="减少一名尾随队员"
-                onClick={() => setGroupCount(group.id, group.members.length - 1)}
-              >
-                −
-              </button>
-              <span className="grp-count-num">{group.members.length}</span>
-              <button
-                type="button"
-                className="grp-btn"
-                disabled={group.members.length >= 24}
-                title="增加一名尾随队员"
-                onClick={() => setGroupCount(group.id, group.members.length + 1)}
-              >
-                ＋
-              </button>
-            </div>
-          </div>
-          {groupFootprint && (
-            <div className="grp-block">
-              <div className="lab">Block 尺寸（全体队员统一）</div>
-              <div className="grp-slider">
-                <span>宽 W {groupFootprint.w.toFixed(1)}</span>
-                <input
-                  type="range"
-                  min={0.4}
-                  max={5}
-                  step={0.1}
-                  value={groupFootprint.w}
-                  onChange={(event) => setGroupFootprint(group.id, { w: Number(event.target.value) })}
-                />
-              </div>
-              <div className="grp-slider">
-                <span>深 D {groupFootprint.d.toFixed(1)}</span>
-                <input
-                  type="range"
-                  min={0.4}
-                  max={5}
-                  step={0.1}
-                  value={groupFootprint.d}
-                  onChange={(event) => setGroupFootprint(group.id, { d: Number(event.target.value) })}
-                />
-              </div>
-              <div className="grp-slider">
-                <span>高 H {groupFootprint.h.toFixed(1)}</span>
-                <input
-                  type="range"
-                  min={0.4}
-                  max={5}
-                  step={0.1}
-                  value={groupFootprint.h}
-                  onChange={(event) => setGroupFootprint(group.id, { h: Number(event.target.value) })}
-                />
-              </div>
-            </div>
-          )}
-          <button
-            type="button"
-            className="grp-btn wide"
-            disabled={!activeCameraId}
-            title={activeCameraId ? `让 ${activeCameraId} 以 GROUP 取景本组` : "先选中一台相机"}
-            onClick={() => activeCameraId && setCameraGroup(activeCameraId, group.id)}
+          <SubGroup title="团队 Team">
+            <Field label="名称">
+              <input
+                type="text"
+                value={group.name}
+                onChange={(event) => renameGroup(group.id, event.target.value)}
+              />
+            </Field>
+            <Row label="人数">
+              <Stepper
+                value={group.members.length}
+                min={1}
+                max={24}
+                stepDownTitle="减少一名尾随队员"
+                stepUpTitle="增加一名尾随队员"
+                onChange={(v) => setGroupCount(group.id, v)}
+              />
+            </Row>
+          </SubGroup>
+          <SubGroup
+            title="编队 Formation"
+            hint="⚓ 首位成员是锚点：它的路径就是整队的唯一路线，其余队员按编队跟随。匀速时保持编队，加速 / 减速 / 变线时出现弹簧拉扯后复原。"
           >
-            相机取景（{activeCameraId ?? "未选相机"}）
-          </button>
-          <label className="grp-toggle">
-            <input
-              type="checkbox"
-              checked={group.dynamics}
-              onChange={(event) => updateGroup(group.id, { dynamics: event.target.checked })}
-            />
-            引力场
-          </label>
-          <div className="grp-slider">
-            <span>编队</span>
-            <select
-              className="grp-select"
-              value={group.formation ?? "column"}
-              onChange={(event) => updateGroup(group.id, { formation: event.target.value as FormationKind })}
-            >
-              {(Object.keys(FORMATION_LABELS) as FormationKind[]).map((kind) => (
-                <option key={kind} value={kind}>
-                  {FORMATION_LABELS[kind]}
-                </option>
+            <Field label="编队">
+              <select
+                value={group.formation ?? "column"}
+                onChange={(event) => updateGroup(group.id, { formation: event.target.value as FormationKind })}
+              >
+                {(Object.keys(FORMATION_LABELS) as FormationKind[]).map((kind) => (
+                  <option key={kind} value={kind}>
+                    {FORMATION_LABELS[kind]}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label={`间距 ${(group.spacing ?? 1.2).toFixed(1)}m`}>
+              <input
+                type="range"
+                min={0.4}
+                max={4}
+                step={0.1}
+                value={group.spacing ?? 1.2}
+                onChange={(event) => updateGroup(group.id, { spacing: Number(event.target.value) })}
+              />
+            </Field>
+            <Field label={`微扰 ${(group.noise ?? 0.35).toFixed(2)}`}>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={group.noise ?? 0.35}
+                onChange={(event) => updateGroup(group.id, { noise: Number(event.target.value) })}
+              />
+            </Field>
+          </SubGroup>
+          {groupFootprint && (
+            <SubGroup title="Block 尺寸（m）" hint="全体队员统一。">
+              {(
+                [
+                  { key: "w", label: "W", title: "Width 宽" },
+                  { key: "d", label: "D", title: "Depth 深" },
+                  { key: "h", label: "H", title: "Height 高" },
+                ] as const
+              ).map((dim) => (
+                <DimRow
+                  key={dim.key}
+                  label={dim.label}
+                  title={dim.title}
+                  value={groupFootprint[dim.key]}
+                  min={0.4}
+                  max={5}
+                  onChange={(v) =>
+                    setGroupFootprint(
+                      group.id,
+                      dim.key === "w" ? { w: v } : dim.key === "d" ? { d: v } : { h: v },
+                    )
+                  }
+                />
               ))}
-            </select>
+            </SubGroup>
+          )}
+          {groupIsHuman && (
+            <SubGroup title="Pose（全体队员统一）">
+              <div className="mini-btns">
+                {STATIC_POSE_NAMES.map((name) => (
+                  <button
+                    key={name}
+                    type="button"
+                    className={`ghost-button ${poseEquals(groupPose, POSE_PRESETS[name]) ? "on" : ""}`}
+                    onClick={() => setGroupPose(group.id, clonePose(POSE_PRESETS[name]))}
+                  >
+                    {name}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={() => setGroupPose(group.id, { joints: {} })}
+                >
+                  reset
+                </button>
+              </div>
+            </SubGroup>
+          )}
+          <div className="mini-btns">
+            <button
+              type="button"
+              className="ghost-button danger-button"
+              title="删除组"
+              onClick={() => removeGroup(group.id)}
+            >
+              删除组
+            </button>
           </div>
-          <div className="grp-slider">
-            <span>间距 {(group.spacing ?? 1.2).toFixed(1)}m</span>
-            <input
-              type="range"
-              min={0.4}
-              max={4}
-              step={0.1}
-              value={group.spacing ?? 1.2}
-              onChange={(event) => updateGroup(group.id, { spacing: Number(event.target.value) })}
-            />
-          </div>
-          <div className="grp-slider">
-            <span>微扰 {(group.noise ?? 0.35).toFixed(2)}</span>
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.05}
-              value={group.noise ?? 0.35}
-              onChange={(event) => updateGroup(group.id, { noise: Number(event.target.value) })}
-            />
-          </div>
-          <p className="hint">
-            ⚓ 首位成员是<b>锚点</b>：它的路径就是整队的唯一路线，其余队员按编队跟随。
-            匀速时保持编队，加速 / 减速 / 变线时出现弹簧拉扯后复原。
-          </p>
-          <button type="button" className="obj-del wide" title="删除组" onClick={() => removeGroup(group.id)}>
-            删除组
-          </button>
         </div>
       ) : null}
 
-      {object ? (
+      {/* 属于某个团队时不再显示「单个资产」面板：整队是唯一的编辑单位，配置都在上方
+          Group Dynamics 里；两套面板并存会出现互相打架的入口（尺寸 / Pose 都重复）。 */}
+      {object && !team ? (
         <div className="field">
           <div className="lab">Asset — {object.category}</div>
-          <div className="row2">
-            <label>Role</label>
-            <select
-              value={object.role}
-              onChange={(event) => updateAsset(object.id, { role: event.target.value as "agent" | "set" })}
-            >
-              <option value="agent">agent（可运动 / 可作目标）</option>
-              <option value="set">set（环境 / 遮挡体）</option>
-            </select>
-          </div>
-          <div className="row2">
-            <label>Rotation</label>
-            <input
-              type="range"
-              min={0}
-              max={360}
-              step={5}
-              value={object.rotation}
-              onChange={(event) => updateAsset(object.id, { rotation: Number(event.target.value) })}
-            />
-            <span className="val">{object.rotation}°</span>
-          </div>
-          {/* W / D / H 三个滑杆：尺寸是连续量，拖动比输数字更快也更直观。 */}
-          <div className="block-size">
-            <div className="block-size-title">Block 尺寸</div>
+          <SubGroup title="资产 Asset">
+            <Field label="Role">
+              <select
+                value={object.role}
+                onChange={(event) => updateAsset(object.id, { role: event.target.value as "agent" | "set" })}
+              >
+                <option value="agent">agent（可运动 / 可作目标）</option>
+                <option value="set">set（环境 / 遮挡体）</option>
+              </select>
+            </Field>
+            {/* Rotation 只对环境（set）有意义：agent / human 的朝向由运动方向或 LOOK_AT 决定，
+                组成员更是由整队大方向统一给出，单独设它会被求解器覆盖，故不再提供。 */}
+            {object.role === "set" ? (
+              <Field label={`Rotation ${object.rotation}°`}>
+                <input
+                  type="range"
+                  min={0}
+                  max={360}
+                  step={5}
+                  value={object.rotation}
+                  onChange={(event) => updateAsset(object.id, { rotation: Number(event.target.value) })}
+                />
+              </Field>
+            ) : null}
+            <Row label="Lock">
+              <LockBadge
+                locked={!!object.locked}
+                title={
+                  object.locked
+                    ? "已锁定初始位置：编辑时不可拖拽（点此解锁）；播放时仍按轨迹移动"
+                    : "锁定初始位置：编辑时不可拖拽，播放时仍按轨迹移动"
+                }
+                onClick={() => updateAsset(object.id, { locked: !object.locked })}
+              />
+            </Row>
+          </SubGroup>
+          {/* W / D / H：固定量程滑杆（0.1–24m）+ 数字框。
+              量程不再随当前值自适应，否则拖动时刻度翻倍会导致数值跳变；精确值直接输入。 */}
+          <SubGroup
+            title="Block 尺寸（m）"
+            hint="固定量程滑杆（0.1–24m）+ 数字框：需要精确值时直接在右侧数字框输入。"
+          >
             {(
               [
                 { key: "w", label: "W", title: "Width 宽" },
                 { key: "d", label: "D", title: "Depth 深" },
                 { key: "h", label: "H", title: "Height 高" },
               ] as const
-            ).map((dim) => {
-              const value = object.footprint[dim.key];
-              // 滑杆上限随当前值自适应：小到 0.6m 的人物、大到 24m 的楼体都能在一屏内精确拖动。
-              const max = Math.max(2, Math.ceil(value) * 2);
-              return (
-                <div className="size-slider" key={dim.key}>
-                  <span className="val" title={dim.title}>
-                    {dim.label}
-                  </span>
-                  <input
-                    type="range"
-                    min={0.1}
-                    max={max}
-                    step={0.1}
-                    value={value}
-                    onChange={(event) =>
-                      updateAsset(object.id, {
-                        footprint: { ...object.footprint, [dim.key]: Number(event.target.value) },
-                      })
-                    }
-                  />
-                  <span className="sz">{value.toFixed(1)}</span>
-                </div>
-              );
-            })}
-          </div>
-          <div className="row2">
-            <label>Lock</label>
-            <LockBadge
-              locked={!!object.locked}
-              title={
-                object.locked
-                  ? "已锁定初始位置：编辑时不可拖拽（点此解锁）；播放时仍按轨迹移动"
-                  : "锁定初始位置：编辑时不可拖拽，播放时仍按轨迹移动"
-              }
-              onClick={() => updateAsset(object.id, { locked: !object.locked })}
-            />
-          </div>
+            ).map((dim) => (
+              <DimRow
+                key={dim.key}
+                label={dim.label}
+                title={dim.title}
+                value={object.footprint[dim.key]}
+                min={0.1}
+                max={24}
+                onChange={(v) =>
+                  updateAsset(object.id, {
+                    footprint: { ...object.footprint, [dim.key]: v },
+                  })
+                }
+              />
+            ))}
+          </SubGroup>
           {object.category === "human" ? (
-            <div className="field">
-              <div className="lab">Pose（静态基线姿势）</div>
+            <SubGroup
+              title="Pose（静态基线姿势）"
+              hint="这里只设人物的静态基线姿势；关节微调请在选中某个动作片段后，于「Action」面板的 Joints 区调整。"
+            >
               <div className="mini-btns">
                 {STATIC_POSE_NAMES.map((name) => (
                   <button
@@ -495,8 +597,7 @@ export function Inspector() {
                   reset
                 </button>
               </div>
-              <p className="hint">这里只设人物的静态基线姿势；关节微调请在选中某个动作片段后，于「Action」面板的 Joints 区调整。</p>
-            </div>
+            </SubGroup>
           ) : null}
           <p className="hint">锁定后不可通过拖拽移动位置（防误触），仍可点选以便解锁；agent = 可运动、可作相机目标，set = 环境遮挡体与路径障碍</p>
         </div>
@@ -537,34 +638,63 @@ export function Inspector() {
           <div className="lab">Action（动作片段）</div>
           <Field label="Kind">
             <select
-              value={action.kind}
-              onChange={(event) => updateAction(action.id, { kind: event.target.value as ActionKind })}
+              // 选「＋ 自定义…」只是开弹窗、并不真的改 kind。弹窗开关时换 key 让下拉重挂载，
+              // 否则它会停在哨兵项上、显示的与真实 kind 不一致（尤其取消之后）。
+              key={
+                customize
+                  ? "customizing"
+                  : action.kind === "custom"
+                    ? `custom:${action.customId ?? ""}`
+                    : action.kind
+              }
+              value={action.kind === "custom" ? `custom:${action.customId ?? ""}` : action.kind}
+              onChange={(event) => {
+                const value = event.target.value;
+                // 「＋ 自定义…」：不当作取值，而是打开弹窗编辑并命名保存。
+                if (value === NEW_CUSTOM) {
+                  setCustomize({ mode: "create" });
+                  return;
+                }
+                if (value.startsWith(CUSTOM_PREFIX)) {
+                  updateAction(action.id, {
+                    kind: "custom",
+                    customId: value.slice(CUSTOM_PREFIX.length) || undefined,
+                  });
+                  return;
+                }
+                updateAction(action.id, { kind: value as ActionKind, customId: undefined });
+              }}
             >
               {ACTION_KINDS.map((kind) => (
                 <option key={kind} value={kind}>
                   {kind}
                 </option>
               ))}
+              {customActions.map((preset) => (
+                <option key={preset.id} value={`${CUSTOM_PREFIX}${preset.id}`}>
+                  {preset.name}
+                </option>
+              ))}
+              <option value={NEW_CUSTOM}>＋ 自定义…</option>
             </select>
           </Field>
-          <div className="row2">
-            <label>Intensity</label>
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.05}
-              value={action.intensity}
-              onChange={(event) => updateAction(action.id, { intensity: Number(event.target.value) })}
-            />
-            <span className="val">{Math.round(action.intensity * 100)}%</span>
-          </div>
-          <div className="row2">
-            <label>Time</label>
+          {action.kind === "custom" && customAction ? (
+            <Row label="自定义">
+              <button
+                type="button"
+                className="ghost-button"
+                title="重新编辑这条自定义动作的关节角"
+                onClick={() => setCustomize({ mode: "edit", id: customAction.id })}
+              >
+                编辑「{customAction.name}」
+              </button>
+            </Row>
+          ) : null}
+          <Row label="Time">
             <span className="val">
               {action.timeStart}s – {action.timeEnd}s
             </span>
-          </div>
+          </Row>
           <div className="mini-btns">
             <button
               type="button"
@@ -574,47 +704,39 @@ export function Inspector() {
               Delete Action
             </button>
           </div>
-          <div className="lab">
-            Joints（关节微调 · 覆盖本片段预设）
-            <button type="button" className="ghost-button" onClick={() => setCustomizeOpen(true)}>
-              Customize
-            </button>
-          </div>
-          {POSE_SLIDER_JOINTS.map(({ joint, label }) => {
-            const angle = action.pose?.joints[joint]?.[0] ?? 0;
-            return (
-              <div className="row2" key={joint}>
-                <label>{label}</label>
-                <input
-                  type="range"
-                  min={-Math.PI}
-                  max={Math.PI}
-                  step={0.05}
-                  value={angle}
-                  onChange={(event) => {
-                    const v = Number(event.target.value);
-                    const joints = { ...(action.pose?.joints ?? {}) };
-                    if (v === 0) delete joints[joint];
-                    else joints[joint] = [v, 0, 0];
-                    updateAction(action.id, { pose: { joints } });
-                  }}
-                />
-                <span className="val">{Math.round((angle * 180) / Math.PI)}°</span>
-              </div>
-            );
-          })}
-
-          {customizeOpen && action && (
+          {/* 自定义动作统一走 Kind 下拉：选「＋ 自定义…」在弹窗里编辑 → 命名 → 入库持久化。
+              不再把关节编辑区直接铺在面板里（避免与库的版本脱节、也避免产生无名脏数据）。 */}
+          {customize && action ? (
             <PoseCustomizeModal
-              joints={action.pose?.joints ?? {}}
-              onChange={(joints) => updateAction(action.id, { pose: { joints } })}
-              onClose={() => setCustomizeOpen(false)}
+              mode={customize.mode}
+              joints={
+                customize.mode === "edit"
+                  ? customActions.find((item) => item.id === customize.id)?.joints ?? {}
+                  : {}
+              }
+              initialName={
+                customize.mode === "edit"
+                  ? customActions.find((item) => item.id === customize.id)?.name ?? ""
+                  : ""
+              }
+              onSave={(name, joints) => {
+                const id = saveCustomAction(
+                  name,
+                  joints,
+                  customize.mode === "edit" ? customize.id : undefined,
+                );
+                updateAction(action.id, { kind: "custom", customId: id, pose: undefined });
+                setCustomize(null);
+              }}
+              onClose={() => setCustomize(null)}
             />
-          )}
+          ) : null}
 
           <p className="hint">
             MOVE 决定「去哪里」，动作只决定「身体怎么动」：walk / run 选择步态（不选时按速度自动判定，低速走、高速跑），
             sit / crouch 会停止腿部摆动。在时间轴该演员的「动作」行点 ＋A 新增片段，拖动 clip 改时间、拖边缘修剪时长。
+            需要自创姿势时在 Kind 里选「＋ 自定义…」：在弹窗中调关节角 → 命名 → 保存进**自定义动作库**（随场景持久化），
+            之后任意演员都能按名称直接复用，改库即改所有引用它的片段。
           </p>
         </div>
       ) : null}
@@ -868,6 +990,34 @@ export function Inspector() {
                   ))}
                 </select>
               </Field>
+              {camera.kind === "drone" ? (
+                <>
+                  <Field label="Style 稳定方式">
+                    <select value="drone" disabled>
+                      <option value="drone">Drone 增稳（云台）</option>
+                    </select>
+                  </Field>
+                  <p className="hint">无人机机位自带云台增稳，风格固定为「Drone 增稳」，无需选择。</p>
+                </>
+              ) : (
+                <>
+                  <Field label="Style 稳定方式">
+                    <select
+                      value={camera.style ?? "locked"}
+                      onChange={(event) =>
+                        updateCamera(camera.id, { style: event.target.value as CameraStyle })
+                      }
+                    >
+                      {(["locked", "gimbal", "handheld", "vlog"] as CameraStyle[]).map((value) => (
+                        <option key={value} value={value}>
+                          {STYLE_LABELS[value]}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <p className="hint">{STYLE_HINTS[camera.style ?? "locked"]}</p>
+                </>
+              )}
             </SubGroup>
           </div>
 
@@ -1111,6 +1261,21 @@ export function Inspector() {
           ) : null}
 
           <SubGroup title="风格 Style">
+            <Field label="Style 稳定方式（覆盖）">
+              <select
+                value={moveCamera?.kind === "drone" ? "locked" : move.style ?? "locked"}
+                disabled={moveCamera?.kind === "drone"}
+                onChange={(event) =>
+                  patchCameraMove(move.id, { style: event.target.value as CameraStyle })
+                }
+              >
+                {(["locked", "gimbal", "handheld", "vlog"] as CameraStyle[]).map((value) => (
+                  <option key={value} value={value}>
+                    {STYLE_LABELS[value]}
+                  </option>
+                ))}
+              </select>
+            </Field>
             <Field label={`Roll ${move.roll ?? 0}°（荷兰角）`}>
               <input
                 type="range"
@@ -1129,10 +1294,10 @@ export function Inspector() {
             );
             if (!junction) return null;
             return (
-              <div className="field" style={{ marginTop: 8 }}>
-                <div className="lab">
-                  Move Junction → {junction.prevMove === move.id ? "next" : "prev"} ({junction.id})
-                </div>
+              <SubGroup
+                title={`Move Junction → ${junction.prevMove === move.id ? "next" : "prev"} (${junction.id})`}
+                hint="stop = pause then go · smooth = continuous（一镜到底） · cut = allow jump"
+              >
                 <div className="mini-btns">
                   {(["stop", "smooth", "cut"] as HandoffMode[]).map((mode) => (
                     <button
@@ -1145,8 +1310,7 @@ export function Inspector() {
                     </button>
                   ))}
                 </div>
-                <p className="hint">stop = pause then go · smooth = continuous (一镜到底) · cut = allow jump</p>
-              </div>
+              </SubGroup>
             );
           })()}
 
@@ -1167,16 +1331,6 @@ export function Inspector() {
           </div>
         </div>
       ) : null}
-
-      <div className="field">
-        <div className="lab">
-          Director State JSON
-          <button type="button" className="ghost-button" onClick={() => setShowJson((v) => !v)}>
-            {showJson ? "Hide" : "Show"}
-          </button>
-        </div>
-        {showJson && <pre id="state">{json}</pre>}
-      </div>
 
       <div className="field">
         <div className="hint">

@@ -1,0 +1,103 @@
+{
+  "manifest": {
+    "name": "编队分流片场",
+    "order": [
+      {
+        "id": "SCN_SPLIT",
+        "name": "编队分流绕障"
+      }
+    ],
+    "activeSceneId": "SCN_SPLIT"
+  },
+  "scenes": {
+    "SCN_SPLIT": {
+      "revision": 1,
+      "duration": 12,
+      "aspectRatio": "16:9",
+      "objects": [
+        {
+          "id": "ROW_1",
+          "type": "actor",
+          "category": "human",
+          "role": "agent",
+          "x": -9,
+          "z": 0,
+          "rotation": 0,
+          "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 },
+          "color": "#7bd88f",
+          "name": "队首"
+        },
+        { "id": "ROW_2", "type": "actor", "category": "human", "role": "agent", "x": -9, "z": 1.65, "rotation": 0, "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 }, "color": "#7bd88f", "name": "队员2" },
+        { "id": "ROW_3", "type": "actor", "category": "human", "role": "agent", "x": -9, "z": 0.55, "rotation": 0, "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 }, "color": "#7bd88f", "name": "队员3" },
+        { "id": "ROW_4", "type": "actor", "category": "human", "role": "agent", "x": -9, "z": -0.55, "rotation": 0, "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 }, "color": "#7bd88f", "name": "队员4" },
+        { "id": "ROW_5", "type": "actor", "category": "human", "role": "agent", "x": -9, "z": -1.65, "rotation": 0, "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 }, "color": "#7bd88f", "name": "队员5" },
+        { "id": "ROW_6", "type": "actor", "category": "human", "role": "agent", "x": -9, "z": -2.75, "rotation": 0, "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 }, "color": "#7bd88f", "name": "队员6" },
+        {
+          "id": "ROCK",
+          "type": "prop",
+          "category": "prop",
+          "role": "set",
+          "x": 0,
+          "z": 0,
+          "rotation": 0,
+          "footprint": { "w": 2, "d": 2, "h": 1.6 },
+          "color": "#9aa7b5",
+          "name": "路中石墩",
+          "locked": true
+        }
+      ],
+      "segments": [
+        {
+          "id": "SEG_ROW_1",
+          "type": "MOVE",
+          "object": "ROW_1",
+          "startX": -9,
+          "startZ": 0,
+          "endX": 9,
+          "endZ": 0,
+          "points": [],
+          "timeStart": 0,
+          "timeEnd": 12,
+          "ease": [0.33, 0, 0.67, 1]
+        }
+      ],
+      "handoffs": [],
+      "constraints": [],
+      "cameras": [
+        {
+          "id": "CAM_TOP",
+          "name": "俯瞰",
+          "color": "#c792ea",
+          "targetId": "ROW_1",
+          "framing": "extreme_wide",
+          "view": "overhead",
+          "side": "front",
+          "lensMm": 24,
+          "motion": "STATIC"
+        }
+      ],
+      "cameraMoves": [],
+      "cameraJunctions": [],
+      "actions": [
+        { "id": "ACT_R1", "object": "ROW_1", "timeStart": 0, "timeEnd": 12, "kind": "walk", "intensity": 1 },
+        { "id": "ACT_R2", "object": "ROW_2", "timeStart": 0, "timeEnd": 12, "kind": "walk", "intensity": 1 },
+        { "id": "ACT_R3", "object": "ROW_3", "timeStart": 0, "timeEnd": 12, "kind": "walk", "intensity": 1 },
+        { "id": "ACT_R4", "object": "ROW_4", "timeStart": 0, "timeEnd": 12, "kind": "walk", "intensity": 1 },
+        { "id": "ACT_R5", "object": "ROW_5", "timeStart": 0, "timeEnd": 12, "kind": "walk", "intensity": 1 },
+        { "id": "ACT_R6", "object": "ROW_6", "timeStart": 0, "timeEnd": 12, "kind": "walk", "intensity": 1 }
+      ],
+      "groups": [
+        {
+          "id": "TEAM_ROW",
+          "name": "ROW 横队",
+          "color": "#7bd88f",
+          "members": ["ROW_1", "ROW_2", "ROW_3", "ROW_4", "ROW_5", "ROW_6"],
+          "dynamics": true,
+          "formation": "row",
+          "spacing": 1.1,
+          "noise": 0.25
+        }
+      ]
+    }
+  }
+}

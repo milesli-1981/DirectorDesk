@@ -7,7 +7,7 @@ import {
   objectDisplayName,
   TimelineItem,
 } from "../domain/schema";
-import { buildTimelineItems, itemRange } from "../engine/timeline";
+import { buildTimelineItems, itemRange, rawContentEnd } from "../engine/timeline";
 import { easeVal, normalizeEase } from "../engine/ease";
 
 const MAX_PX_PER_SEC = 100;
@@ -125,6 +125,10 @@ export function Timeline() {
   const updateCamera = useDirectorStore((s) => s.updateCamera);
   const setDuration = useDirectorStore((s) => s.setDuration);
 
+  // Scene Duration 输入框：编辑期间用本地草稿接管，失焦 / 回车才写入。
+  // 否则每敲一个字符都写库，且清空时 Number("") === 0 会被钳到下限，导致无法连续输入多位数。
+  const [durDraft, setDurDraft] = useState<string | null>(null);
+
   // 时间刻度按可视宽度自适应：整段时长刚好铺满可滚动区，因此不会出现横向滚动条。
   const scrollRef = useRef<HTMLDivElement>(null);
   const [laneWidth, setLaneWidth] = useState(0);
@@ -144,6 +148,9 @@ export function Timeline() {
   const reorderObject = useDirectorStore((s) => s.reorderObject);
 
   const items = useMemo(() => buildTimelineItems(state), [state]);
+  // 内容排到片长之外时给出提示：这些片段不参与播放 / 导出，但没有被删除。
+  const contentEnd = useMemo(() => rawContentEnd(state), [state]);
+  const overflow = contentEnd > state.duration + 1e-6;
   // 团队（Group）在时间轴上合并为一行：整队只共用一条路线，不再为每个队员各开一行。
   const teamGroups = useMemo(
     () => (state.groups ?? []).filter((g) => g.dynamics && g.members.length >= 2),
@@ -252,9 +259,13 @@ export function Timeline() {
         }}
         onPointerDown={(event) => {
           event.stopPropagation();
-          selectItem(item.source);
+          // 顺序要紧：先选归属对象 / 相机，再选片段。
+          // store 的「互斥选择」订阅只保留最后被设置生效的那一轴（见 directorStore 末尾），
+          // 若先 selectItem 再 selectObject，刚设进去的片段选中会被随后的对象选中清掉，
+          // 表现就是点 segment / action 永远选不中（无高亮、Inspector 也打不开）。
           if (item.kind === "camera") selectCamera(item.track);
           else selectObject(item.track);
+          selectItem(item.source);
           const mode: DragMode =
             event.target instanceof HTMLElement
               ? event.target.classList.contains("l")
@@ -289,16 +300,37 @@ export function Timeline() {
       <div className="tlbar">
         <TimelineReadout />
         {/* 场景最大时长：成片导出与时间轴刻度都以此为基准。置于时间轴顶栏右上角，便于随时调整。 */}
-        <label className="dur-field" title="本场景的最大时长；成片导出与时间轴刻度以此为准。不能小于已有内容的末尾。">
+        <label
+          className={`dur-field${overflow ? " is-overflow" : ""}`}
+          title="成片长度（秒）：导出与时间轴刻度以此为准。调小不会删除片段，只是超出部分不参与播放 / 导出。"
+        >
           <span className="lab">Scene Duration (s)</span>
           <input
             type="number"
             min={1}
             max={600}
             step={0.5}
-            value={state.duration}
-            onChange={(event) => setDuration(Number(event.target.value))}
+            value={durDraft ?? state.duration}
+            onChange={(event) => setDurDraft(event.target.value)}
+            onBlur={(event) => {
+              const next = Number(event.target.value);
+              if (Number.isFinite(next)) setDuration(next);
+              setDurDraft(null);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") event.currentTarget.blur();
+              if (event.key === "Escape") setDurDraft(null);
+            }}
           />
+          {/* 片长调得比内容短时明确告知：超出部分只是不出片，片段仍在 */}
+          {overflow ? (
+            <span
+              className="dur-warn"
+              title={`有片段排到 ${contentEnd.toFixed(1)}s；超出片长的部分不参与播放 / 导出，但片段没有被删除，把片长调回去即可`}
+            >
+              ⚠ 内容到 {contentEnd.toFixed(1)}s
+            </span>
+          ) : null}
         </label>
       </div>
       <div className="scroll" id="scroll" ref={scrollRef} onPointerDown={handleScrub}>

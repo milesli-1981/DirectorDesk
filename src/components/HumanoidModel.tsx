@@ -4,7 +4,7 @@ import { useAnimations, useGLTF } from "@react-three/drei";
 import * as THREE from "three";
 import { clone as cloneSkeleton } from "three/examples/jsm/utils/SkeletonUtils.js";
 import { useDirectorStore } from "../state/directorStore";
-import { actionPoseAt } from "../engine/actionPose";
+import { actionPoseAt, staticPoseWeight } from "../engine/actionPose";
 import { findClip, NOMINAL_SPEED, type ModelConfig } from "../engine/modelConfig";
 import { JointName, Pose } from "../domain/schema";
 
@@ -148,8 +148,22 @@ export function HumanoidGLB({
     const { state, currentTime } = useDirectorStore.getState();
     const sample = actionPoseAt(state, objectId, currentTime);
 
-    // 收集「本片段自定义」的关节覆盖（仅 clip.pose，不含预设——预设已由动画 clip 表现）。
+    // 关节覆盖 = 静态基线（object.pose）+ 本片段自定义（clip.pose），二者叠加。
+    // 静态基线即 Inspector「Pose（静态基线姿势）」写入的 object.pose：方块简模 HumanoidRig
+    // 一直有叠加，但 GLB 这边此前完全没读它 → 角色上 Pose 按钮无效。Xbot 自带片段里并没有
+    // sitting（只有 sneak_pose 对应 crouch），这类静态姿势只能靠关节角表达，故必须补上。
     const overrideJoints: Pose["joints"] = {};
+    // 静态基线只对站定的角色生效：起步后随速度衰减到 0，让位给步态（见 staticPoseWeight）。
+    const sw = staticPoseWeight(speed);
+    if (sw > 0.001) {
+      const baseline = state.objects.find((o) => o.id === objectId)?.pose?.joints;
+      if (baseline) {
+        for (const key of Object.keys(baseline) as JointName[]) {
+          const v = baseline[key];
+          if (v) overrideJoints[key] = [v[0] * sw, v[1] * sw, v[2] * sw];
+        }
+      }
+    }
     for (const clip of state.actions ?? []) {
       if (clip.object !== objectId) continue;
       if (currentTime < clip.timeStart || currentTime > clip.timeEnd) continue;

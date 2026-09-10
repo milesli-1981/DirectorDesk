@@ -69,13 +69,32 @@ button:hover {
 }
 
 .app {
+  /* 三栏硬底线：右栏固定宽、视口（画布）最小宽。左栏可用空间 = 窗口 - 这两者。 */
+  --rail-w: 28px;
+  --right-w: 340px;
+  --center-min-w: 440px;
   height: 100vh;
   position: relative;
   display: grid;
-  grid-template-columns: minmax(500px, 1fr) 295px;
-  /* 两行顶部（场景 tab 26px + 操作栏 38px）+ 主区（上 1/3 对象列表 / 下 2/3 检视器）
-     + 时间轴（全宽）。右侧栏改为随网格流动，避免用 100vh 绝对定位导致与左侧高度错位。 */
-  grid-template-rows: 26px 38px minmax(0, 1fr) minmax(0, 2fr) 264px;
+  /* 三栏：左 对象列表(窄, 仅上半) / 中 视口(上半) / 右 检视器(整列, 满高)。
+     底部整条时间轴横跨左栏下方与中间视口下方；右侧整列都给检视器（承载时间轴片段等更多信息）。
+     两行顶部为场景 tab 26px + 操作栏 38px；第 3 行为三栏主体(1fr)，第 4 行 264px 放时间轴。 */
+  /* 首列宽度由 --left-w 驱动：抓手拖动 / 收起展开都只改这一个变量。
+     同时用 min() 兜底：左栏最多只到「窗口 - 右栏 - 视口最小宽」，否则三栏总和超过窗口、
+     网格整体右溢，视口右下角的悬浮工具条会被顶出画布、被主区裁掉（它必须原地不动）。 */
+  grid-template-columns: min(
+      var(--left-w, 200px),
+      max(var(--rail-w), calc(100% - var(--right-w) - var(--center-min-w)))
+    )
+    minmax(var(--center-min-w), 1fr) var(--right-w);
+  grid-template-rows: 26px 38px minmax(200px, 1fr) 264px;
+  /* 收起 / 展开走带回弹的缓动（末端轻微过冲）；拖动时由 .is-resizing 关掉动画以便跟手 */
+  transition: grid-template-columns 0.44s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.app.is-resizing {
+  transition: none;
+  user-select: none;
+  cursor: col-resize;
 }
 
 header {
@@ -241,7 +260,8 @@ header {
   margin-bottom: 4px;
 }
 .modal-field select,
-.modal-field input[type="range"] {
+.modal-field input[type="range"],
+.modal-field input[type="text"] {
   width: 100%;
   background: #151d26;
   color: #cbd7e3;
@@ -275,19 +295,111 @@ header {
   min-height: 0;
 }
 
-/* item list 占右侧 panel 顶部 1/3，Inspector 占下方 2/3；二者随网格流动，
-   高度由同一套 grid 行高决定，故与左侧画布 / 底部时间轴严格对齐。 */
+/* 左侧对象列表：仅占最左栏上半（行 3），下方行 4 留给时间轴；列表区独立滚动。 */
 .left {
-  grid-column: 2;
+  grid-column: 1;
   grid-row: 3;
-  border-left: 1px solid #27313b;
-  border-bottom: 1px solid #27313b;
+  border-right: 1px solid #27313b;
+  display: flex;
+  flex-direction: column;
+  /* 抓手胶囊要向右探出 15px（更好抓、也更贴近画布），默认的 hidden 会把它切掉；
+     clip + clip-margin 依旧裁掉列表内容，只是给边界外留出 18px 的绘制 / 命中区。 */
+  overflow: clip;
+  overflow-clip-margin: 18px;
+  position: relative;
+}
+
+/* 左栏右边缘抓手：整条可拖动改宽度；中间胶囊按钮点击快速收起 / 展开 */
+.left-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 6px;
+  z-index: 4;
+  cursor: col-resize;
+  touch-action: none;
+}
+/* 悬停 / 拖动时高亮分界线 */
+.left-resizer::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 2px;
+  width: 2px;
+  border-radius: 2px;
+  background: transparent;
+  transition: background 0.18s ease;
+}
+.left-resizer:hover::before,
+.app.is-resizing .left-resizer::before {
+  background: var(--ap-blue);
+}
+.left-grip {
+  position: absolute;
+  top: 50%;
+  /* 往右探出面板 15px：胶囊明显跨到画布一侧，视觉与抓取都更明显 */
+  right: -15px;
+  transform: translateY(-50%);
+  width: 16px;
+  height: 46px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ap-surface-2);
+  border: 1px solid var(--ap-sep);
+  border-radius: 9px;
+  color: var(--ap-text-2);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+  cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease, transform 0.18s ease;
+}
+.left-resizer:hover .left-grip {
+  background: var(--ap-surface-3);
+  color: var(--ap-text);
+  transform: translateY(-50%) scale(1.06);
+}
+.left-resizer:active .left-grip {
+  transform: translateY(-50%) scale(0.96);
+}
+/* 抓手纹：竖向三点，提示可拖动 */
+.grip-dots {
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 5px 0 currentColor, 0 -5px 0 currentColor;
+  opacity: 0.8;
+}
+.left.is-collapsed {
+  padding: 4px 2px;
+}
+.left.is-collapsed .left-resizer {
+  width: 100%;
+}
+.left.is-collapsed > *:not(.left-resizer) {
+  display: none;
+}
+
+/* 列表区独立滚动：PROJECT 顶层区固定，OBJECTS / CAMERAS 列表在此滚动，并保留最小高度。 */
+.list-scroll {
+  flex: 1 1 auto;
+  min-height: 120px;
   overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* 左侧面板头部（PROJECT 顶层区 + 画幅选择）固定，不随列表压缩，
+   保证下方 .list-scroll 始终能吃满剩余空间、其 min-height:120px 真正生效。 */
+.left > .st,
+.left > .field {
+  flex: 0 0 auto;
 }
 
 .right {
-  grid-column: 2;
-  grid-row: 4;
+  grid-column: 3;
+  grid-row: 3 / 5;
   border-left: 1px solid #27313b;
   /* 面板内元素自适应收窄，避免出现横向滚动条 */
   overflow-x: hidden;
@@ -342,16 +454,32 @@ header {
   background: #18283a;
 }
 
-/* 场景树对象行：内容占满整行，锁角标浮在右上角 */
+/* 场景树对象行：内容占满整行，锁角标浮在右上角；flex 让展开箭头与点选名同一行、子项换行 */
 .obj-row {
   position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 2px;
+}
+/* 第一行：展开箭头 + 名称 + 右上角角标，独占一整行（子项换行到下一行）。
+   角标（.obj-actions）是 absolute + height:100%，必须相对【第一行】定位——
+   若相对整个 .obj-row，子项展开后行高变高，角标会被居中到整块中间而向下漂。 */
+.obj-head {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  flex: 1 1 100%;
+  min-width: 0;
 }
 .obj-row .obj {
   display: flex;
   flex-direction: row;
   align-items: baseline;
   gap: 6px;
-  width: 100%;
+  flex: 1 1 auto;
+  width: auto;
   min-width: 0;
   /* 右侧让出角标的位置，长名字不会钻到锁图标底下 */
   padding-right: 24px;
@@ -368,15 +496,6 @@ header {
   white-space: nowrap;
   font-size: 10px;
   color: #cdd8e2;
-}
-.obj-row .obj-meta {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 8px;
-  color: #6f8191;
 }
 /* 双击改名时替换整行按钮的输入框：与 .obj 对齐，右侧同样让出锁角标 */
 .obj-rename {
@@ -548,14 +667,7 @@ header {
   font-weight: 600;
   color: #fff;
 }
-.grp-toggle {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 11px;
-  color: #cdd8e2;
-  margin: 2px 0 4px;
-}
+
 .grp-slider {
   display: flex;
   align-items: center;
@@ -649,6 +761,99 @@ header {
   color: #ff7a7a;
   background: #1a0f12;
 }
+
+/* —— 场景树层级：对象 / 相机下挂时间轴片段（segment / constraint / action / cameraMove）—— */
+.obj-row .obj-rename {
+  flex: 1 1 auto;
+  width: auto;
+}
+.tree-toggle {
+  flex: 0 0 auto;
+  width: 16px;
+  align-self: stretch;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  font-size: 9px;
+  line-height: 1;
+  color: #7f8ea0;
+  background: transparent;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.tree-toggle:hover {
+  color: #cfe3f9;
+  background: #18283a;
+}
+.tree-children {
+  flex-basis: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 2px 0 2px 4px;
+  padding-left: 8px;
+  border-left: 1px solid #27313b;
+}
+.tree-child {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  padding: 1px 5px;
+  font-size: 9.5px;
+  color: #c3d0dc;
+  background: #0f1922;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.tree-child:hover {
+  border-color: #2f4a66;
+  color: #e6f0fb;
+}
+.tree-child.sel {
+  border-color: #67a7ff;
+  background: #18283a;
+  color: #eaf3ff;
+}
+.tree-kind {
+  flex: 0 0 auto;
+  font-size: 7.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 0 3px;
+  border-radius: 2px;
+  color: #0c1118;
+}
+.tree-segment .tree-kind {
+  background: #6fb0ff;
+}
+.tree-constraint .tree-kind {
+  background: #ffcf6a;
+}
+.tree-action .tree-kind {
+  background: #8be0a0;
+}
+.tree-camera .tree-kind {
+  background: #d6a3ff;
+}
+.tree-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tree-empty {
+  flex-basis: 100%;
+  padding: 1px 5px 1px 28px;
+  font-size: 9px;
+  font-style: italic;
+  color: #5d6b79;
+}
 /* 相机行：保持水平排列（点 + 名称），不被场景对象的竖排布局影响 */
 .cam-row .obj {
   flex-direction: row;
@@ -667,24 +872,32 @@ header {
 }
 
 main {
-  grid-column: 1;
-  grid-row: 3 / 5;
+  grid-column: 2;
+  grid-row: 3;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
   display: grid;
+  /* 单列必须显式定成「容器宽」：默认的 auto 列由内容撑开，而 canvas 被 three.js 写死了
+     像素宽（见下方 canvas 规则），于是画布只增不减——左栏一展开，画布不收缩、溢出被裁掉，
+     贴在画布右下角的悬浮工具条就跟着被顶到画布外。minmax(0, 1fr) 让列宽与内容无关。 */
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr);
 }
 
 .canvasWrap {
   grid-row: 2;
   min-height: 0;
+  min-width: 0;
   position: relative;
 }
 
+/* three.js 的 setSize 会把画布尺寸写成行内像素值（width: 900px; height: 533px），
+   盖掉这里的百分比并让画布只能变大不能变小。用 !important 压住行内样式：
+   显示尺寸永远跟随容器，绘制缓冲（canvas.width / height 属性）仍由 three.js 按容器尺寸设置。 */
 canvas {
-  width: 100%;
-  height: 100%;
+  width: 100% !important;
+  height: 100% !important;
   display: block;
   touch-action: none;
 }
@@ -842,8 +1055,8 @@ canvas {
 /* ----------------------------------------------------------- Timeline */
 
 .timeline {
-  grid-column: 1 / -1;
-  grid-row: 5;
+  grid-column: 1 / 3;
+  grid-row: 4;
   height: 100%;
   min-height: 0;
   overflow: hidden;
@@ -865,28 +1078,57 @@ canvas {
 .dur-field {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   margin-left: auto;
-  color: #9fb0c0;
-  font-size: 12px;
+  color: var(--ap-text-2);
+  font: 12px/1 var(--ap-font);
   white-space: nowrap;
 }
+/* .lab 默认带 8px 下边距（用于「标签在上、控件在下」的堆叠布局）；
+   这里是同一行的行内标签，必须清零，否则文字被上顶、与输入框中心错位。 */
 .dur-field .lab {
-  color: #9fb0c0;
+  margin: 0;
+  line-height: 1;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ap-text-2);
 }
 .dur-field input[type="number"] {
-  width: 56px;
-  height: 22px;
-  background: #0c1117;
-  border: 1px solid #2a3540;
-  color: #dce6ef;
-  border-radius: 4px;
-  padding: 0 4px;
-  font-size: 12px;
+  width: 60px;
+  height: 24px;
+  padding: 0 6px;
+  font: 12px/1 var(--ap-font);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--ap-text);
+  background: var(--ap-surface-2);
+  border: 1px solid transparent;
+  border-radius: var(--ap-r-xs);
+  outline: none;
+  appearance: textfield;
+  -moz-appearance: textfield;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.dur-field input[type="number"]::-webkit-outer-spin-button,
+.dur-field input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
 .dur-field input[type="number"]:focus {
-  outline: none;
-  border-color: #3a6ea5;
+  border-color: var(--ap-blue);
+  box-shadow: var(--ap-ring);
+}
+/* 片长短于内容：输入框描橙边 + 一行说明，说明「超出部分不出片」而不是「设置没生效」。 */
+.dur-field.is-overflow input[type="number"] {
+  border-color: rgba(255, 159, 10, 0.6);
+}
+.dur-warn {
+  padding: 2px 6px;
+  font-size: 10px;
+  line-height: 1;
+  color: #ffcf8a;
+  background: rgba(255, 159, 10, 0.16);
+  border-radius: var(--ap-r-xs);
 }
 
 .timecode {
@@ -1225,6 +1467,29 @@ canvas {
   margin: 4px 0 10px;
 }
 
+/* Inspector 顶部信息行：INSPECTOR 小标 + 对象名 + 时间轴选中项 合并为一行 */
+.insp-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 2px 0 6px;
+}
+.insp-eyebrow {
+  font-size: 9px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: #738394;
+}
+.insp-head .title {
+  font-size: 15px;
+  font-weight: 700;
+}
+.insp-head .item-info {
+  color: #8ca1b4;
+  font-size: 11px;
+}
+
 .field {
   border-top: 1px solid #26313b;
   padding: 9px 0;
@@ -1428,13 +1693,16 @@ pre {
 /* —— 画布内左侧悬浮工具条（视图 switch + 锁定，竖向）—— */
 .view-floatbar {
   position: absolute;
-  top: 12px;
-  left: 12px;
+  bottom: 12px;
+  right: 12px;
+  top: auto;
+  left: auto;
   z-index: 100;
   display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 6px;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 6px;
   background: rgba(13, 18, 24, 0.82);
   border: 1px solid #27313b;
   border-radius: 9px;
@@ -1442,30 +1710,70 @@ pre {
   -webkit-backdrop-filter: blur(4px);
 }
 
+/* Director / Camera 是互斥二选一，按「分段控件（segmented control）」呈现：
+   外层凹槽（track）里有一块会滑动的滑块（thumb），一眼看得出是同一枚开关的两档，
+   而不是两个各自独立的按钮。两格等宽（flex: 1 1 0），滑块才能整格对齐。 */
 .vf-switch {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+  position: relative;
+  display: inline-flex;
+  flex-direction: row;
+  gap: 0;
+  padding: 2px;
+  border: 1px solid #27313b;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.vf-thumb {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: 2px;
+  /* 100% = 凹槽内框宽（含 2px 内边距），减掉左右内边距后取一半 = 一格宽 */
+  width: calc((100% - 4px) / 2);
+  border-radius: 6px;
+  background: #18283a;
+  box-shadow: inset 0 0 0 1px #2f4a66, 0 1px 3px rgba(0, 0, 0, 0.45);
+  transition: transform 0.24s cubic-bezier(0.32, 0.72, 0, 1);
+  pointer-events: none;
+}
+
+.vf-switch.is-camera .vf-thumb {
+  transform: translateX(100%);
 }
 
 .vf-opt {
-  min-width: 64px;
-  padding: 6px 8px;
-  font-size: 10px;
+  position: relative;
+  z-index: 1;
+  flex: 1 1 0;
+  min-width: 58px;
+  padding: 4px 9px;
+  font-size: 9px;
   font-weight: 600;
   letter-spacing: 0.04em;
   text-align: center;
-  border: 1px solid transparent;
+  white-space: nowrap;
+  border: none;
   border-radius: 6px;
-  background: #101822;
+  background: transparent;
   color: #8a98a8;
   cursor: pointer;
+  transition: color 0.18s ease;
+}
+
+/* 只有未选中的那格给 hover 反馈：选中的那格由滑块表达状态，再变底色反而像第二个按钮。 */
+.vf-opt:not(.active):hover {
+  color: #cfe3f9;
+}
+/* 抵消全局 button:hover 的底色 / 蓝边：hover 未选中的格子若也铺成滑块色，
+   画面上会同时出现两块滑块，分段控件就又散成两个按钮了。 */
+.vf-switch .vf-opt:hover {
+  background: transparent;
+  border-color: transparent;
 }
 
 .vf-opt.active {
-  background: #18283a;
   color: #cfe3f9;
-  border-color: #2f4a66;
 }
 
 .vf-opt:disabled {
@@ -1474,9 +1782,8 @@ pre {
 }
 
 .vf-lock {
-  width: 100%;
-  padding: 6px 8px;
-  font-size: 13px;
+  padding: 4px 7px;
+  font-size: 11px;
   line-height: 1;
   border: 1px solid #2a343f;
   border-radius: 6px;
@@ -1492,8 +1799,9 @@ pre {
 }
 
 .vf-sep {
-  height: 1px;
-  margin: 2px 2px;
+  width: 1px;
+  height: 16px;
+  margin: 0 2px;
   background: #2a343f;
 }
 
@@ -1503,10 +1811,10 @@ pre {
 }
 
 .vf-zoom button {
-  flex: 1;
-  min-width: 20px;
-  padding: 5px 0;
-  font-size: 12px;
+  flex: 0 0 auto;
+  min-width: 18px;
+  padding: 3px 0;
+  font-size: 11px;
   line-height: 1;
   border: 1px solid #2a343f;
   border-radius: 5px;
@@ -1520,9 +1828,8 @@ pre {
 }
 
 .vf-tool {
-  width: 100%;
-  padding: 6px 8px;
-  font-size: 10px;
+  padding: 4px 7px;
+  font-size: 9px;
   font-weight: 600;
   border: 1px solid #2a343f;
   border-radius: 6px;
@@ -1538,9 +1845,10 @@ pre {
 }
 
 .vf-camera {
-  width: 100%;
-  padding: 6px 6px;
-  font-size: 11px;
+  width: auto;
+  min-width: 130px;
+  padding: 4px 6px;
+  font-size: 10px;
   border: 1px solid #2a343f;
   border-radius: 6px;
   background: #101822;
@@ -1575,6 +1883,13 @@ pre {
   font-size: 13px;
   font-weight: 600;
   color: #cdd8e2;
+}
+
+/* 自定义动作弹窗：关节区上方的说明行 */
+.modal .joint-hint {
+  margin: 10px 0 4px;
+  font-size: 11px;
+  color: #8fa0b0;
 }
 
 .modal .joint-row {
@@ -1932,28 +2247,6 @@ pre {
   font: 600 11px/1 var(--ap-font);
   margin-bottom: 6px;
 }
-.size-slider {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 5px 0;
-}
-.size-slider .val {
-  flex: 0 0 12px;
-  color: var(--ap-text-2);
-  font-size: 11px;
-}
-.size-slider input[type="range"] {
-  flex: 1 1 0;
-  min-width: 0;
-}
-.size-slider .sz {
-  flex: 0 0 32px;
-  text-align: right;
-  color: var(--ap-text);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
 
 /* ==========================================================================
    Apple 皮肤覆盖层
@@ -2126,15 +2419,25 @@ header {
   -webkit-backdrop-filter: blur(20px) saturate(180%);
   border-color: var(--ap-sep);
 }
+/* ap 主题：凹槽中性灰、滑块比凹槽亮一档并带轻投影 + 高光描边，
+   让「一格被按下」这件事在深色的毛玻璃条上也读得出来。 */
+.vf-switch {
+  border-color: var(--ap-sep);
+  background: rgba(120, 120, 128, 0.16);
+}
+.vf-thumb {
+  background: var(--ap-surface-3);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5), inset 0 0 0 0.5px rgba(255, 255, 255, 0.14);
+}
 .vf-opt {
-  background: var(--ap-surface-2);
+  background: transparent;
   color: var(--ap-text-2);
-  border-color: transparent;
+}
+.vf-opt:not(.active):hover {
+  color: var(--ap-text);
 }
 .vf-opt.active {
-  background: rgba(255, 255, 255, 0.16);
   color: var(--ap-text);
-  border-color: rgba(255, 255, 255, 0.24);
 }
 .vf-opt:disabled {
   color: var(--ap-text-3);
@@ -2167,10 +2470,17 @@ header {
   color: var(--ap-text);
   border-color: var(--ap-sep);
 }
+/* 手绘路径是「模式开关」而非普通选中态，激活时用主题蓝 + 外发光，
+   与右栏 .ghost-button.on 同一套激活语言，避免被当成没按下。 */
 .vf-tool.on {
-  background: rgba(255, 255, 255, 0.16);
-  color: var(--ap-text);
-  border-color: rgba(255, 255, 255, 0.24);
+  background: var(--ap-blue);
+  color: #ffffff;
+  border-color: var(--ap-blue);
+  box-shadow: 0 0 0 1px rgba(10, 132, 255, 0.5), 0 0 12px rgba(10, 132, 255, 0.45);
+}
+.vf-tool.on:hover {
+  background: var(--ap-blue);
+  border-color: var(--ap-blue);
 }
 .vf-camera {
   background: var(--ap-surface-2);
@@ -2202,10 +2512,6 @@ header {
   font-size: 12.5px;
   font-weight: 500;
   color: inherit;
-}
-.obj-row .obj-meta {
-  font-size: 10.5px;
-  color: var(--ap-text-3);
 }
 .addobj {
   background: transparent;
@@ -2464,4 +2770,414 @@ header {
 }
 .mask-bar {
   background: #000000;
+}
+
+/* ==========================================================================
+   Inspector（右栏）统一排版 —— Apple 风格
+   统一字号层级、垂直节奏、控件圆角与内边距，覆盖前面各处零散的硬编码值。
+   ========================================================================== */
+.right {
+  padding: 12px;
+  font: 12px/1.5 var(--ap-font);
+  color: var(--ap-text);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 顶部信息行：INSPECTOR 小标 + 标题 + 右侧信息 */
+.right .insp-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0 0 10px;
+  padding: 0 0 10px;
+  border-bottom: 1px solid var(--ap-sep);
+}
+.right .insp-eyebrow {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ap-text-3);
+}
+.right .insp-head .title {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--ap-text);
+}
+.right .insp-head .item-info {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--ap-text-2);
+}
+
+/* 分区小标题 */
+.right .sub {
+  margin: 14px 0 6px;
+  padding: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ap-text-2);
+}
+
+/* 字段块：统一上下内边距与分隔线 */
+.right .field {
+  margin: 0;
+  padding: 10px 0;
+  border-top: 1px solid var(--ap-sep);
+}
+.right .insp-head + .field {
+  border-top: none;
+  padding-top: 0;
+}
+.right .lab {
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ap-text-2);
+}
+
+/* row2：标签 + 控件（flex） */
+.right .row2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+.right .row2:last-child {
+  margin-bottom: 0;
+}
+.right .row2 label {
+  flex: 0 0 62px;
+  margin: 0;
+  font-size: 11px;
+  color: var(--ap-text-2);
+}
+.right .row2 .val {
+  flex: 0 0 auto;
+  min-width: 34px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ap-text);
+}
+
+/* inspector-row：保持原有 grid 结构，只收紧列宽与垂直节奏 */
+.right .inspector-row {
+  grid-template-columns: 78px 1fr;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: var(--ap-text-2);
+}
+.right .inspector-row:last-child {
+  margin-bottom: 0;
+}
+.right .inspector-row label {
+  margin: 0;
+  font-size: 11px;
+  color: var(--ap-text-2);
+}
+
+/* 输入控件：统一高度 / 圆角 / 内边距 / 聚焦环 */
+.right input[type="text"],
+.right input[type="number"],
+.right select {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  font: 12px/1 var(--ap-font);
+  color: var(--ap-text);
+  background: var(--ap-surface-2);
+  border: 1px solid transparent;
+  border-radius: var(--ap-r-xs);
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.right input[type="text"]:focus,
+.right input[type="number"]:focus,
+.right select:focus {
+  border-color: var(--ap-blue);
+  box-shadow: var(--ap-ring);
+}
+.right input[type="range"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  accent-color: var(--ap-blue);
+}
+.right button {
+  padding: 5px 9px;
+  font: 11px/1 var(--ap-font);
+  color: var(--ap-text);
+  background: var(--ap-surface-2);
+  border: 1px solid var(--ap-sep);
+  border-radius: var(--ap-r-xs);
+}
+.right button:hover {
+  background: var(--ap-surface-3);
+  border-color: var(--ap-blue);
+}
+
+/* 提示与代码块 */
+.right .hint {
+  margin: 8px 0 0;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--ap-text-3);
+}
+.right pre {
+  margin: 8px 0 0;
+  padding: 8px;
+  font: 10px/1.5 var(--ap-mono);
+  color: var(--ap-text-2);
+  background: var(--ap-surface-2);
+  border-radius: var(--ap-r-xs);
+  overflow-x: auto;
+}
+.right .mini-btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+}
+
+/* 宽 / 深 / 高 行：固定量程滑杆 + 可直接输入的数字框 */
+.dim-row {
+  display: grid;
+  grid-template-columns: 14px 1fr 60px;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.dim-row:last-child {
+  margin-bottom: 0;
+}
+.dim-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ap-text-2);
+  text-align: center;
+}
+.dim-row input[type="range"] {
+  width: 100%;
+  min-width: 0;
+  accent-color: var(--ap-blue);
+}
+/* 数字框：隐藏原生步进箭头（方向键仍可微调），保持窄栏内整洁 */
+.dim-num {
+  width: 100%;
+  height: 24px;
+  padding: 0 6px;
+  font: 11px/1 var(--ap-font);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--ap-text);
+  background: var(--ap-surface-2);
+  border: 1px solid transparent;
+  border-radius: var(--ap-r-xs);
+  outline: none;
+  appearance: textfield;
+  -moz-appearance: textfield;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.dim-num::-webkit-outer-spin-button,
+.dim-num::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.dim-num:focus {
+  border-color: var(--ap-blue);
+  box-shadow: var(--ap-ring);
+}
+
+/* ==========================================================================
+   Inspector 面板统一
+   所有区块（对象 / 组队 / Action / Junction …）沿用 Camera Intent 的同一套排版：
+   行 = .inspector-row（标签固定列 + 控件铺满），分组 = .sub-group，按钮 = .ghost-button。
+   ========================================================================== */
+.inspector-row > span {
+  color: var(--ap-text-2);
+  font-size: 11px;
+}
+/* 行内文本 / 数字输入：与 select 同一视觉，仅聚焦时显边框 */
+.inspector-row input[type="text"],
+.inspector-row input[type="number"] {
+  width: 100%;
+  min-width: 0;
+  height: 24px;
+  padding: 0 6px;
+  font: 11px/1 var(--ap-font);
+  color: var(--ap-text);
+  background: var(--ap-surface-2);
+  border: 1px solid transparent;
+  border-radius: var(--ap-r-xs);
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.inspector-row input[type="text"]:focus,
+.inspector-row input[type="number"]:focus {
+  border-color: var(--ap-blue);
+  box-shadow: var(--ap-ring);
+}
+.inspector-row input[type="range"] {
+  accent-color: var(--ap-blue);
+}
+/* 只读数值（如 Action 的 Time 区间） */
+.inspector-row .val {
+  color: var(--ap-text);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+/* 数值步进器：− 数值 ＋（人数等小整数） */
+.stepper {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.stepper .ghost-button {
+  flex: 0 0 auto;
+  min-width: 26px;
+  padding: 4px 0;
+  text-align: center;
+  font-weight: 600;
+  line-height: 1;
+}
+.stepper-num {
+  min-width: 20px;
+  text-align: center;
+  font: 600 11px/1 var(--ap-font);
+  font-variant-numeric: tabular-nums;
+  color: var(--ap-text);
+}
+/* 禁用态：此前 ghost-button 没有 :disabled 规则，未选相机时按钮看不出不可用 */
+.ghost-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  background: var(--ap-surface-2);
+}
+.ghost-button:disabled:hover {
+  background: var(--ap-surface-2);
+}
+
+/* ==========================================================================
+   左侧面板统一（对象 / 相机树）
+   与右栏同一套规范：常态透明底 → hover 浮起 → 蓝色选中；行内删除 / 改名
+   沿用 danger 色与输入框样式；树子项用同一条引导线与选中色。
+   ========================================================================== */
+/* 行内删除：常态隐形，hover 才显危险色（与 .danger-button 同语义） */
+.obj-del {
+  color: var(--ap-text-3);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--ap-r-xs);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.obj-del:hover {
+  color: var(--ap-red);
+  background: rgba(255, 69, 58, 0.16);
+  border-color: transparent;
+}
+/* 左侧 PROJECT 区是第一个 .field，顶部再画一条分隔线会显得多余 */
+.left > .field {
+  border-top: none;
+  padding-top: 0;
+}
+/* 双击改名输入框：与面板内输入同一视觉 */
+.obj-rename {
+  color: var(--ap-text);
+  background: var(--ap-surface-2);
+  border: 1px solid var(--ap-blue);
+  border-radius: var(--ap-r-xs);
+  box-shadow: var(--ap-ring);
+  padding: 2px 26px 2px 6px;
+  font: 11px/1.4 var(--ap-font);
+}
+/* 展开箭头 */
+.tree-toggle {
+  color: var(--ap-text-3);
+  border-radius: var(--ap-r-xs);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.tree-toggle:hover {
+  color: var(--ap-text);
+  background: var(--ap-surface-2);
+}
+/* 子层级：引导线用主题分隔色 */
+.tree-children {
+  border-left: 1px solid var(--ap-sep);
+  gap: 2px;
+  margin: 3px 0 4px 4px;
+  padding-left: 9px;
+}
+/* 子项：与 .obj 同一套「透明底 → hover 浮起 → 蓝色选中」 */
+.tree-child {
+  padding: 3px 6px;
+  font-size: 11px;
+  color: var(--ap-text-2);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--ap-r-xs);
+}
+.tree-child:hover {
+  color: var(--ap-text);
+  background: var(--ap-surface-2);
+  border-color: transparent;
+}
+.tree-child.sel {
+  color: #ffffff;
+  background: rgba(10, 132, 255, 0.22);
+  border-color: transparent;
+}
+/* 类型标签：7.5px 在 11px 的行里过小，放大到 9px 并留出内边距 */
+.tree-kind {
+  font-size: 9px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  color: #0c1118;
+}
+/* 空列表提示 */
+.tree-empty {
+  color: var(--ap-text-3);
+  font-size: 10.5px;
+  font-style: normal;
+}
+
+/* ---- 左栏容器：与右栏同款内边距，内容不贴边 ----
+   收起态由特异性更高的 .left.is-collapsed 覆盖，不受影响。 */
+.left {
+  padding: 11px;
+}
+/* 列表分组沿用右栏 .sub-group（外边框 + 圆角 + 内边距）；首组顶部无需额外间距 */
+.list-scroll > .sub-group:first-child {
+  margin-top: 2px;
+}
+.list-scroll > .sub-group:last-child {
+  margin-bottom: 0;
+}
+
+/* ---- 画布内悬浮工具条：不被左栏宽度挤压 ----
+   它是相对画布 right:12px 定位、宽度由内容撑开的横条；左栏拉宽会压缩画布宽度，
+   内容宽度一旦超过画布，工具条左侧就顶出画布、被左栏盖住。
+   限定最大宽度（左右各留 12px）并允许换行，任何布局下都完整可见。 */
+.view-floatbar {
+  max-width: calc(100% - 24px);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  row-gap: 6px;
+}
+.view-floatbar .vf-camera {
+  max-width: 100%;
+}
+
+/* ---- 手绘路径模式：画布联动反馈 ----
+   按钮变蓝只是入口侧提示；画布本身也给出信号，避免「进了绘制模式却没察觉」：
+   - 光标变十字，明确「可在画布上拖拽绘制」
+   - 内描边环压在画布之上（outline 在内容之上绘制、且不挤布局；
+     inset box-shadow 会被 <canvas> 子元素盖住，故不用）；强化「当前处于绘制模式」。 */
+.canvasWrap.is-drawing canvas {
+  cursor: crosshair;
+}
+.canvasWrap.is-drawing {
+  outline: 2px solid rgba(10, 132, 255, 0.55);
+  outline-offset: -2px;
 }

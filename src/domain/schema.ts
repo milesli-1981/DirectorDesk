@@ -169,6 +169,11 @@ export type CameraView = "eye_level" | "chest" | "low" | "high" | "ground" | "ov
 
 export type CameraSide = "front" | "front_3_4" | "side" | "back_3_4" | "back";
 
+/** 稳定方式 / 拍摄设备质感（风格轴），与 motion 正交：
+ * motion 回答「怎么动」，style 回答「什么质感」。例如同样 FOLLOW，
+ * locked = 三脚架锁死、gimbal = 手机云台平滑漂浮、handheld = 肩扛微晃、vlog = 走拍 bob。 */
+export type CameraStyle = "locked" | "gimbal" | "handheld" | "vlog";
+
 /** 过肩镜头（OTS）：镜头越过前景演员的哪一侧肩膀。L = 左肩，R = 右肩。 */
 export type OtsSide = "L" | "R";
 
@@ -205,7 +210,21 @@ export type ActionKind =
   | "point"
   | "talk"
   | "walk"
-  | "run";
+  | "run"
+  /** 自定义动作：关节角完全来自「自定义动作库」里的一条命名记录（见 DirectorState.customActions）。 */
+  | "custom";
+
+/**
+ * 自定义动作：用户在弹窗里调好关节角、命名后**持久保存**的一条记录。
+ * 存在 DirectorState 里随场景自动持久化，可被任意演员的任意动作片段复用
+ * （片段只记一个 customId，改一次库、所有引用它的片段同步生效）。
+ */
+export interface CustomAction {
+  id: string;
+  /** 用户起的名称，显示在 Kind 下拉与时间轴 clip 标签上。 */
+  name: string;
+  joints: Pose["joints"];
+}
 
 /**
  * ActionClip = 一个演员在时间轴上的一段"动作"（sit / wave / talk …）。
@@ -219,8 +238,8 @@ export interface ActionClip {
   timeStart: number;
   timeEnd: number;
   kind: ActionKind;
-  /** 动作幅度/强度 0..1。 */
-  intensity: number;
+  /** 仅当 kind === "custom" 时有效：指向 DirectorState.customActions 里的一条记录。 */
+  customId?: string;
   /** 关节角度覆盖：在 kind 预设之上微调（未列出的关节沿用预设）。 */
   pose?: Pose;
 }
@@ -237,6 +256,8 @@ export interface CameraObject {
   lensMm: number;
   /** 没有 Camera Move Clip 时使用的默认运镜。 */
   motion: CameraMotionType;
+  /** 稳定方式 / 风格轴（默认 locked）：与 motion 正交。旧场景 motion:"HANDHELD" 仍按 handheld 兼容。 */
+  style?: CameraStyle;
   /** 过肩镜头：镜头所越过的演员（前景）；为空则不是过肩。 */
   shoulderId?: string;
   /** 过肩：越过前景演员的哪一侧肩膀（默认 R 右肩）。 */
@@ -305,6 +326,8 @@ export interface CameraMove {
   view?: CameraView;
   side?: CameraSide;
   lensMm?: number;
+  /** 风格轴：本段稳定方式覆盖（为空沿用相机默认）。 */
+  style?: CameraStyle;
   ease: EaseCurve;
 }
 
@@ -377,6 +400,11 @@ export interface DirectorState {
   actions: ActionClip[];
   /** 组（Group Dynamics）。旧场景 JSON 无此字段时默认为空数组。 */
   groups: DirectorGroup[];
+  /**
+   * 自定义动作库（命名的关节姿势）。旧场景 JSON 无此字段时默认为空数组。
+   * 随场景自动持久化；customId 悬空的片段按「空姿势」处理，不会报错。
+   */
+  customActions?: CustomAction[];
 }
 
 /* ------------------------------------------------------ Stage / Scenes */
@@ -491,6 +519,48 @@ export const MOTION_HINTS: Record<CameraMotionType, string> = {
   TRUCK: "横向平移（垂直视线方向的轨道横移）：保持距离与透视，平行掠过主体。",
   STEADICAM: "斯坦尼康式平滑跟随：三维连续跟随目标，比普通 FOLLOW 更顺滑稳定。",
   HANDHELD: "手持微晃：机位叠加细微正弦抖动，模拟手持摄影的不稳定质感。",
+};
+
+/** 风格轴 → 底层参数（模板映射，UI 不暴露原始数值）。 */
+export interface StyleParams {
+  /** 位置抖动幅度（米）。 */
+  shakeAmp: number;
+  /** 抖动主频系数。 */
+  shakeFreq: number;
+  /** 上下漂浮幅度（米），用于走拍 bob。 */
+  bobAmp: number;
+  /** 漂浮主频系数。 */
+  bobFreq: number;
+  /** 滚转漂移幅度（度），手持 / 走拍常见的轻微歪斜。 */
+  rollDrift: number;
+  /** 滚转漂移频率系数。 */
+  rollFreq: number;
+}
+
+/** 五档稳定方式，对应线下流行的拍摄设备质感。 */
+export const STYLE_PRESETS: Record<CameraStyle, StyleParams> = {
+  // 三脚架锁死：无抖动。
+  locked: { shakeAmp: 0, shakeFreq: 0, bobAmp: 0, bobFreq: 0, rollDrift: 0, rollFreq: 0 },
+  // 手机云台：极轻微、低频漂浮，几乎察觉不到 —— 当下最流行的「稳定器」观感。
+  gimbal: { shakeAmp: 0.015, shakeFreq: 1.1, bobAmp: 0.02, bobFreq: 0.9, rollDrift: 0, rollFreq: 0 },
+  // 肩扛手持：有机抖动 + 轻微滚转漂移。
+  handheld: { shakeAmp: 0.06, shakeFreq: 7.3, bobAmp: 0.05, bobFreq: 5.7, rollDrift: 1.5, rollFreq: 0.6 },
+  // 手机走拍 / vlog：明显上下 bob（走路颠簸）+ 中等抖动。
+  vlog: { shakeAmp: 0.05, shakeFreq: 6.0, bobAmp: 0.12, bobFreq: 2.1, rollDrift: 0.8, rollFreq: 0.5 },
+};
+
+export const STYLE_LABELS: Record<CameraStyle, string> = {
+  locked: "Locked 三脚架",
+  gimbal: "Gimbal 手机云台",
+  handheld: "Handheld 手持",
+  vlog: "Vlog 走拍",
+};
+
+export const STYLE_HINTS: Record<CameraStyle, string> = {
+  locked: "锁定机位：无抖动，最稳。",
+  gimbal: "手机云台：极轻微漂浮，当下最流行的稳定器观感。",
+  handheld: "手持肩扛：有机微晃 + 轻微滚转漂移。",
+  vlog: "第一人称走拍：明显上下颠簸 + 中等抖动。",
 };
 
 export const LENS_OPTIONS = [24, 35, 50, 85];

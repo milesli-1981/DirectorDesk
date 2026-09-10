@@ -14,8 +14,8 @@ import {
   hitPathPoint,
   pathPolyline,
 } from "../engine/pick";
-import { baseHeading, formationForwardShift, formationSlotOf, objectFacing, objectPosition } from "../engine/solver";
-import { actionPoseAt } from "../engine/actionPose";
+import { baseHeading, formationForwardShift, formationSlotOf, objectFacing, objectPosition, routeObstacles } from "../engine/solver";
+import { actionPoseAt, staticPoseWeight } from "../engine/actionPose";
 import { MODEL_CONFIG } from "../engine/modelConfig";
 import { HumanoidGLB, ModelBoundary } from "./HumanoidModel";
 import {
@@ -29,7 +29,7 @@ import { cameraAxis } from "../engine/axis";
 import { EffectComposer, DepthOfField } from "@react-three/postprocessing";
 import type { DepthOfFieldEffect } from "postprocessing";
 import { bokehScaleForLens, focusRangeForLens, liveShot } from "../engine/shotFocus";
-import { blockingAssets, setRects } from "../engine/occlusion";
+import { blockingAssets } from "../engine/occlusion";
 import { segmentRoutePoints } from "../engine/path";
 import { screenToGround, viewRef } from "../engine/viewBridge";
 import { ASSET_ORDER, ASSET_PRESETS } from "../engine/assetPresets";
@@ -179,9 +179,16 @@ function NameTag({ text, height }: { text: string; height: number }) {
 
 function ActorView({ objectId }: { objectId: string }) {
   const object = useDirectorStore((s) => s.state.objects.find((o) => o.id === objectId));
-  const isSelected = useDirectorStore(
-    (s) => s.selectedKind === "object" && s.selectedId === objectId,
-  );
+  const isSelected = useDirectorStore((s) => {
+    if (s.selectedKind !== "object" || !s.selectedId) return false;
+    if (s.selectedId === objectId) return true;
+    // 团队作为一个 unit：选中其中任一成员（通常是锚点）时整队一起高亮。
+    // 否则点队伍里任何一个人都只有那一个人亮，看着仍像"选中个体"。
+    const team = (s.state.groups ?? []).find(
+      (g) => g.dynamics && g.members.length >= 2 && g.members.includes(objectId),
+    );
+    return !!team && team.members.includes(s.selectedId);
+  });
   const showHelpers = useDirectorStore((s) => s.viewMode === "director");
   const groupRef = useRef<THREE.Group>(null);
   const bodyRef = useRef<THREE.Group>(null);
@@ -397,8 +404,10 @@ function HumanoidRig({
     const actionSample = actionPoseAt(state, objectId, currentTime);
     const aJ = actionSample.pose.joints;
     const j = pose?.joints ?? {};
-    const combinedX = (n: JointName) => (j[n]?.[0] ?? 0) + (aJ[n]?.[0] ?? 0);
+    const combinedX = (n: JointName) => (j[n]?.[0] ?? 0) * sw + (aJ[n]?.[0] ?? 0);
     const loco = actionSample.locomotionScale;
+    // 静态基线只对站定的角色生效：起步后随速度衰减到 0，让位给步态（见 staticPoseWeight）。
+    const sw = staticPoseWeight(speed);
 
     // 步态：显式 walk/run 片段优先；否则按 MOVE 的速度自动判定（低速走、高速跑）。
     // 注意 MOVE 决定"去哪里"，步态只决定身体怎么动，二者互不覆盖。
@@ -417,7 +426,7 @@ function HumanoidRig({
       if (ref.current) {
         const v = j[n] ?? [0, 0, 0];
         const av = aJ[n] ?? [0, 0, 0];
-        ref.current.rotation.set(v[0] + av[0], v[1] + av[1], v[2] + av[2]);
+        ref.current.rotation.set(v[0] * sw + av[0], v[1] * sw + av[1], v[2] * sw + av[2]);
       }
     };
 
@@ -561,8 +570,10 @@ function SegmentPaths() {
         const points = pathPolyline(segment);
         if (points.length < 2) return null;
         // 障碍感知「导航层」：环境（set 资产）如何重塑该 segment 的行动路线（橙色虚线）。
-        // 与运动求解共用 segmentRoutePoints，因此这条线就是 agent 真正走的路线。
-        const rects = setRects(state);
+        // 与运动求解共用 segmentRoutePoints **与同一份障碍集合**，因此这条线就是 agent
+        // 真正走的路线——群队锚点会把「编队骑得过去」的小障碍排除掉，两边必须一致，
+        // 否则会看到橙色线绕行、人却直穿过去。
+        const rects = routeObstacles(state, segment.object);
         const route = segmentRoutePoints(segment, rects);
         const routePoints = route.map((p) => [p.x, 0.13, p.z] as [number, number, number]);
         return (
@@ -1296,9 +1307,14 @@ function Interaction() {
     }
 
     if (objectHit) {
-      store.selectObject(objectHit.object.id);
-      // 锁定对象：可点选（便于解锁），但不接管拖拽、也不挡相机轨道。
-      if (objectHit.object.locked) return;
+      // 团队作为一个 unit：点任一队员都选中整队（整队配置由锚点 members[0] 承载），
+      // 不提供个体选择——否则选中单个队员后，路线 / 编队仍属于整队，语义会打架。
+      const hitTeam = (store.state.groups ?? []).find(
+        (g) => g.dynamics && g.members.length >= 2 && g.members.includes(objectHit.object.id),
+      );
+      store.selectObject(hitTeam ? hitTeam.members[0] : objectHit.object.id);
+      // 锁定对象 / 锁定整队：可点选（便于解锁），但不接管拖拽、也不挡相机轨道。
+      if (objectHit.object.locked || hitTeam?.locked) return;
       store.selectItem(null);
       store.selectPoint(null);
       beginDrag({
@@ -1334,15 +1350,15 @@ function Interaction() {
     const store = useDirectorStore.getState();
 
     if (drag.kind === "object") {
-      // 锁定对象即使在拖拽中也绝不移动位置。
-      const obj = store.state.objects.find((o) => o.id === drag.id);
-      if (obj?.locked) return;
-      if (Math.hypot(point.x - drag.origin.x, point.z - drag.origin.z) > 0.15) drag.moved = true;
       // 团队成员：拖任何一个都是整队平移（位置由锚点承载），保持"队作为一个 unit"。
       const team = (store.state.groups ?? []).find(
-        (g) => g.dynamics && g.members.includes(drag.id),
+        (g) => g.dynamics && g.members.length >= 2 && g.members.includes(drag.id),
       );
-      if (team && team.members.length >= 2 && team.members[0] !== drag.id) {
+      // 锁定对象 / 锁定整队，即使在拖拽中也绝不移动位置。
+      const obj = store.state.objects.find((o) => o.id === drag.id);
+      if (obj?.locked || team?.locked) return;
+      if (Math.hypot(point.x - drag.origin.x, point.z - drag.origin.z) > 0.15) drag.moved = true;
+      if (team && team.members[0] !== drag.id) {
         const anchor = store.state.objects.find((o) => o.id === team.members[0]);
         if (anchor) {
           store.moveObject(
@@ -1590,7 +1606,8 @@ function WorldScene() {
 
 /**
  * 团队标记（导演视图）：
- * - **队旗**：常驻立在队首（锚点）位置，回答"这是哪个队 / 队在哪"，比脚下圆环醒目且不随编队变形。
+ * - **脚下红色标记**：常驻在队首（锚点）脚下的红色圆环 + 实心点，回答"这是哪个队 / 队在哪"。
+ *   取代原先立在队首的「队旗」：贴地标记不遮挡角色与机位视线，也不随编队变形。
  * - **包围大圈**：仅在整队被选中时出现，框住整队 footprint。半径来自「静止编队」槽位，
  *   不随播放 / 拖拽时的弹簧甩动而暴涨——选中圈代表队伍范围，而非瞬时形变。
  * 成员之间的连线已移除：编队形状本身一眼可见，连线只是噪音。
@@ -1646,15 +1663,26 @@ function GroupGraph() {
         const selected = selectedKind === "object" && g.members.includes(selectedId);
         return (
           <group key={g.id}>
-            {/* 队旗：杆 + 旗面（组色） */}
+            {/* 队首脚下标记：红色地面圆环 + 实心点。取代原「队旗」——贴地不遮挡角色 /
+                机位视线，俯视与侧视都一眼可见。 */}
             <group position={[anchor.x, 0, anchor.z]}>
-              <mesh position={[0, 0.9, 0]}>
-                <cylinderGeometry args={[0.035, 0.035, 1.8, 8]} />
-                <meshBasicMaterial color="#dfe7ef" />
+              <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.03, 0]}>
+                <ringGeometry args={[0.42, 0.55, 48]} />
+                <meshBasicMaterial
+                  color="#ff3b30"
+                  transparent
+                  opacity={0.85}
+                  side={THREE.DoubleSide}
+                />
               </mesh>
-              <mesh position={[0.33, 1.52, 0]}>
-                <planeGeometry args={[0.66, 0.42]} />
-                <meshBasicMaterial color={g.color} side={THREE.DoubleSide} />
+              <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.035, 0]}>
+                <circleGeometry args={[0.2, 32]} />
+                <meshBasicMaterial
+                  color="#ff3b30"
+                  transparent
+                  opacity={0.95}
+                  side={THREE.DoubleSide}
+                />
               </mesh>
             </group>
             {selected ? (
@@ -2015,7 +2043,7 @@ export function WorldView() {
       ) : null}
 
       <div
-        className="canvasWrap"
+        className={`canvasWrap${pathDrawMode ? " is-drawing" : ""}`}
         onDragOver={(event) => {
           event.preventDefault();
           event.dataTransfer.dropEffect = "copy";
@@ -2046,11 +2074,17 @@ export function WorldView() {
 
         {/* 画布内左侧悬浮工具条：视图切换 + 锁定 + 缩放 / 路径 / 相机选择，竖向排列。 */}
         <div className="view-floatbar">
-          <div className="vf-switch" role="tablist" aria-label="View Mode">
+          {/* 分段控件：Director / Camera 是同一枚开关的两档，滑块在其中滑动。 */}
+          <div
+            className={`vf-switch${viewMode === "camera" ? " is-camera" : ""}`}
+            role="radiogroup"
+            aria-label="View Mode"
+          >
+            <span className="vf-thumb" aria-hidden="true" />
             <button
               type="button"
-              role="tab"
-              aria-selected={viewMode === "director"}
+              role="radio"
+              aria-checked={viewMode === "director"}
               className={`vf-opt ${viewMode === "director" ? "active" : ""}`}
               onClick={() => setViewMode("director")}
               title="导演视角：自由观察全场、编辑路径"
@@ -2059,8 +2093,8 @@ export function WorldView() {
             </button>
             <button
               type="button"
-              role="tab"
-              aria-selected={viewMode === "camera"}
+              role="radio"
+              aria-checked={viewMode === "camera"}
               className={`vf-opt ${viewMode === "camera" ? "active" : ""}`}
               onClick={() => setViewMode("camera")}
               disabled={cameras.length === 0}
@@ -2106,7 +2140,7 @@ export function WorldView() {
                 }
                 onClick={togglePathDraw}
               >
-                ✏️ Path
+                {pathDrawMode ? "✏️ 绘制中" : "✏️ Path"}
               </button>
             </>
           ) : (
