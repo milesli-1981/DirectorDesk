@@ -26,7 +26,7 @@ export interface ActionSample {
 
 /**
  * 采样某演员在 time 时刻由 ActionClip 贡献的姿势。
- * - 静态类（sit/crouch）：以 easing 渐入的关节角度（乘 intensity）。
+ * - 静态类（sit/crouch）：以 easing 渐入的关节角度。
  * - 周期类（wave/talk）：在预设基线上叠加随时间振荡。
  * - 多个 clip 叠加（角度累加）；locomotionScale 取静态 clip 的最大渐入量。
  */
@@ -59,7 +59,6 @@ export function actionPoseAt(
     const tLocal =
       (time - clip.timeStart) / Math.max(0.001, clip.timeEnd - clip.timeStart);
     const blend = easeInOut(tLocal);
-    const intensity = clip.intensity ?? 1;
     const cyclic = CYCLIC_KINDS.has(clip.kind);
 
     for (const key of Object.keys(map) as JointName[]) {
@@ -68,9 +67,9 @@ export function actionPoseAt(
       let v: number;
       if (cyclic) {
         const omega = clip.kind === "wave" ? 7.5 : 9.5;
-        v = (over ? over[0] : base) + Math.sin(time * omega) * 0.4 * intensity;
+        v = (over ? over[0] : base) + Math.sin(time * omega) * 0.4;
       } else {
-        v = over ? over[0] : base * intensity;
+        v = over ? over[0] : base;
       }
       const cur = joints[key]?.[0] ?? 0;
       joints[key] = [cur + v * blend, 0, 0];

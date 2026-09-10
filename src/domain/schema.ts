@@ -240,8 +240,6 @@ export interface ActionClip {
   kind: ActionKind;
   /** 仅当 kind === "custom" 时有效：指向 DirectorState.customActions 里的一条记录。 */
   customId?: string;
-  /** 动作幅度/强度 0..1。 */
-  intensity: number;
   /** 关节角度覆盖：在 kind 预设之上微调（未列出的关节沿用预设）。 */
   pose?: Pose;
 }

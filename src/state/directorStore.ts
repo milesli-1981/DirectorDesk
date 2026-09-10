@@ -28,10 +28,15 @@ import {
 } from "../domain/schema";
 import { createBlankState } from "../engine/demoShot";
 import { normalizePathPointModes, pathInsertIndex, simplifyPath } from "../engine/path";
-import { contentEndTime, rawContentEnd } from "../engine/timeline";
+import { contentEndTime } from "../engine/timeline";
 import { ASSET_PRESETS } from "../engine/assetPresets";
 import { separateSetAsset } from "../engine/collision";
-import { AssetCategory, DirectorObject, FormationKind } from "../domain/schema";
+import {
+  AssetCategory,
+  DirectorObject,
+  FORMATION_MORPH_SECONDS,
+  FormationKind,
+} from "../domain/schema";
 import { formationSlotOf } from "../engine/solver";
 import { findTemplate } from "../domain/templates";
 
@@ -540,6 +545,8 @@ function sanitizeState(s: DirectorState): DirectorState {
     segments,
     constraints: s.constraints.filter((c) => ids.has(c.subject) && ids.has(c.target)),
     handoffs: reconcileHandoffs(segments, s.handoffs),
+    // 引力场恒开：该开关不再对用户开放，任何来源的存档 / 导入都统一强制为 true。
+    groups: s.groups?.map((g) => (g.dynamics ? g : { ...g, dynamics: true })),
   };
 }
 
@@ -984,7 +991,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           name: `G${n}`,
           color: palette[(n - 1) % palette.length],
           members: [],
-          dynamics: false,
+          dynamics: true,
           formation: "column",
           spacing: 1.2,
           noise: 0.35,
@@ -1125,7 +1132,13 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           // 编队切换：记录切换时刻与上一阵型，供求解器按时间插值，避免瞬间变阵（不真实）。
           if (patch.formation !== undefined && patch.formation !== g.formation) {
             next.prevFormation = g.formation;
-            next.formationChangeAt = currentTime;
+            // 过渡按【场景时间】推进，所以只有时间真的在走（播放中）时才把过渡放在播放头之后；
+            // 暂停时场景时间不动，放在播放头之后就永远推不到头——点了切换却看不到任何变化
+            // （还会一直显示上一个阵型）。因此暂停时把整段过渡挪到播放头之前，
+            // 切完这一刻刚好走完：立刻看到新阵型，成片里依然是一段平滑变阵而非瞬移。
+            next.formationChangeAt = store.playing
+              ? currentTime
+              : currentTime - FORMATION_MORPH_SECONDS;
           }
           return next;
         });
@@ -2077,9 +2090,11 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
       set((store) => {
         const current = store.state;
         if (!Number.isFinite(seconds)) return {};
-        // 下限：不能小于已有内容的末尾，否则会把片段截掉（向上取整到 0.1s，便于输入）。
-        const min = Math.max(1, Math.ceil(rawContentEnd(current) * 10) / 10);
-        const duration = clamp(round1(seconds), min, 600);
+        // 下限只取 1s：Scene Duration 是「成片长度」，不是「内容长度」。
+        // 以前把它钳到内容末尾（rawContentEnd），于是只要还有片段排在后面就永远调不小，
+        // 表现就是「往小了设置不起作用」。调小只是让超出部分不参与播放 / 导出，
+        // 片段本身不会被删掉，把时长调回去它们就又回来了。
+        const duration = clamp(round1(seconds), 1, 600);
         if (duration === current.duration) return {};
         return {
           state: { ...current, revision: current.revision + 1, duration },
@@ -2098,7 +2113,6 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         timeStart: start,
         timeEnd: end,
         kind: "wave",
-        intensity: 1,
       };
       set({
         state: {
@@ -2297,7 +2311,6 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           timeStart: start,
           timeEnd: end,
           kind: "wave",
-          intensity: 1,
         };
         set({
           state: {
@@ -2305,9 +2318,11 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
             revision: state.revision + 1,
             actions: [...(state.actions ?? []), clip],
           },
-          selectedKind: "object",
-          selectedId: objectId,
+          // 互斥选择：新建动作片段后只选中该片段（时间轴轴），清掉对象选中（对象轴）。
+          // 否则同一次 set 同时设了两轴，订阅里的互斥清理会把刚建的片段又清掉。
           selectedItem: clip.id,
+          selectedKind: undefined,
+          selectedId: "",
           radialObjectId: null,
         });
         return;
@@ -2340,4 +2355,23 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
       });
     },
   };
+});
+
+// —— 互斥选择（对象 / 相机 轴 与 时间轴片段 轴 永远只有一个有效选中）——
+// 任一轴被「设成有效选中」时，清空另一轴，避免 Inspector 同时承载两个不同域的选中物
+// （如「路中石墩」与「SEG_02」被拼进同一行、误导为同一个选中物）。
+// 用订阅统一兜底：所有设置选中态的入口（selectObject / selectItem / 径向菜单 / 导入 等）都自动互斥，
+// 不必在每个调用点手动清另轴。订阅内再触发一次 setState 会被上面的分支守卫挡住，不会死循环。
+useDirectorStore.subscribe((state, prev) => {
+  const idChanged = state.selectedId !== prev.selectedId;
+  const itemChanged = state.selectedItem !== prev.selectedItem;
+  if (idChanged && state.selectedId) {
+    // 对象 / 相机 被新选中 → 清时间轴选中。
+    if (state.selectedItem) useDirectorStore.setState({ selectedItem: null, selectedPoint: null });
+  } else if (itemChanged && state.selectedItem) {
+    // 时间轴片段被新选中 → 清对象 / 相机选中。
+    if (state.selectedId || state.selectedKind) {
+      useDirectorStore.setState({ selectedKind: undefined, selectedId: "" });
+    }
+  }
 });

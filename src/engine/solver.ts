@@ -286,6 +286,13 @@ export function anchorArcLength(route: ObjectRoute, time: number): number {
  * 衰减振荡响应，突变时的甩动与回弹)。二者都由锚点加速度驱动，因此**匀速时恒为零**，
  * 且全程无状态、可确定性复算（相机 / 遮挡 / 导出共用同一求解）。
  */
+
+// 队员间最小间距（personal space）：不模拟物理碰撞，但保证同组两人不叠在一起。
+// 二人身宽的一半之和 + 此余量即「最小间距」；设得很小，仅消除视觉重叠、不改动作者编排的间距。
+const PERSONAL_SPACE = 0.05;
+// 单次分离位移上限：避免极端拥挤时被一次性推飞（分离项会逐帧累积到间距达标为止）。
+const MAX_SEP = 1.2;
+
 function groupInfluenceOffset(state: DirectorState, objectId: string, time: number): Vec2 {
   const group = (state.groups ?? []).find((g) => g.dynamics && g.members.includes(objectId));
   if (!group || group.members.length < 2) return { x: 0, z: 0 };
@@ -355,33 +362,7 @@ function groupInfluenceOffset(state: DirectorState, objectId: string, time: numb
   const mw = (meObj?.footprint.w ?? 0.5) / 2;
   const md = (meObj?.footprint.d ?? 0.5) / 2;
   const slot = blendedSlot(objectId); // 纯编队槽位（不含避让），供滞后低通使用
-  // 队员自身所在弧长（column 的 fwd 为负 → 落在锚点后方沿路径回退）。
-  const sMe = sAnchor + slot.fwd;
-  const arcPoint = useArc ? pointAtArcLength(route.lut, sMe) : null;
-  const heading = useArc
-    ? tangentAtArcLength(route.lut, sMe)
-    : baseHeading(state, anchorId, time);
-  const forward = { x: Math.sin(heading), z: Math.cos(heading) };
-  const right = { x: Math.cos(heading), z: -Math.sin(heading) };
-  const desiredPure = arcPoint
-    ? { x: arcPoint.x + right.x * slot.right, z: arcPoint.z + right.z * slot.right }
-    : {
-        x: anchor.x + forward.x * slot.fwd + right.x * slot.right,
-        z: anchor.z + forward.z * slot.fwd + right.z * slot.right,
-      };
-  const dpos = desiredPure;
 
-  // 世界点 → 编队局部坐标（相对队员自己的编队原点）：f = 沿路径切线的前后，l = 侧向。
-  // forward / right 已正交且为单位向量，故点积即投影；队员期望位的侧向坐标恒等于 slot.right。
-  const localOrigin = arcPoint ?? anchor;
-  const toLocal = (px: number, pz: number) => {
-    const dx = px - localOrigin.x;
-    const dz = pz - localOrigin.z;
-    return { f: dx * forward.x + dz * forward.z, l: dx * right.x + dz * right.z };
-  };
-  // 轴对齐矩形投影到局部侧轴上的半长（支撑函数）。
-  const halfLatOf = (r: { w: number; d: number }) =>
-    Math.abs(right.x) * (r.w / 2) + Math.abs(right.z) * (r.d / 2);
   // 编队横向跨度（槽位侧向范围）：判断障碍能否被"骑"过去。
   let latMin = Infinity;
   let latMax = -Infinity;
@@ -392,96 +373,132 @@ function groupInfluenceOffset(state: DirectorState, objectId: string, time: numb
   }
   const latCenter = (latMin + latMax) / 2;
   const MAX_LAT_PUSH = 6; // 侧移超过此距离说明不是「小障碍」，回退到世界轴推出
+  const SIDE_EPS = 1e-3;
 
-  let pushX = 0;
-  let pushZ = 0;
-  for (const r of sets) {
-    // 检测盒在膨胀盒基础上再放大 LEAD：让让位量有一段距离可以渐入渐出（否则是阶跃）。
-    const hw = r.w / 2 + mw + CLEAR + LEAD; // 含自身尺寸 + 余量 + 提前量
-    const hh = r.d / 2 + md + CLEAR + LEAD;
-    const dxr = dpos.x - r.x;
-    const dzr = dpos.z - r.z;
-    const penX = hw - Math.abs(dxr); // >0 表示落入本轴膨胀盒
-    const penZ = hh - Math.abs(dzr);
-    if (!(penX > 0 && penZ > 0)) continue;
-
-    const halfLat = halfLatOf(r) + mw + CLEAR; // 障碍在侧向的半宽（含余量）
-    const oc = toLocal(r.x, r.z);
-    // 能"骑"过去：编队左右两端都伸到障碍轮廓之外，两侧都留得下人 → 分流贴两边过。
-    const straddle = latMin < oc.l - halfLat && latMax > oc.l + halfLat;
-    // 分流时按槽位在障碍中心的左 / 右各走一边；绕行时整队走远离障碍中心的那一侧。
-    //
-    // 死区（SIDE_EPS）：队员正对障碍中心时，上面两个量之差会被浮点噪声左右——
-    // right.x = cos(heading) 在正东 / 正西行进时是 ~6e-17 而非 0，使 oc.l 带上一项
-    // ~6e-17 × (障碍x − 自身x)，于是 oc.l 随队员前进而缓慢变号。锚点 slot.right 恒为 0
-    // （formationSlot 对 index<=0 返回 0），一旦 oc.l 变号，「0 <= oc.l」随之翻转 →
-    // 队首越过石墩中心的瞬间突然横跳到另一侧（纵队更明显：全员 slot 相同，整队一起翻）。
-    // 差距小于 EPS 一律判为「正对」并固定取一侧，保证整段绕行方向稳定。
-    const SIDE_EPS = 1e-3;
-    const dSide = straddle ? slot.right - oc.l : latCenter - oc.l;
-    const side = dSide < -SIDE_EPS ? -1 : dSide > SIDE_EPS ? 1 : -1;
-    // 让位不是「把每个人都推到障碍那条边」——沿一维侧向推出必然落在同一条边界上，
-    // 同侧的一队人会被压成一列。改为【同侧整体平移】：取该侧最靠近障碍的队员所需位移，
-    // 同侧共用同一个位移量 → 最靠近的刚好贴边，其余保持原有相对间距依次外让。
-    let latPush = 0;
-    for (const id of group.members) {
-      const s = blendedSlot(id).right;
-      // 分流时只统计与我同侧的队员；不分流时全队一起算。
-      if (straddle && (side < 0 ? s > oc.l : s <= oc.l)) continue;
-      const pen = halfLat - Math.abs(s - oc.l);
-      if (pen > latPush) latPush = pen;
+  // 计算「某队员的编队期望位」：沿路径弧长采样 + 侧向槽位 + 静态障碍侧让（不含惯性 / 分离）。
+  // 既用于自身，也供「队员间最小间距」取其它队员的期望位——后者必须取「不含惯性」的纯期望位，
+  // 否则惯性滞后（lag）会被当成真实间距，导致分离被惯性位移抵消、间距判读错误。
+  const desiredAt = (memberId: string): { pure: Vec2; desired: Vec2 } => {
+    const mslot = blendedSlot(memberId);
+    const msMe = sAnchor + mslot.fwd;
+    const map = useArc ? pointAtArcLength(route.lut, msMe) : null;
+    const mh = useArc ? tangentAtArcLength(route.lut, msMe) : baseHeading(state, anchorId, time);
+    const mr = { x: Math.cos(mh), z: -Math.sin(mh) };
+    const mdp = map
+      ? { x: map.x + mr.x * mslot.right, z: map.z + mr.z * mslot.right }
+      : {
+          x: anchor.x + Math.sin(mh) * mslot.fwd + mr.x * mslot.right,
+          z: anchor.z + Math.cos(mh) * mslot.fwd + mr.z * mslot.right,
+        };
+    const mObj = state.objects.find((o) => o.id === memberId);
+    const mmw = (mObj?.footprint.w ?? 0.5) / 2;
+    const mmd = (mObj?.footprint.d ?? 0.5) / 2;
+    let pX = 0;
+    let pZ = 0;
+    for (const r of sets) {
+      const hw = r.w / 2 + mmw + CLEAR + LEAD;
+      const hh = r.d / 2 + mmd + CLEAR + LEAD;
+      const dxr = mdp.x - r.x;
+      const dzr = mdp.z - r.z;
+      const penX = hw - Math.abs(dxr);
+      const penZ = hh - Math.abs(dzr);
+      if (!(penX > 0 && penZ > 0)) continue;
+      // 障碍在队员局部侧轴的投影：成员期望位相对自身编队原点的侧向坐标 = slot.right。
+      const oc_l = (r.x - mdp.x) * mr.x + (r.z - mdp.z) * mr.z + mslot.right;
+      const halfLat = Math.abs(mr.x) * (r.w / 2) + Math.abs(mr.z) * (r.d / 2) + mmw + CLEAR;
+      const straddle = latMin < oc_l - halfLat && latMax > oc_l + halfLat;
+      const dSide = straddle ? mslot.right - oc_l : latCenter - oc_l;
+      const side = dSide < -SIDE_EPS ? -1 : dSide > SIDE_EPS ? 1 : -1;
+      let latPush = 0;
+      for (const id of group.members) {
+        const s = blendedSlot(id).right;
+        if (straddle && (side < 0 ? s > oc_l : s <= oc_l)) continue;
+        const pen = halfLat - Math.abs(s - oc_l);
+        if (pen > latPush) latPush = pen;
+      }
+      if (latPush <= 0) continue;
+      latPush *= side;
+      const rampDist0 = LEAD + mmw + CLEAR;
+      let depth = Math.min(penX, penZ);
+      for (const id of group.members) {
+        const s = blendedSlot(id);
+        const dS = straddle ? s.right - oc_l : latCenter - oc_l;
+        const sideJ = dS < -SIDE_EPS ? -1 : dS > SIDE_EPS ? 1 : -1;
+        if (sideJ !== side) continue;
+        const sMeJ = sAnchor + s.fwd;
+        const hJ = useArc ? tangentAtArcLength(route.lut, sMeJ) : mh;
+        const rJ = { x: Math.cos(hJ), z: -Math.sin(hJ) };
+        const apJ = useArc ? pointAtArcLength(route.lut, sMeJ) : null;
+        const dpJ = apJ
+          ? { x: apJ.x + rJ.x * s.right, z: apJ.z + rJ.z * s.right }
+          : {
+              x: anchor.x + Math.sin(hJ) * s.fwd + rJ.x * s.right,
+              z: anchor.z + Math.cos(hJ) * s.fwd + rJ.z * s.right,
+            };
+        const pxJ = hw - Math.abs(dpJ.x - r.x);
+        const pzJ = hh - Math.abs(dpJ.z - r.z);
+        if (pxJ > 0 && pzJ > 0) depth = Math.max(depth, Math.min(pxJ, pzJ));
+      }
+      const rt = rampDist0 > 0 ? Math.min(1, Math.max(0, depth / rampDist0)) : 1;
+      const ramp = rt * rt * (3 - 2 * rt);
+      if (Math.abs(latPush) <= MAX_LAT_PUSH) {
+        pX += mr.x * latPush * ramp;
+        pZ += mr.z * latPush * ramp;
+      } else {
+        if (penX < penZ) pX += (dxr >= 0 ? 1 : -1) * Math.max(0, penX - LEAD);
+        else pZ += (dzr >= 0 ? 1 : -1) * Math.max(0, penZ - LEAD);
+      }
     }
-    if (latPush <= 0) continue; // 本侧无人剐蹭 → 保持原编队不动
-    latPush *= side;
-    // 让位量原本只由【侧向穿透】决定、与「进入多深」无关，配合入盒的二值闸门 →
-    // 一踏进盒子就全额生效，观感就是瞬移。改为按【进入深度】smoothstep 渐入渐出：
-    // 刚入盒为 0，抵达真实障碍前已全额让开，出盒再平滑回到 0（出口也不会瞬移回编队）。
-    const rampDist = LEAD + mw + CLEAR;
-    // 到最近面的距离：入盒 0 → 盒内渐深 → 出盒回 0。
-    //
-    // 关键：ramp 必须【同侧共用】（取同侧最深者）。若各按自己的深度算，贴障碍近的队员
-    // 拿到满 ramp、本来就快让开的只拿到一部分 → 同侧被推的距离不同 → 相对间距被压缩，
-    // 队员就叠在一起。这正是上面「同侧共用同一个位移量 → 其余保持原有相对间距」的本意，
-    // 逐人 ramp 会破坏它（且与 latPush 取同侧最大值不一致：位移共用、渐入却各自算）。
-    let depth = Math.min(penX, penZ);
-    for (const id of group.members) {
-      if (id === objectId) continue;
-      const s = blendedSlot(id);
-      const dS = straddle ? s.right - oc.l : latCenter - oc.l;
-      const sideJ = dS < -SIDE_EPS ? -1 : dS > SIDE_EPS ? 1 : -1;
-      if (sideJ !== side) continue;
-      const sMeJ = sAnchor + s.fwd;
-      const hJ = useArc ? tangentAtArcLength(route.lut, sMeJ) : heading;
-      const rJ = { x: Math.cos(hJ), z: -Math.sin(hJ) };
-      const apJ = useArc ? pointAtArcLength(route.lut, sMeJ) : null;
-      const dpJ = apJ
-        ? { x: apJ.x + rJ.x * s.right, z: apJ.z + rJ.z * s.right }
-        : {
-            x: anchor.x + Math.sin(hJ) * s.fwd + rJ.x * s.right,
-            z: anchor.z + Math.cos(hJ) * s.fwd + rJ.z * s.right,
-          };
-      const pxJ = hw - Math.abs(dpJ.x - r.x);
-      const pzJ = hh - Math.abs(dpJ.z - r.z);
-      if (pxJ > 0 && pzJ > 0) depth = Math.max(depth, Math.min(pxJ, pzJ));
-    }
-    const rt = rampDist > 0 ? Math.min(1, Math.max(0, depth / rampDist)) : 1;
-    const ramp = rt * rt * (3 - 2 * rt); // smoothstep：位移与速度都连续
-    if (Math.abs(latPush) <= MAX_LAT_PUSH) {
-      // 只改侧向、前向坐标不变：保住前进进度，出障碍后自然回到编队槽位。
-      pushX += right.x * latPush * ramp;
-      pushZ += right.z * latPush * ramp;
-    } else {
-      // 侧移过大（长墙等）：回退到原世界轴最小穿透推出。penX 含 LEAD，扣掉才是相对
-      // 膨胀盒的穿透量；该量本身随穿透连续变化，故不再叠加 ramp。
-      if (penX < penZ) pushX += (dxr >= 0 ? 1 : -1) * Math.max(0, penX - LEAD);
-      else pushZ += (dzr >= 0 ? 1 : -1) * Math.max(0, penZ - LEAD);
-    }
-  }
-  // 最终期望位 = 编队期望位 + 避让位移（直接叠加，已随期望位平滑变化，不被低通抵消）。
-  const desired = {
-    x: desiredPure.x + pushX,
-    z: desiredPure.z + pushZ,
+    return { pure: mdp, desired: { x: mdp.x + pX, z: mdp.z + pZ } };
   };
+
+  const selfDes = desiredAt(objectId);
+  const desiredPure = selfDes.pure;
+
+  // —— 队员间最小间距（personal space）——
+  // 不模拟物理碰撞，但保证同组两人不叠在一起：避障侧让会把同侧队员整体推向一侧，可能挤到
+  // 站在那里、自己没被侧让的队员（尤其落在检测盒外、拿不到位移的人）→ 对方必须让开点距离。
+  // 基于「编队期望位」（含障碍侧让，不含惯性/微扰）做一遍松弛：所有队员先取纯期望位，再对过近
+  // 的配对沿连线互推开，迭代若干轮直到达标。逐对相加会被「夹在中间的人被两侧反向拉」抵消，松弛
+  // 则整体收敛；结果与遍历顺序无关、无状态、可确定性复算（相机 / 遮挡 / 导出共用同一求解）。
+  // 闭包内用局部缓存，单次 groupInfluenceOffset 调用内只算一次。
+  let sepCache: Map<string, Vec2> | null = null;
+  const separatedDesired = (): Map<string, Vec2> => {
+    if (sepCache) return sepCache;
+    const pos = new Map<string, Vec2>();
+    for (const id of group.members) pos.set(id, desiredAt(id).desired);
+    const ITER = 8;
+    for (let it = 0; it < ITER; it += 1) {
+      let moved = false;
+      for (let a = 0; a < group.members.length; a += 1) {
+        for (let b = a + 1; b < group.members.length; b += 1) {
+          const A = group.members[a];
+          const B = group.members[b];
+          const pa = pos.get(A)!;
+          const pb = pos.get(B)!;
+          const dx = pb.x - pa.x;
+          const dz = pb.z - pa.z;
+          const d = Math.hypot(dx, dz);
+          const oa = state.objects.find((o) => o.id === A);
+          const ob = state.objects.find((o) => o.id === B);
+          const minGap = (oa?.footprint.w ?? 0.5) / 2 + (ob?.footprint.w ?? 0.5) / 2 + PERSONAL_SPACE;
+          if (d >= minGap || d < 1e-6) continue;
+          const push = Math.min((minGap - d) * 0.5, MAX_SEP);
+          const ux = dx / d;
+          const uz = dz / d;
+          pos.set(A, { x: pa.x - ux * push, z: pa.z - uz * push });
+          pos.set(B, { x: pb.x + ux * push, z: pb.z + uz * push });
+          moved = true;
+        }
+      }
+      if (!moved) break;
+    }
+    sepCache = pos;
+    return pos;
+  };
+
+  // 最终期望位 = 编队期望位 + 避让位移 + 队员间最小间距（直接叠加，已随期望位平滑变化，不被低通抵消）。
+  const desired = separatedDesired().get(objectId)!;
 
   // —— 队员惯性（队首编队点的时间低通）——
   // 把「队首 + 当前朝向」得到的编队期望点沿时间做指数低通（一阶滞后），队员跟随这个被平滑、
@@ -776,6 +793,40 @@ export function objectFacing(state: DirectorState, objectId: string, time: numbe
   if (subject) return (subject.rotation * Math.PI) / 180;
 
   return Math.atan2(dx, dz);
+}
+
+/**
+ * 机位取景用的「行进朝向」：与 objectFacing 的区别是**不含组动力学**
+ * （编队弹簧 / 惯性甩动 / 局部分流绕障的横向让位）。
+ *
+ * 整队的行进方向没变时，个别队员（含队首）为绕障做的横向让位不该带着镜头一起转——
+ * 否则一发生避障，俯瞰这类机位就跟着甩头（实测偏航能甩 130°+），看着像整队转向了。
+ * 队首的绕障位移发生在 groupInfluenceOffset 里，用 applyDynamics=false 即可剥掉。
+ *
+ * 取不到运动方向（静止）时：先看导演意图 LOOK_AT，再回落到 baseHeading
+ * （路径切线 → 片段方向 → 资产摆放朝向），两者同样不含动力学。
+ */
+export function travelHeading(state: DirectorState, id: string, time: number): number {
+  const s = 0.06;
+  const a = objectPosition(state, id, Math.max(0, time - s), new Set(), undefined, false);
+  const b = objectPosition(state, id, time + s, new Set(), undefined, false);
+  const dx = b.x - a.x;
+  const dz = b.z - a.z;
+  if (Math.hypot(dx, dz) > 1e-4) return Math.atan2(dx, dz);
+
+  const look = state.constraints.find(
+    (q) =>
+      q.type === "LOOK_AT" &&
+      q.subject === id &&
+      time >= q.timeStart &&
+      time <= q.timeEnd,
+  );
+  if (look) {
+    const p = objectPosition(state, id, time, new Set(), undefined, false);
+    const t = objectPosition(state, look.target, time, new Set(), undefined, false);
+    if (Math.hypot(t.x - p.x, t.z - p.z) > 1e-4) return Math.atan2(t.x - p.x, t.z - p.z);
+  }
+  return baseHeading(state, id, time);
 }
 
 export function resolvePositions(state: DirectorState, time: number): Record<string, Vec2> {

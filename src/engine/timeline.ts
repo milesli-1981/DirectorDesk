@@ -50,7 +50,7 @@ export function buildTimelineItems(state: DirectorState): TimelineItem[] {
       track: clip.object,
       source: clip.id,
       kind: "action",
-      label: `${customName ?? clip.kind} · ${Math.round(clip.intensity * 100)}%`,
+      label: customName ?? clip.kind,
     });
   });
 

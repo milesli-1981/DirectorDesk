@@ -179,9 +179,16 @@ function NameTag({ text, height }: { text: string; height: number }) {
 
 function ActorView({ objectId }: { objectId: string }) {
   const object = useDirectorStore((s) => s.state.objects.find((o) => o.id === objectId));
-  const isSelected = useDirectorStore(
-    (s) => s.selectedKind === "object" && s.selectedId === objectId,
-  );
+  const isSelected = useDirectorStore((s) => {
+    if (s.selectedKind !== "object" || !s.selectedId) return false;
+    if (s.selectedId === objectId) return true;
+    // 团队作为一个 unit：选中其中任一成员（通常是锚点）时整队一起高亮。
+    // 否则点队伍里任何一个人都只有那一个人亮，看着仍像"选中个体"。
+    const team = (s.state.groups ?? []).find(
+      (g) => g.dynamics && g.members.length >= 2 && g.members.includes(objectId),
+    );
+    return !!team && team.members.includes(s.selectedId);
+  });
   const showHelpers = useDirectorStore((s) => s.viewMode === "director");
   const groupRef = useRef<THREE.Group>(null);
   const bodyRef = useRef<THREE.Group>(null);
@@ -1300,9 +1307,14 @@ function Interaction() {
     }
 
     if (objectHit) {
-      store.selectObject(objectHit.object.id);
-      // 锁定对象：可点选（便于解锁），但不接管拖拽、也不挡相机轨道。
-      if (objectHit.object.locked) return;
+      // 团队作为一个 unit：点任一队员都选中整队（整队配置由锚点 members[0] 承载），
+      // 不提供个体选择——否则选中单个队员后，路线 / 编队仍属于整队，语义会打架。
+      const hitTeam = (store.state.groups ?? []).find(
+        (g) => g.dynamics && g.members.length >= 2 && g.members.includes(objectHit.object.id),
+      );
+      store.selectObject(hitTeam ? hitTeam.members[0] : objectHit.object.id);
+      // 锁定对象 / 锁定整队：可点选（便于解锁），但不接管拖拽、也不挡相机轨道。
+      if (objectHit.object.locked || hitTeam?.locked) return;
       store.selectItem(null);
       store.selectPoint(null);
       beginDrag({
@@ -1338,15 +1350,15 @@ function Interaction() {
     const store = useDirectorStore.getState();
 
     if (drag.kind === "object") {
-      // 锁定对象即使在拖拽中也绝不移动位置。
-      const obj = store.state.objects.find((o) => o.id === drag.id);
-      if (obj?.locked) return;
-      if (Math.hypot(point.x - drag.origin.x, point.z - drag.origin.z) > 0.15) drag.moved = true;
       // 团队成员：拖任何一个都是整队平移（位置由锚点承载），保持"队作为一个 unit"。
       const team = (store.state.groups ?? []).find(
-        (g) => g.dynamics && g.members.includes(drag.id),
+        (g) => g.dynamics && g.members.length >= 2 && g.members.includes(drag.id),
       );
-      if (team && team.members.length >= 2 && team.members[0] !== drag.id) {
+      // 锁定对象 / 锁定整队，即使在拖拽中也绝不移动位置。
+      const obj = store.state.objects.find((o) => o.id === drag.id);
+      if (obj?.locked || team?.locked) return;
+      if (Math.hypot(point.x - drag.origin.x, point.z - drag.origin.z) > 0.15) drag.moved = true;
+      if (team && team.members[0] !== drag.id) {
         const anchor = store.state.objects.find((o) => o.id === team.members[0]);
         if (anchor) {
           store.moveObject(
@@ -2031,7 +2043,7 @@ export function WorldView() {
       ) : null}
 
       <div
-        className="canvasWrap"
+        className={`canvasWrap${pathDrawMode ? " is-drawing" : ""}`}
         onDragOver={(event) => {
           event.preventDefault();
           event.dataTransfer.dropEffect = "copy";
@@ -2062,11 +2074,17 @@ export function WorldView() {
 
         {/* 画布内左侧悬浮工具条：视图切换 + 锁定 + 缩放 / 路径 / 相机选择，竖向排列。 */}
         <div className="view-floatbar">
-          <div className="vf-switch" role="tablist" aria-label="View Mode">
+          {/* 分段控件：Director / Camera 是同一枚开关的两档，滑块在其中滑动。 */}
+          <div
+            className={`vf-switch${viewMode === "camera" ? " is-camera" : ""}`}
+            role="radiogroup"
+            aria-label="View Mode"
+          >
+            <span className="vf-thumb" aria-hidden="true" />
             <button
               type="button"
-              role="tab"
-              aria-selected={viewMode === "director"}
+              role="radio"
+              aria-checked={viewMode === "director"}
               className={`vf-opt ${viewMode === "director" ? "active" : ""}`}
               onClick={() => setViewMode("director")}
               title="导演视角：自由观察全场、编辑路径"
@@ -2075,8 +2093,8 @@ export function WorldView() {
             </button>
             <button
               type="button"
-              role="tab"
-              aria-selected={viewMode === "camera"}
+              role="radio"
+              aria-checked={viewMode === "camera"}
               className={`vf-opt ${viewMode === "camera" ? "active" : ""}`}
               onClick={() => setViewMode("camera")}
               disabled={cameras.length === 0}
@@ -2122,7 +2140,7 @@ export function WorldView() {
                 }
                 onClick={togglePathDraw}
               >
-                ✏️ Path
+                {pathDrawMode ? "✏️ 绘制中" : "✏️ Path"}
               </button>
             </>
           ) : (

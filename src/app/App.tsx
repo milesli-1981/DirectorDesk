@@ -1,6 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { Inspector } from "../components/Inspector";
-import { ObjectList } from "../components/ObjectList";
+import {
+  ObjectList,
+  LEFT_RAIL_W,
+  LEFT_MAX_W,
+  LEFT_COLLAPSED_AT,
+  LEFT_DEFAULT_W,
+} from "../components/ObjectList";
 import { SceneTabs } from "../components/SceneTabs";
 import { Timeline } from "../components/Timeline";
 import { WorldView } from "../components/WorldView";
@@ -45,6 +51,19 @@ export function App() {
       installHeadlessApi();
     }
   }, []);
+
+  // 左栏宽度是唯一数据源：抓手拖动与收起 / 展开都只改它，网格列宽由 CSS 变量 --left-w 跟随。
+  // 拖动过程中由 resizing 关掉回弹动画，保证跟手；点击胶囊按钮则走带回弹的过渡。
+  const [leftWidth, setLeftWidth] = useState(LEFT_DEFAULT_W);
+  const [resizing, setResizing] = useState(false);
+  const lastExpandedW = useRef(LEFT_DEFAULT_W);
+  const collapsed = leftWidth <= LEFT_COLLAPSED_AT;
+  const setLeftW = (next: number) => {
+    const w = Math.max(LEFT_RAIL_W, Math.min(LEFT_MAX_W, next));
+    if (w > LEFT_COLLAPSED_AT) lastExpandedW.current = w;
+    setLeftWidth(w);
+  };
+  const toggleLeft = () => setLeftW(collapsed ? lastExpandedW.current : LEFT_RAIL_W);
 
   const handleExport = () => {
     const json = exportProject();
@@ -150,7 +169,10 @@ export function App() {
   }, []);
 
   return (
-    <div className="app">
+    <div
+      className={`app${resizing ? " is-resizing" : ""}`}
+      style={{ "--left-w": `${leftWidth}px` } as CSSProperties}
+    >
       <header>
         <div className="brand">
           DIRECTOR DESK <span>V1.20</span>
@@ -183,7 +205,13 @@ export function App() {
 
       <SceneTabs />
 
-      <ObjectList />
+      <ObjectList
+        width={leftWidth}
+        collapsed={collapsed}
+        onWidth={setLeftW}
+        onToggle={toggleLeft}
+        onDragging={setResizing}
+      />
       <WorldView />
       <Inspector />
       <Timeline />

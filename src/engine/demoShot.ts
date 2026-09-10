@@ -410,15 +410,14 @@ export function createCommuteState(): DirectorState {
     // （human 模型为 Xbot.glb：walk/run 直接播放对应片段；talk → agree 点头，
     //   wave → agree 代理打招呼；无 sitting 片段时 sit 仅停止腿部摆动。）
     actions: [
-      { id: "ACT_GAIT_WALK", object: "WALKER", timeStart: 0, timeEnd: 3.0, kind: "walk", intensity: 1 },
-      { id: "ACT_GAIT_RUN", object: "GREETER", timeStart: 1.8, timeEnd: 2.8, kind: "run", intensity: 1 },
+      { id: "ACT_GAIT_WALK", object: "WALKER", timeStart: 0, timeEnd: 3.0, kind: "walk" },
+      { id: "ACT_GAIT_RUN", object: "GREETER", timeStart: 1.8, timeEnd: 2.8, kind: "run" },
       {
         id: "ACT_WAVE",
         object: "GREETER",
         timeStart: 2.8,
         timeEnd: 3.5,
         kind: "wave",
-        intensity: 1,
       },
       {
         id: "ACT_TALK_W",
@@ -426,7 +425,6 @@ export function createCommuteState(): DirectorState {
         timeStart: 3.2,
         timeEnd: 5,
         kind: "talk",
-        intensity: 0.8,
       },
       {
         id: "ACT_TALK_G",
@@ -434,7 +432,6 @@ export function createCommuteState(): DirectorState {
         timeStart: 3.2,
         timeEnd: 5,
         kind: "talk",
-        intensity: 0.8,
       },
     ],
     groups: [],

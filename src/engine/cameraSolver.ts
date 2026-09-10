@@ -14,7 +14,7 @@ import {
   Vec3,
 } from "../domain/schema";
 import { easeVal, normalizeEase } from "./ease";
-import { baseHeading, objectFacing, objectPosition } from "./solver";
+import { baseHeading, objectFacing, objectPosition, travelHeading } from "./solver";
 
 export interface ResolvedCamera {
   position: Vec3;
@@ -242,14 +242,16 @@ function placeCamera(
       }
     } else {
       const t = focusPoint(state, targetId, time);
-      const facing = objectFacing(state, targetId, time);
+      // 取景朝向用「行进方向」而非瞬时朝向：后者含编队弹簧 / 绕障让位，会带着镜头乱转。
+      const facing = travelHeading(state, targetId, time);
       ({ position, target } = placeStandard(
         state, camera, options, framing, view, side, t, facing, droneLift, altitude,
       ));
     }
   } else {
     const t = targetType === "LOCATION" ? sceneCenter(state) : focusPoint(state, targetId, time);
-    const facing = targetType === "LOCATION" ? 0 : objectFacing(state, targetId, time);
+    // 同上：整队方向没变时，绕障的横向让位不该让机位转向。
+    const facing = targetType === "LOCATION" ? 0 : travelHeading(state, targetId, time);
 
     // 过肩镜头（OTS）：机位置于前景演员 A 的斜后方，越过其肩膀拍主体 B。
     // 两人各自移动时机位自动跟随，始终保持过肩关系（肩在前景一侧、不挡住主体）。
