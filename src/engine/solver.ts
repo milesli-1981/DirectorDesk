@@ -16,7 +16,7 @@ import {
   tangentAtArcLength,
 } from "./path";
 import { Rect, setRects } from "./occlusion";
-import { easeVal, normalizeEase } from "./ease";
+import { curveVal, normalizeEase } from "./ease";
 
 /**
  * 编队能否「骑过」某障碍：队伍横向跨度足够，障碍两侧都留得下人。
@@ -265,7 +265,7 @@ export function anchorArcLength(route: ObjectRoute, time: number): number {
       const segLen = segEnds[k] - prevEnd;
       const span = s.timeEnd - s.timeStart || 1;
       const u = (time - s.timeStart) / span;
-      return prevEnd + easeVal(normalizeEase(s.ease), u) * segLen;
+      return prevEnd + curveVal(normalizeEase(s.ease), s.speedKeys, u) * segLen;
     }
   }
   // 段间空隙：沿用上一段终点

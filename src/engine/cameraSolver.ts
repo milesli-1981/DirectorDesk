@@ -9,11 +9,12 @@ import {
   DirectorState,
   CameraStyle,
   OtsSide,
+  CameraTargetType,
   STYLE_PRESETS,
   StyleParams,
   Vec3,
 } from "../domain/schema";
-import { easeVal, normalizeEase } from "./ease";
+import { curveVal, normalizeEase } from "./ease";
 import { baseHeading, objectFacing, objectPosition, travelHeading } from "./solver";
 
 export interface ResolvedCamera {
@@ -123,8 +124,8 @@ interface Placement {
   otsSide?: OtsSide;
   /** OTS：错位量（主体偏离画面中心的比例）。 */
   otsOffset?: number;
-  /** 是否按过肩求解（为空时沿用相机默认运镜是否为 OTS）。 */
-  ots?: boolean;
+  /** 取景关系（为空则沿用相机级 targetType）；为 OTS 时启用过肩。 */
+  targetType?: CameraTargetType;
   orbitDeg?: number;
   distanceScale?: number;
   craneHeight?: number;
@@ -255,8 +256,10 @@ function placeCamera(
 
     // 过肩镜头（OTS）：机位置于前景演员 A 的斜后方，越过其肩膀拍主体 B。
     // 两人各自移动时机位自动跟随，始终保持过肩关系（肩在前景一侧、不挡住主体）。
-    const isOts = options.ots ?? (camera.targetType === "OTS" || camera.motion === "OTS");
     const shoulderId = options.shoulderId ?? camera.shoulderId;
+    const effTargetType = options.targetType ?? camera.targetType;
+    const isOts =
+      effTargetType === "OTS" && !!shoulderId && !!targetId && shoulderId !== targetId;
     if (isOts && shoulderId && targetId && shoulderId !== targetId) {
       const a = objectPosition(state, shoulderId, time);
       const b = objectPosition(state, targetId, time);
@@ -270,7 +273,10 @@ function placeCamera(
         const rz = fx;
         const sign: number = (options.otsSide ?? camera.otsSide ?? "R") === "R" ? 1 : -1;
         const back = Math.min(2.4, Math.max(0.95, distAB * 0.38));
-        const lateral = Math.min(1.6, Math.max(0.8, distAB * 0.4)) * sign;
+        // 横向偏移决定肩在画面里的左右位置；过大会把肩推出画框（50mm 水平半视场约 23°，
+        // 旧值 distAB*0.4 让肩偏轴 ~46° 而完全出框）。这里压到 ~0.16 倍间距，
+        // 使肩稳定落在画框边缘（约 16° 偏轴），既可见又不挡主体。
+        const lateral = Math.min(0.9, Math.max(0.4, distAB * 0.16)) * sign;
         const eye = 1.55;
         const cx = a.x - fx * back + rx * lateral;
         const cz = a.z - fz * back + rz * lateral;
@@ -376,10 +382,6 @@ function resolveMove(
 ): ResolvedCamera {
   const baseLens = move.lensMm ?? camera.lensMm;
   const roll = move.roll ?? camera.roll ?? 0;
-  // OTS 更像「人物关系」而非单纯运动：本段显式越肩（类型为 OTS 或指定了前景演员）时启用，
-  // 否则沿用相机默认是否为过肩——避免给过肩相机加一条 FOLLOW 段就丢掉过肩关系。
-  const otsWanted = move.type === "OTS" || !!move.shoulderId ? true : undefined;
-
   const style = move.style ?? camera.style ?? (camera.motion === "HANDHELD" ? "handheld" : "locked");
   const sp = shakePreset(camera, style);
 
@@ -387,10 +389,10 @@ function resolveMove(
     // 锁死机位：用片段开始时刻的构图，之后不再改变。
     const { position, target } = placeCamera(state, camera, move.timeStart, {
       targetId: move.targetId,
+      targetType: move.targetType,
       shoulderId: move.shoulderId,
       otsSide: move.otsSide,
       otsOffset: move.otsOffset,
-      ots: otsWanted,
       framing: move.framing,
       view: move.view,
       side: move.side,
@@ -401,7 +403,7 @@ function resolveMove(
   }
 
   const span = move.timeEnd - move.timeStart || 1;
-  const progress = easeVal(normalizeEase(move.ease), clamp((time - move.timeStart) / span, 0, 1));
+  const progress = curveVal(normalizeEase(move.ease), move.speedKeys, clamp((time - move.timeStart) / span, 0, 1));
 
   // 滑动变焦：机位推近的同时焦距等比变化，使主体成像大小不变、只有背景透视发生畸变。
   const isZoom = move.type === "DOLLY_ZOOM";
@@ -413,10 +415,10 @@ function resolveMove(
 
   const { position, target } = placeCamera(state, camera, time, {
     targetId: move.targetId,
+    targetType: move.targetType,
     shoulderId: move.shoulderId,
     otsSide: move.otsSide,
     otsOffset: move.otsOffset,
-    ots: otsWanted,
     framing: move.framing,
     view: move.view,
     side: move.side,

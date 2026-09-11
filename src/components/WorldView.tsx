@@ -66,7 +66,9 @@ function sameMarker(a: MarkerHover | null, b: MarkerHover | null): boolean {
 }
 
 type DragState =
-  | { kind: "object"; id: string; moved: boolean; origin: Vec2 }
+  // start = 按下瞬间「真正会被移动的那个对象」的位置快照（团队成员时是锚点）。
+  // 拖动一律按 start + 累计位移计算，绝不能拿上一帧的位置再叠加（那会指数级漂移）。
+  | { kind: "object"; id: string; moved: boolean; origin: Vec2; start: Vec2 }
   // moved / origin 用于区分「轻点」与「拖动」：轻点唤起环形菜单，拖动则正常搬点。
   | { kind: "point"; segmentId: string; pointId: string; moved: boolean; origin: Vec2 }
   | { kind: "endpoint"; segmentId: string; which: "start" | "end" }
@@ -81,6 +83,19 @@ function groundPoint(event: ThreeEvent<PointerEvent>): Vec2 | null {
   // event.point 同样是射线与地面平面的交点，只有射线几乎平行于地面时两者才都取不到。
   const onPlane = event.point as { x: number; z: number } | undefined;
   return onPlane ? { x: onPlane.x, z: onPlane.z } : null;
+}
+
+/** 地面交点的最大可信距离（世界单位）。
+ *  相机压到接近水平时，视线与地面的交点在极远处（上千甚至上万单位），
+ *  拿它当拖拽目标就会把物体瞬间甩到画布外沿。超过此距离的点一律丢弃，
+ *  让物体留在上一次有效位置 —— 宁可「这一帧拖不动」，也不要「飞出去」。 */
+const GROUND_HIT_MAX = 300;
+
+/** 地面交点是否可信：按到相机的距离判定，挡掉近水平射线产生的极远交点。 */
+function groundHitUsable(event: ThreeEvent<PointerEvent>, point: Vec2): boolean {
+  const ray = event.ray;
+  if (!ray) return true;
+  return Math.hypot(point.x - ray.origin.x, point.z - ray.origin.z) <= GROUND_HIT_MAX;
 }
 
 function capturePointer(event: ThreeEvent<PointerEvent>) {
@@ -1352,11 +1367,17 @@ function Interaction() {
       if (objectHit.object.locked || hitTeam?.locked) return;
       store.selectItem(null);
       store.selectPoint(null);
+      // 团队成员拖任一人都移动整队，所以位移快照取「真正会被移动的对象」= 锚点。
+      const movingId = hitTeam ? hitTeam.members[0] : objectHit.object.id;
+      const moving = store.state.objects.find((o) => o.id === movingId);
+      const start = { x: moving?.x ?? objectHit.object.x, z: moving?.z ?? objectHit.object.z };
       beginDrag({
         kind: "object",
         id: objectHit.object.id,
         moved: false,
-        origin: point,
+        // 按下点若不可信（近水平射线），退回对象自身位置，免得第一帧就产生巨大位移。
+        origin: groundHitUsable(event, point) ? point : start,
+        start,
       });
       capturePointer(event);
       return;
@@ -1393,6 +1414,8 @@ function Interaction() {
 
     const point = groundPoint(event);
     if (!point) return;
+    // 近水平射线给出的极远交点不能用来拖动（会把物体甩到画布外沿），丢弃这一帧。
+    if (!groundHitUsable(event, point)) return;
 
     if (drag.kind === "object") {
       // 团队成员：拖任何一个都是整队平移（位置由锚点承载），保持"队作为一个 unit"。
@@ -1403,18 +1426,12 @@ function Interaction() {
       const obj = store.state.objects.find((o) => o.id === drag.id);
       if (obj?.locked || team?.locked) return;
       if (Math.hypot(point.x - drag.origin.x, point.z - drag.origin.z) > 0.15) drag.moved = true;
-      if (team && team.members[0] !== drag.id) {
-        const anchor = store.state.objects.find((o) => o.id === team.members[0]);
-        if (anchor) {
-          store.moveObject(
-            team.members[0],
-            anchor.x + (point.x - drag.origin.x),
-            anchor.z + (point.z - drag.origin.z),
-          );
-          return;
-        }
-      }
-      store.moveObject(drag.id, point.x, point.z);
+      // 位移 = 按下时的快照 + 本次拖拽的累计位移（drag.start 见 beginDrag）。
+      // 这里千万别读「当前 anchor 位置」再叠加位移：pointermove 每帧都会执行，
+      // 那样会把之前每一帧的位移重复累加一遍，物体呈指数级加速飞出画布。
+      const nx = drag.start.x + (point.x - drag.origin.x);
+      const nz = drag.start.z + (point.z - drag.origin.z);
+      store.moveObject(team && team.members[0] !== drag.id ? team.members[0] : drag.id, nx, nz);
     } else if (drag.kind === "point") {
       // 超过阈值才算「拖动」，抬手时不区分例外就不会误弹环形菜单。
       if (Math.hypot(point.x - drag.origin.x, point.z - drag.origin.z) > 0.15) drag.moved = true;
@@ -1856,7 +1873,7 @@ function CameraHud() {
       </span>
       <span>TARGET {move?.targetId ?? camera.targetId}</span>
       <span>
-        {MOTION_LABELS[move?.type ?? camera.motion]}
+        {move?.targetType === "OTS" ? "OTS 过肩" : MOTION_LABELS[move?.type ?? camera.motion]}
         {move ? " · move" : " · default"} · {moveCount} move{moveCount === 1 ? "" : "s"}
       </span>
       {blockers.length > 0 ? (

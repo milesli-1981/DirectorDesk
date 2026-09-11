@@ -25,6 +25,24 @@ export type PathPointShape = "LINE" | "ARC";
 /** cubic-bezier(x1, y1, x2, y2) — 与 CSS 缓动一致。 */
 export type EaseCurve = [number, number, number, number];
 
+/**
+ * 速度曲线关键点 = 一条「何时走到哪儿」的控制点。
+ * t = 归一化时刻 0..1（落在片段 [timeStart, timeEnd] 内的比例）
+ * v = 该时刻已完成的路径进度 0..1。首点恒为 0、末点恒为 1 —— 进度曲线必须走完全程，
+ *     想表达「延迟出发 / 提前到位」只能改这两点的 t，不能改 v。
+ * ease = 从上一关键点走到本点所用的缓动
+ *
+ * 相邻两点之间的斜率就是这段的速度：把首点 t 往后拖 = 起步前先等一会（延迟），
+ * 末点 t 往前拖 = 提前到位后停住；中间插点 = 中途加速 / 减速（多段变速）。
+ * 数组长度 ≥ 2 时整体接管该片段的运动时序，`ease` 字段退为兜底。
+ */
+export interface SpeedKey {
+  id: string;
+  t: number;
+  v: number;
+  ease: EaseCurve;
+}
+
 export interface Vec2 {
   x: number;
   z: number;
@@ -113,6 +131,8 @@ export interface MoveSegment {
   timeStart: number;
   timeEnd: number;
   ease: EaseCurve;
+  /** 多段速度曲线关键点（≥2 时接管时序）。为空 = 单段 cubic-bezier。 */
+  speedKeys?: SpeedKey[];
 }
 
 /** 相邻两条 leg 的交接点模式。 */
@@ -185,7 +205,6 @@ export type CameraMotionType =
   | "DOLLY_ZOOM"
   | "CRANE"
   | "DRONE"
-  | "OTS"
   | "PAN"
   | "TILT"
   | "TRUCK"
@@ -301,6 +320,8 @@ export interface CameraMove {
   timeEnd: number;
   /** 覆盖该段的目标（为空则沿用相机自身 Target）。 */
   targetId?: string;
+  /** 取景关系（为空则沿用相机级 targetType）：OBJECT 单对象 / OTS 过肩 / GROUP 群组 / POV 主观 / LOCATION 环境。 */
+  targetType?: CameraTargetType;
   /** OTS：本段所越过的前景演员（为空则沿用相机自身 Shoulder）。 */
   shoulderId?: string;
   /** OTS：越过前景演员的哪一侧肩膀（为空则沿用相机设置）。 */
@@ -329,6 +350,8 @@ export interface CameraMove {
   /** 风格轴：本段稳定方式覆盖（为空沿用相机默认）。 */
   style?: CameraStyle;
   ease: EaseCurve;
+  /** 多段速度曲线关键点（≥2 时接管时序）。为空 = 单段 cubic-bezier。 */
+  speedKeys?: SpeedKey[];
 }
 
 export type AspectRatio = "16:9" | "2.39:1" | "1.85:1" | "4:3" | "9:16";
@@ -483,7 +506,6 @@ export const MOTION_LABELS: Record<CameraMotionType, string> = {
   DOLLY_ZOOM: "DOLLY ZOOM",
   CRANE: "CRANE",
   DRONE: "DRONE",
-  OTS: "OTS 过肩",
   PAN: "PAN 平摇",
   TILT: "TILT 俯仰",
   TRUCK: "TRUCK 横移",
@@ -512,7 +534,6 @@ export const MOTION_HINTS: Record<CameraMotionType, string> = {
   DOLLY_ZOOM:
     "滑动变焦（希区柯克）：推近的同时同步变焦，主体大小不变、背景透视发生畸变，用于眩晕 / 顿悟。",
   CRANE: "升降：改变机位高度。",
-  OTS: "过肩：机位置于前景演员身后，越过其肩膀拍主体，两人移动时自动保持过肩关系。",
   DRONE: "无人机自由飞行：同时绕圈 + 升降 + 推拉。",
   PAN: "原地水平摇（yaw）：机位不动，只旋转注视方向扫过场景，用于甩镜 / 横扫。",
   TILT: "原地俯仰（pitch）：机位不动，只上下旋转注视方向。",

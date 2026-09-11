@@ -19,6 +19,7 @@ import {
   MoveSegment,
   OtsSide,
   PathPoint,
+  SpeedKey,
   StageManifest,
   ActionClip,
   ActionKind,
@@ -29,6 +30,7 @@ import {
 import { createBlankState } from "../engine/demoShot";
 import { normalizePathPointModes, pathInsertIndex, simplifyPath } from "../engine/path";
 import { contentEndTime } from "../engine/timeline";
+import { normalizeSpeedKeys } from "../engine/ease";
 import { ASSET_PRESETS } from "../engine/assetPresets";
 import { separateSetAsset } from "../engine/collision";
 import {
@@ -391,6 +393,8 @@ interface DirectorStore {
   setSegmentTime: (segmentId: string, start: number, end: number) => void;
   setConstraintTime: (constraintId: string, start: number, end: number) => void;
   setSegmentEase: (segmentId: string, ease: EaseCurve) => void;
+  /** 写入多段速度曲线关键点（null / 少于 2 个点 = 退回单段 cubic-bezier）。 */
+  setSegmentSpeedKeys: (segmentId: string, keys: SpeedKey[] | null) => void;
 
   addCamera: () => void;
   addDroneCamera: () => void;
@@ -426,8 +430,11 @@ interface DirectorStore {
     >,
   ) => void;
   addCameraMove: (cameraId: string, type: CameraMotionType) => void;
+  addOtsMove: (cameraId: string) => void;
   setCameraMoveTime: (moveId: string, start: number, end: number) => void;
   setCameraMoveEase: (moveId: string, ease: EaseCurve) => void;
+  /** 写入多段速度曲线关键点（null / 少于 2 个点 = 退回单段 cubic-bezier）。 */
+  setCameraMoveSpeedKeys: (moveId: string, keys: SpeedKey[] | null) => void;
   patchCameraMove: (moveId: string, patch: Partial<CameraMove>) => void;
   deleteCameraMove: (moveId: string) => void;
   /** 基于某条过肩 move 生成正反打：互换前景 / 主体、翻转肩侧，并保持同一侧轴线。 */
@@ -560,10 +567,21 @@ function reconcileHandoffs(segments: MoveSegment[], prevHandoffs: Handoff[]): Ha
  */
 function sanitizeState(s: DirectorState): DirectorState {
   const ids = new Set(s.objects.map((o) => o.id));
-  const segments = s.segments.filter((seg) => ids.has(seg.object));
+  // 速度曲线关键点在这里统一规范化：历史上允许把末点进度拖到 1 以下（会跑不完 path），
+  // 读盘 / 导入时一并修正，下游求解就能假定数据永远合法。
+  const segments = s.segments
+    .filter((seg) => ids.has(seg.object))
+    .map((seg) =>
+      seg.speedKeys ? { ...seg, speedKeys: normalizeSpeedKeys(seg.speedKeys) ?? undefined } : seg,
+    );
   return {
     ...s,
     segments,
+    cameraMoves: s.cameraMoves.map((move) =>
+      move.speedKeys
+        ? { ...move, speedKeys: normalizeSpeedKeys(move.speedKeys) ?? undefined }
+        : move,
+    ),
     constraints: s.constraints.filter((c) => ids.has(c.subject) && ids.has(c.target)),
     handoffs: reconcileHandoffs(segments, s.handoffs),
     // 引力场恒开：该开关不再对用户开放，任何来源的存档 / 导入都统一强制为 true。
@@ -1695,7 +1713,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
       const state = store.state;
       const handoff = state.handoffs.find((item) => item.id === handoffId);
       if (!handoff) return;
-      // mode 本质是 Speed Curve 边界的便捷配置：不另写物理。
+      // mode 本质是缓动曲线边界的便捷配置：不另写物理。
       const EASE_OUT: EaseCurve = [0, 0, 0.58, 1];
       const EASE_IN: EaseCurve = [0.42, 0, 1, 1];
       const LINEAR: EaseCurve = [0, 0, 1, 1];
@@ -1760,6 +1778,9 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
 
     setSegmentEase: (segmentId, ease) => patchSegment(segmentId, { ease }),
 
+    setSegmentSpeedKeys: (segmentId, keys) =>
+      patchSegment(segmentId, { speedKeys: normalizeSpeedKeys(keys) ?? undefined }),
+
     addCamera: () => {
       const store = get();
       const { state } = store;
@@ -1776,14 +1797,34 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         motion: "FOLLOW",
         kind: "ground",
       };
+      // 新相机自带一条初始运镜段，否则它默认是 FOLLOW 却没有任何 cameraMove，
+      // timebar 的相机行里看不到 segment（drone / 模板相机都这么做了，这里保持一致）。
+      const start = 0;
+      const end = round1(Math.min(state.duration, start + Math.max(2, state.duration * 0.5)));
+      const move: CameraMove = {
+        id: nextCameraMoveId(state, id),
+        camera: id,
+        type: camera.motion,
+        timeStart: start,
+        timeEnd: end,
+        targetId: camera.targetId,
+        orbitDeg: 90,
+        dollyScale: 1,
+        craneHeight: 0,
+        ease: [0.42, 0, 0.58, 1],
+      };
+      const cameraMoves = [...state.cameraMoves, move];
       set({
         state: {
           ...state,
           revision: state.revision + 1,
           cameras: [...state.cameras, camera],
+          cameraMoves,
+          cameraJunctions: reconcileCameraJunctions(cameraMoves, state.cameraJunctions),
         },
         selectedKind: "camera",
         selectedId: id,
+        selectedItem: move.id,
         activeCameraId: store.activeCameraId ?? id,
       });
     },
@@ -1970,17 +2011,78 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         camera: cameraId,
         type,
         targetId: camera?.targetId,
-        // OTS 默认取一个非主体的演员作前景，让过肩开箱即用；其余类型留空以继承相机级设置。
-        shoulderId:
-          type === "OTS"
-            ? camera?.shoulderId ?? state.objects.find((o) => o.id !== camera?.targetId)?.id
-            : undefined,
-        otsSide: type === "OTS" ? camera?.otsSide ?? "R" : undefined,
         timeStart: newStart,
         timeEnd: newEnd,
         orbitDeg: 90,
         dollyScale: type === "DOLLY" ? 0.55 : 1,
         craneHeight: type === "CRANE" ? 3 : 0,
+        ease: [0.42, 0, 0.58, 1],
+      };
+      cameraMoves.push(move);
+      set({
+        state: {
+          ...state,
+          revision: state.revision + 1,
+          cameraMoves,
+          cameraJunctions: reconcileCameraJunctions(cameraMoves, state.cameraJunctions),
+        },
+        selectedKind: "camera",
+        selectedId: cameraId,
+        selectedItem: move.id,
+      });
+    },
+
+    addOtsMove: (cameraId) => {
+      const store = get();
+      const { state } = store;
+      const duration = state.duration;
+      const atTime = clamp(round1(store.currentTime), 0, Math.max(0, duration - 0.5));
+      const camera = state.cameras.find((c) => c.id === cameraId);
+      const siblings = state.cameraMoves
+        .filter((m) => m.camera === cameraId)
+        .sort((a, b) => a.timeStart - b.timeStart);
+      const host = siblings.find((m) => atTime > m.timeStart && atTime < m.timeEnd);
+      const next = siblings.filter((m) => m.timeStart >= atTime).sort((a, b) => a.timeStart - b.timeStart)[0];
+
+      let newStart = atTime;
+      let newEnd = round1(Math.min(atTime + 2, duration));
+      if (next) newEnd = round1(Math.min(newEnd, next.timeStart));
+      if (newEnd - newStart < 0.5) {
+        newStart = next ? next.timeEnd : round1(duration - 0.5);
+        newEnd = round1(Math.min(newStart + 2, duration));
+        if (next) newEnd = Math.min(newEnd, next.timeEnd);
+      }
+
+      const cameraMoves = [...state.cameraMoves];
+      if (host) {
+        const hi = cameraMoves.findIndex((m) => m.id === host.id);
+        if (hi >= 0) {
+          if (atTime - host.timeStart < 0.05) {
+            cameraMoves.splice(hi, 1);
+            newStart = host.timeStart;
+          } else {
+            cameraMoves[hi] = { ...cameraMoves[hi], timeEnd: atTime };
+          }
+        }
+      }
+
+      // 过肩：前景自动挑一个非主体的演员；不足 2 名演员时不应调用（UI 已禁用）。
+      const shoulderId =
+        camera?.shoulderId ??
+        state.objects.find((o) => o.type === "actor" && o.id !== camera?.targetId)?.id;
+      const move: CameraMove = {
+        id: nextCameraMoveId(state, cameraId),
+        camera: cameraId,
+        type: "FOLLOW",
+        targetType: "OTS",
+        targetId: camera?.targetId,
+        shoulderId,
+        otsSide: camera?.otsSide ?? "R",
+        timeStart: newStart,
+        timeEnd: newEnd,
+        orbitDeg: 90,
+        dollyScale: 1,
+        craneHeight: 0,
         ease: [0.42, 0, 0.58, 1],
       };
       cameraMoves.push(move);
@@ -2027,7 +2129,8 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
       const move: CameraMove = {
         id: nextCameraMoveId(state, src.camera),
         camera: src.camera,
-        type: "OTS",
+        type: "FOLLOW",
+        targetType: "OTS",
         targetId: newTarget,
         shoulderId: newShoulder,
         otsSide: newSide,
@@ -2072,6 +2175,9 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
     },
 
     setCameraMoveEase: (moveId, ease) => patchCameraMove(moveId, { ease }),
+
+    setCameraMoveSpeedKeys: (moveId, keys) =>
+      patchCameraMove(moveId, { speedKeys: normalizeSpeedKeys(keys) ?? undefined }),
 
     patchCameraMove: (moveId, patch) => patchCameraMove(moveId, patch),
 

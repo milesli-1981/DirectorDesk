@@ -12,6 +12,7 @@ import {
   FORMATION_LABELS,
   HandoffMode,
   Pose,
+  SpeedKey,
   ActionKind,
   FRAMING_LABELS,
   LENS_OPTIONS,
@@ -30,6 +31,7 @@ import { PoseCustomizeModal } from "./PoseCustomizeModal";
 import { clonePose, POSE_PRESETS, POSE_PRESET_NAMES } from "../engine/poses";
 import { solveCamera } from "../engine/cameraSolver";
 import { axisSide, cameraAxis } from "../engine/axis";
+import { waypointKeyframes } from "../engine/path";
 import { LockBadge } from "./LockBadge";
 
 const ACTION_KINDS: ActionKind[] = [
@@ -57,7 +59,6 @@ const MOTION_TYPES: CameraMotionType[] = [
   "DOLLY_ZOOM",
   "CRANE",
   "DRONE",
-  "OTS",
 ];
 
 const poseEquals = (pose: Pose | undefined, preset: Pose) =>
@@ -228,6 +229,8 @@ export function Inspector() {
   const removeCamera = useDirectorStore((s) => s.removeCamera);
   const setSegmentEase = useDirectorStore((s) => s.setSegmentEase);
   const setCameraMoveEase = useDirectorStore((s) => s.setCameraMoveEase);
+  const setSegmentSpeedKeys = useDirectorStore((s) => s.setSegmentSpeedKeys);
+  const setCameraMoveSpeedKeys = useDirectorStore((s) => s.setCameraMoveSpeedKeys);
   const setHandoffMode = useDirectorStore((s) => s.setHandoffMode);
   const setCameraJunctionMode = useDirectorStore((s) => s.setCameraJunctionMode);
   const deleteSegment = useDirectorStore((s) => s.deleteSegment);
@@ -259,14 +262,20 @@ export function Inspector() {
   const groupPose = groupAnchor?.pose;
   const groupIsHuman = groupAnchor?.category === "human";
   const segment = state.segments.find((item) => item.id === selectedItem);
+  // 路径转折点在该片段上的抵达时刻：交给 EaseEditor 画在迷你时间轴上，便于和关键点对照。
+  // 用 useMemo 缓存 —— 弧长积分不便宜，而这段代码所在的重渲染远多于片段数据变更。
+  const segmentWaypoints = useMemo(() => (segment ? waypointKeyframes(segment) : []), [segment]);
   const constraint = state.constraints.find((item) => item.id === selectedItem);
   const move = state.cameraMoves.find((item) => item.id === selectedItem);
   const moveCamera = move ? state.cameras.find((c) => c.id === move.camera) : undefined;
+  // 过肩需要至少 2 名演员（前景 + 主体）；不足时 OTS 选项禁用，新增演员后自动解封。
+  const actors = state.objects.filter((o) => o.type === "actor");
+  const canOts = actors.length >= 2;
   // 段级未设置时沿用相机级错位量，滑块显示的就是实际生效值。
   const moveOtsOffset = move?.otsOffset ?? moveCamera?.otsOffset ?? 0.35;
   // 过肩相关控件只在「可能是过肩」时展开：类型为 OTS，或已指定前景演员。
-  const cameraOts = !!camera && (camera.motion === "OTS" || !!camera.shoulderId);
-  const moveOts = !!move && (move.type === "OTS" || !!move.shoulderId);
+  const cameraOts = !!camera && camera.targetType === "OTS";
+  const moveOts = !!move && move.targetType === "OTS";
   const action = state.actions?.find((item) => item.id === selectedItem);
   // 互斥选择下，时间轴片段（segment / move / constraint / action）也是合法的 Inspector 主体，
   // 选中它们时对象轴已清空，故这里也要放行，否则片段编辑 UI（ease / handoff / joints 等）打不开。
@@ -332,17 +341,24 @@ export function Inspector() {
     ? {
         title: segment.id,
         ease: segment.ease,
+        keys: segment.speedKeys ?? null,
+        waypoints: segmentWaypoints,
         timeStart: segment.timeStart,
         timeEnd: segment.timeEnd,
         onChange: (ease: EaseCurve) => setSegmentEase(segment.id, ease),
+        onKeysChange: (keys: SpeedKey[] | null) => setSegmentSpeedKeys(segment.id, keys),
       }
     : move
       ? {
           title: move.id,
           ease: move.ease,
+          keys: move.speedKeys ?? null,
+          // 相机 move 没有路径转折点（转向由 framing / style 表达），给空集保持两分支形状一致。
+          waypoints: [],
           timeStart: move.timeStart,
           timeEnd: move.timeEnd,
           onChange: (ease: EaseCurve) => setCameraMoveEase(move.id, ease),
+          onKeysChange: (keys: SpeedKey[] | null) => setCameraMoveSpeedKeys(move.id, keys),
         }
       : null;
 
@@ -742,14 +758,16 @@ export function Inspector() {
       ) : null}
 
       <div className="field" id="easeField" style={{ display: easeTarget ? "" : "none" }}>
-        <div className="lab">Speed Curve · cubic-bezier</div>
+        <div className="lab">缓动曲线 · cubic-bezier</div>
         {easeTarget ? (
           <EaseEditor
             title={easeTarget.title}
             ease={easeTarget.ease}
+            keys={easeTarget.keys}
             timeStart={easeTarget.timeStart}
             timeEnd={easeTarget.timeEnd}
             onChange={easeTarget.onChange}
+            onKeysChange={easeTarget.onKeysChange}
           />
         ) : null}
       </div>
@@ -763,7 +781,14 @@ export function Inspector() {
                 ⚠ {overriddenByMoves.join(" / ")} 已被某些 CameraMove 段级覆盖，相机级同名属性在那些时间段内不生效（段级留空即继承此处）。
               </p>
             ) : null}
-            <SubGroup title="构图 Composition" hint="拍谁、多近、从哪个角度。">
+            <SubGroup
+              title="构图 Composition"
+              hint={
+                cameraOts
+                  ? "过肩镜头下，机位角度 / 距离 / 眼高由过肩几何固定，仅 Target 与 Lens 生效；侧面关系由下方「过肩 OTS」决定。"
+                  : "拍谁、多近、从哪个角度。"
+              }
+            >
               <Field label="Target（跟随对象 / 队伍）">
                 <select
                   value={camera.targetId}
@@ -774,13 +799,13 @@ export function Inspector() {
                       // 选中的是队伍：与对象同等地位，自动按 GROUP 取景并框住全队。
                       updateCamera(camera.id, {
                         targetId: id,
-                        targetType: "GROUP",
+                        targetType: cameraOts ? "OTS" : "GROUP",
                         groupId: id,
                       });
                     } else {
                       updateCamera(camera.id, {
                         targetId: id,
-                        targetType: "OBJECT",
+                        targetType: cameraOts ? "OTS" : "OBJECT",
                         groupId: undefined,
                       });
                     }
@@ -801,6 +826,7 @@ export function Inspector() {
                   ))}
                 </select>
               </Field>
+              {cameraOts ? null : (
               <Field label="Framing">
                 <select
                   value={camera.framing}
@@ -815,6 +841,8 @@ export function Inspector() {
                   ))}
                 </select>
               </Field>
+              )}
+              {cameraOts ? null : (
               <Field label="View">
                 <select
                   value={camera.view}
@@ -829,6 +857,8 @@ export function Inspector() {
                   ))}
                 </select>
               </Field>
+              )}
+              {cameraOts ? null : (
               <Field label="Side">
                 <select
                   value={camera.side}
@@ -843,6 +873,7 @@ export function Inspector() {
                   ))}
                 </select>
               </Field>
+              )}
               <Field label="Lens">
                 <select
                   value={camera.lensMm}
@@ -867,7 +898,7 @@ export function Inspector() {
                   onChange={(event) => updateCamera(camera.id, { altitude: Number(event.target.value) })}
                 />
               </Field>
-              {camera.motion === "PAN" ? (
+              {!cameraOts && camera.motion === "PAN" ? (
                 <Field label={`Pan ${camera.panDeg ?? 0}°（原地水平摇）`}>
                   <input
                     type="range"
@@ -879,7 +910,7 @@ export function Inspector() {
                   />
                 </Field>
               ) : null}
-              {camera.motion === "TILT" ? (
+              {!cameraOts && camera.motion === "TILT" ? (
                 <Field label={`Tilt ${camera.tiltDeg ?? 0}°（原地俯仰）`}>
                   <input
                     type="range"
@@ -891,7 +922,7 @@ export function Inspector() {
                   />
                 </Field>
               ) : null}
-              {camera.motion === "TRUCK" ? (
+              {!cameraOts && camera.motion === "TRUCK" ? (
                 <Field label={`Truck ${camera.truckDist ?? 0}m（横向平移）`}>
                   <input
                     type="range"
@@ -910,17 +941,27 @@ export function Inspector() {
                 title="过肩 OTS"
                 hint="越过前景演员的肩膀拍主体：Shoulder 是前景、Target 是主体；Offset 控制主体偏离画面中心的程度。"
               >
-                <Field label="Shoulder（前景演员）">
+                {cameraOts && !canOts ? (
+                  <p className="hint" style={{ color: "#ffb86b" }}>
+                    ⚠ 过肩需要至少 2 名演员（前景 + 主体）；当前不足，过肩不生效，请先加入另一个演员。
+                  </p>
+                ) : cameraOts && (!camera.shoulderId || camera.shoulderId === camera.targetId) ? (
+                  <p className="hint" style={{ color: "#ffb86b" }}>
+                    ⚠ 需设置与主体（Target）不同的前景演员（Shoulder），否则过肩不生效、Side（左/右肩）无效。
+                  </p>
+                ) : null}
+                <Field label="前景演员（Shoulder）">
                   <select
                     value={camera.shoulderId ?? ""}
+                    disabled={!canOts}
                     onChange={(event) =>
                       updateCamera(camera.id, { shoulderId: event.target.value || undefined })
                     }
                   >
-                    <option value="">(none)</option>
-                    {state.objects.map((item) => (
+                    <option value="">{canOts ? "(自动)" : "(需至少 2 名演员)"}</option>
+                    {actors.filter((item) => item.id !== camera.targetId).map((item) => (
                       <option key={item.id} value={item.id}>
-                        {item.id}
+                        {objectDisplayName(item)}
                       </option>
                     ))}
                   </select>
@@ -978,16 +1019,33 @@ export function Inspector() {
               </Field>
               <Field label="Default Motion">
                 <select
-                  value={camera.motion}
-                  onChange={(event) =>
-                    updateCamera(camera.id, { motion: event.target.value as CameraMotionType })
-                  }
+                  value={cameraOts ? "OTS" : camera.motion}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    if (value === "OTS") {
+                      updateCamera(camera.id, {
+                        targetType: "OTS",
+                        shoulderId:
+                          camera.shoulderId ??
+                          state.objects.find((o) => o.type === "actor" && o.id !== camera.targetId)?.id,
+                      });
+                    } else {
+                      const grp = state.groups?.find((g) => g.id === camera.targetId);
+                      updateCamera(camera.id, {
+                        motion: value as CameraMotionType,
+                        targetType: grp ? "GROUP" : "OBJECT",
+                      });
+                    }
+                  }}
                 >
                   {MOTION_TYPES.map((value) => (
                     <option key={value} value={value}>
                       {MOTION_LABELS[value]}
                     </option>
                   ))}
+                  <option value="OTS" disabled={!canOts}>
+                    过肩 OTS{canOts ? "" : "（需 ≥2 名演员）"}
+                  </option>
                 </select>
               </Field>
               {camera.kind === "drone" ? (
@@ -1035,8 +1093,8 @@ export function Inspector() {
                   ＋ {MOTION_LABELS[type]}
                 </button>
               ))}
-            </div>
-            <p className="hint">{MOTION_HINTS[camera.motion]}</p>
+              </div>
+            <p className="hint">{cameraOts ? "过肩：镜头越过前景演员的肩膀拍摄主体；在下方「过肩 OTS」组里设置前景演员与肩侧。" : MOTION_HINTS[camera.motion]}</p>
             <div className="mini-btns">
               <button
                 type="button"
@@ -1073,40 +1131,56 @@ export function Inspector() {
           <SubGroup title="运镜 Motion" hint={MOTION_HINTS[move.type]}>
             <Field label="Motion">
               <select
-                value={move.type}
-                onChange={(event) =>
-                  patchCameraMove(move.id, { type: event.target.value as CameraMotionType })
-                }
+                value={moveOts ? "OTS" : move.type}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  if (value === "OTS") {
+                    patchCameraMove(move.id, {
+                      targetType: "OTS",
+                      shoulderId:
+                        move.shoulderId ??
+                        moveCamera?.shoulderId ??
+                        state.objects.find(
+                          (o) => o.type === "actor" && o.id !== (move.targetId ?? moveCamera?.targetId),
+                        )?.id,
+                    });
+                  } else {
+                    patchCameraMove(move.id, { type: value as CameraMotionType, targetType: undefined });
+                  }
+                }}
               >
                 {MOTION_TYPES.map((value) => (
                   <option key={value} value={value}>
                     {MOTION_LABELS[value]}
                   </option>
                 ))}
+                <option value="OTS" disabled={!canOts}>
+                  过肩 OTS{canOts ? "" : "（需 ≥2 名演员）"}
+                </option>
               </select>
             </Field>
 
-            {move.type === "ORBIT" || move.type === "DRONE" ? (
-              <Field label={`Orbit ${move.orbitDeg.toFixed(0)}°`}>
+            {!moveOts && (move.type === "ORBIT" || move.type === "DRONE") ? (
+              <Field label={`Orbit ${(move.orbitDeg ?? 0).toFixed(0)}°`}>
                 <input
                   type="range"
                   min={-360}
                   max={360}
                   step={5}
-                  value={move.orbitDeg}
+                  value={move.orbitDeg ?? 0}
                   onChange={(event) => patchCameraMove(move.id, { orbitDeg: Number(event.target.value) })}
                 />
               </Field>
             ) : null}
 
-            {move.type === "DOLLY" || move.type === "DRONE" || move.type === "DOLLY_ZOOM" ? (
-              <Field label={`Dolly ×${move.dollyScale.toFixed(2)}`}>
+            {!moveOts && (move.type === "DOLLY" || move.type === "DRONE" || move.type === "DOLLY_ZOOM") ? (
+              <Field label={`Dolly ×${(move.dollyScale ?? 1).toFixed(2)}`}>
                 <input
                   type="range"
                   min={0.3}
                   max={2}
                   step={0.05}
-                  value={move.dollyScale}
+                  value={move.dollyScale ?? 1}
                   onChange={(event) =>
                     patchCameraMove(move.id, { dollyScale: Number(event.target.value) })
                   }
@@ -1114,14 +1188,14 @@ export function Inspector() {
               </Field>
             ) : null}
 
-            {move.type === "CRANE" || move.type === "DRONE" ? (
-              <Field label={`Crane +${move.craneHeight.toFixed(1)}m`}>
+            {!moveOts && (move.type === "CRANE" || move.type === "DRONE") ? (
+              <Field label={`Crane +${(move.craneHeight ?? 0).toFixed(1)}m`}>
                 <input
                   type="range"
                   min={-6}
                   max={8}
                   step={0.1}
-                  value={move.craneHeight}
+                  value={move.craneHeight ?? 0}
                   onChange={(event) =>
                     patchCameraMove(move.id, { craneHeight: Number(event.target.value) })
                   }
@@ -1130,7 +1204,14 @@ export function Inspector() {
             ) : null}
           </SubGroup>
 
-          <SubGroup title="构图 Composition" hint="留空即继承相机级设置。">
+          <SubGroup
+            title="构图 Composition"
+            hint={
+              moveOts
+                ? "过肩镜头下，机位角度 / 距离 / 眼高由过肩几何固定，仅 Target 与 Lens 生效；侧面关系由下方「过肩 OTS」决定。"
+                : "留空即继承相机级设置。"
+            }
+          >
             <Field label="Target">
               <select
                 value={move.targetId ?? ""}
@@ -1141,11 +1222,12 @@ export function Inspector() {
                 <option value="">(camera default)</option>
                 {state.objects.map((item) => (
                   <option key={item.id} value={item.id}>
-                    {item.id}
+                    {objectDisplayName(item)}
                   </option>
                 ))}
               </select>
             </Field>
+            {moveOts ? null : (
             <Field label="Framing">
               <select
                 value={move.framing ?? ""}
@@ -1161,6 +1243,8 @@ export function Inspector() {
                 ))}
               </select>
             </Field>
+            )}
+            {moveOts ? null : (
             <Field label="View">
               <select
                 value={move.view ?? ""}
@@ -1176,6 +1260,8 @@ export function Inspector() {
                 ))}
               </select>
             </Field>
+            )}
+            {moveOts ? null : (
             <Field label="Side">
               <select
                 value={move.side ?? ""}
@@ -1191,6 +1277,8 @@ export function Inspector() {
                 ))}
               </select>
             </Field>
+            )}
+            {moveOts ? null : (
             <Field label="Lens">
               <select
                 value={move.lensMm ?? ""}
@@ -1206,24 +1294,38 @@ export function Inspector() {
                 ))}
               </select>
             </Field>
+            )}
           </SubGroup>
 
           {moveOts ? (
             <SubGroup
               title="过肩 OTS"
               hint="越过前景演员的肩膀拍主体：Shoulder 是前景、Target 是主体（在上方构图组里设置）。"
-            >
-              <Field label="Shoulder（前景演员）">
+              >
+              {moveOts && !canOts ? (
+              <p className="hint" style={{ color: "#ffb86b" }}>
+                ⚠ 过肩需要至少 2 名演员（前景 + 主体）；当前不足，过肩不生效，请先加入另一个演员。
+              </p>
+              ) : moveOts &&
+              (!(move.shoulderId ?? moveCamera?.shoulderId) ||
+              (move.shoulderId ?? moveCamera?.shoulderId) ===
+                (move.targetId ?? moveCamera?.targetId)) ? (
+              <p className="hint" style={{ color: "#ffb86b" }}>
+                ⚠ 需设置与主体（Target）不同的前景演员（Shoulder），否则过肩不生效、Side（左/右肩）无效。
+              </p>
+              ) : null}
+              <Field label="前景演员（Shoulder）">
                 <select
                   value={move.shoulderId ?? ""}
+                  disabled={!canOts}
                   onChange={(event) =>
                     patchCameraMove(move.id, { shoulderId: event.target.value || undefined })
                   }
                 >
-                  <option value="">(camera default)</option>
-                  {state.objects.map((item) => (
+                  <option value="">{canOts ? "(camera default)" : "(需至少 2 名演员)"}</option>
+                  {actors.filter((item) => item.id !== (move.targetId ?? moveCamera?.targetId)).map((item) => (
                     <option key={item.id} value={item.id}>
-                      {item.id}
+                      {objectDisplayName(item)}
                     </option>
                   ))}
                 </select>

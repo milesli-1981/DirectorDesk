@@ -1,4 +1,4 @@
-import { EaseCurve } from "../domain/schema";
+import { EaseCurve, SpeedKey } from "../domain/schema";
 
 export interface EasePreset {
   name: string;
@@ -112,8 +112,127 @@ export function easeTimeForValue(a: EaseCurve, value: number): number {
   return 1;
 }
 
-/** 归一化速度（曲线斜率），用于 Speed Curve 下方的速度条。 */
+/** 归一化速度（曲线斜率），用于缓动曲线下方的速度条。 */
 export function easeSpeed(a: EaseCurve, u: number): number {
   const h = 0.008;
   return (easeVal(a, Math.min(1, u + h)) - easeVal(a, Math.max(0, u - h))) / (2 * h);
+}
+
+/* ------------------------------------------------- 多段速度曲线（关键点） */
+
+/** 相邻关键点之间的最小时间间距（归一化），保证每段都有非零时长。 */
+export const SPEED_KEY_MIN_GAP = 0.02;
+
+const clamp01 = (value: number) => Math.min(1, Math.max(0, value));
+
+/** 由单段缓动生成两关键点 profile，用于从 cubic-bezier 切到关键点模式。 */
+export function defaultSpeedKeys(curve: EaseCurve): SpeedKey[] {
+  return [
+    { id: "K1", t: 0, v: 0, ease: curve },
+    { id: "K2", t: 1, v: 1, ease: curve },
+  ];
+}
+
+/**
+ * 关键点规范化：排序 → 夹紧间距 → 首末点钉死 → 中间点保证 v 单调不减。
+ *
+ * 两条硬约束：
+ * - 首点 v = 0、末点 v = 1：这是「进度曲线」，只要末点小于 1，求解到片段末尾时
+ *   进度也到不了 100%，物体就会停在 path 中途。延迟出发 / 提前到位请改这两点的 t。
+ * - 中间点 v 单调不减：运动求解里进度只能前进（倒退会让物体往回跑、编队解算失去单调性），
+ *   所以越界的点被推进相邻区间，而不是反过来改邻居——保持「拖谁动谁」的手感。
+ */
+export function normalizeSpeedKeys(value?: readonly SpeedKey[] | null): SpeedKey[] | null {
+  if (!Array.isArray(value) || value.length < 2) return null;
+  const keys = value
+    .map((key) => ({
+      id: key.id,
+      t: Number.isFinite(key.t) ? clamp01(key.t) : 0,
+      v: Number.isFinite(key.v) ? clamp01(key.v) : 0,
+      ease: normalizeEase(key.ease),
+    }))
+    .sort((a, b) => a.t - b.t);
+  let prevT = -Infinity;
+  let prevV = 0;
+  keys.forEach((key, index) => {
+    // 首点默认贴 0，也可以往后拖（= 起步前先等一会）；后续点至少与上一点留出间隙。
+    const floor = index === 0 ? 0 : prevT + SPEED_KEY_MIN_GAP;
+    key.t = Math.min(1, Math.max(key.t, floor));
+    if (index === 0) key.v = 0;
+    else key.v = Math.max(key.v, prevV);
+    prevT = key.t;
+    prevV = key.v;
+  });
+  // 末点必须满进度，否则曲线末端 < 1 → 永远走不完 path。
+  keys[keys.length - 1].v = 1;
+  return keys;
+}
+
+/** 关键点求值：u 落在哪一段，就用该段末点的缓动在段内插值。 */
+export function profileVal(keys: readonly SpeedKey[], u: number): number {
+  const count = keys.length;
+  if (count === 0) return 0;
+  if (u <= keys[0].t) return keys[0].v;
+  if (u >= keys[count - 1].t) return keys[count - 1].v;
+  for (let i = 0; i < count - 1; i += 1) {
+    const from = keys[i];
+    const to = keys[i + 1];
+    if (u < from.t || u > to.t) continue;
+    const span = to.t - from.t;
+    if (span <= 1e-6) return to.v;
+    return from.v + (to.v - from.v) * easeVal(to.ease, (u - from.t) / span);
+  }
+  return keys[count - 1].v;
+}
+
+/** 统一入口：≥2 个关键点走多段曲线，否则退化为单段 cubic-bezier。 */
+export function curveVal(
+  curve: EaseCurve,
+  keys: readonly SpeedKey[] | null | undefined,
+  u: number,
+): number {
+  return keys && keys.length >= 2 ? profileVal(keys, u) : easeVal(curve, u);
+}
+
+/** 统一入口的斜率版本（归一化速度），用于速度条与读数。 */
+export function curveSpeed(
+  curve: EaseCurve,
+  keys: readonly SpeedKey[] | null | undefined,
+  u: number,
+): number {
+  const h = 0.008;
+  return (
+    (curveVal(curve, keys, Math.min(1, u + h)) - curveVal(curve, keys, Math.max(0, u - h))) / (2 * h)
+  );
+}
+
+/**
+ * 统一入口的反解：给定已完成的进度 v，求对应时刻比例 u。
+ * 多段曲线里进度可能走出平台（等一会再动），取**首次**达到该进度的时刻。
+ */
+export function curveTimeForValue(
+  curve: EaseCurve,
+  keys: readonly SpeedKey[] | null | undefined,
+  value: number,
+): number {
+  if (!keys || keys.length < 2) return easeTimeForValue(curve, value);
+  if (value <= keys[0].v) return keys[0].t;
+  const last = keys[keys.length - 1];
+  if (value >= last.v) return last.t;
+
+  const STEPS = 96;
+  let prevU = 0;
+  let prevV = curveVal(curve, keys, 0);
+  for (let i = 1; i <= STEPS; i += 1) {
+    const u = i / STEPS;
+    const v = curveVal(curve, keys, u);
+    if (prevV <= value && v >= value) {
+      const dv = v - prevV;
+      const ratio = Math.abs(dv) < 1e-9 ? 0 : (value - prevV) / dv;
+      return prevU + (u - prevU) * ratio;
+    }
+    prevU = u;
+    prevV = v;
+  }
+  return last.t;
 }

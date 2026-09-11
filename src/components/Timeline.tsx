@@ -5,10 +5,11 @@ import {
   EaseCurve,
   HandoffMode,
   objectDisplayName,
+  SpeedKey,
   TimelineItem,
 } from "../domain/schema";
 import { buildTimelineItems, itemRange, rawContentEnd } from "../engine/timeline";
-import { easeVal, normalizeEase } from "../engine/ease";
+import { curveVal, normalizeEase } from "../engine/ease";
 import { waypointKeyframes } from "../engine/path";
 
 const MAX_PX_PER_SEC = 100;
@@ -33,11 +34,11 @@ function assetNoun(category: AssetCategory): string {
   return ASSET_NOUN[category] ?? "对象";
 }
 
-function easeSpark(ease: EaseCurve): string {
+function easeSpark(ease: EaseCurve, keys?: SpeedKey[]): string {
   let d = "";
   for (let i = 0; i <= 16; i += 1) {
     const u = i / 16;
-    const v = Math.max(0, Math.min(1, easeVal(ease, u)));
+    const v = Math.max(0, Math.min(1, curveVal(ease, keys, u)));
     d += `${i ? "L" : "M"}${(1 + u * 38).toFixed(1)} ${(12.5 - v * 11).toFixed(1)}`;
   }
   const svg =
@@ -324,7 +325,7 @@ export function Timeline() {
       item.kind === "segment" ? state.segments.find((value) => value.id === item.source) : undefined;
     const spark =
       segment && range.end - range.start >= 0.9
-        ? easeSpark(normalizeEase(segment.ease))
+        ? easeSpark(normalizeEase(segment.ease), segment.speedKeys)
         : undefined;
     const clipWidth = Math.max(28, (range.end - range.start) * pxPerSec);
     // 路径转折点在该片段上的到达时刻：用于把关键帧画在片段条上。

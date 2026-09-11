@@ -364,7 +364,8 @@ export function createCommuteState(): DirectorState {
       {
         id: "MOVE_CAM_A_03",
         camera: "CAM_A",
-        type: "OTS",
+        type: "FOLLOW",
+        targetType: "OTS",
         timeStart: 3.0,
         timeEnd: 5.0,
         targetId: "GREETER",

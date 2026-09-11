@@ -2181,6 +2181,23 @@ pre {
   white-space: pre-line;
 }
 
+/* 关键点编辑按钮行：插点 / 删点 / 重置，放在曲线下方 */
+.ease-tools {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.ease-tools button {
+  padding: 3px 7px;
+  font-size: 10px;
+}
+
+.ease-tools button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 /* Timeline: append-leg button per object track */
 .add-leg {
   width: 22px;

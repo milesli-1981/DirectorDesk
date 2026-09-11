@@ -5,7 +5,7 @@ import {
   PathPointShape,
   Vec2,
 } from "../domain/schema";
-import { easeTimeForValue, easeVal, normalizeEase } from "./ease";
+import { curveTimeForValue, curveVal, normalizeEase } from "./ease";
 import { Rect } from "./occlusion";
 import { avoidObstacles } from "./pathfinding";
 
@@ -149,7 +149,7 @@ export function segmentPosition(s: MoveSegment, time: number, rects: Rect[] = []
   const total = lens[lens.length - 1] || 1;
   const span = s.timeEnd - s.timeStart || 1;
   const u = (time - s.timeStart) / span;
-  const target = easeVal(normalizeEase(s.ease), u) * total;
+  const target = curveVal(normalizeEase(s.ease), s.speedKeys, u) * total;
 
   let i = 1;
   while (i < lens.length && lens[i] < target) i += 1;
@@ -387,7 +387,7 @@ export function waypointKeyframes(s: MoveSegment): WaypointKeyframe[] {
   chain.forEach((node, index) => {
     if (node.type !== "path" || !node.id) return;
     const fraction = Math.min(1, Math.max(0, cumulative[index] / total));
-    const raw = s.timeStart + easeTimeForValue(ease, fraction) * span;
+    const raw = s.timeStart + curveTimeForValue(ease, s.speedKeys, fraction) * span;
     out.push({
       id: node.id,
       index: out.length,

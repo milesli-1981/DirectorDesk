@@ -34,7 +34,7 @@ export function buildTimelineItems(state: DirectorState): TimelineItem[] {
       track: move.camera,
       source: move.id,
       kind: "camera",
-      label: `${move.type} · ${move.targetId ?? "default target"}`,
+      label: `${move.targetType === "OTS" ? "OTS" : move.type} · ${move.targetId ?? "default target"}`,
     });
   });
 
