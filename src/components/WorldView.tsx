@@ -3,15 +3,15 @@ import { Canvas, ThreeEvent, useFrame, useThree } from "@react-three/fiber";
 import { setCaptureCanvas } from "../engine/videoExport";
 import { Html, Line, OrbitControls, PerspectiveCamera } from "@react-three/drei";
 import * as THREE from "three";
-import { useDirectorStore } from "../state/directorStore";
-import { AssetCategory, HandoffMode, JointName, MoveSegment, PathPoint, Pose, Vec2 } from "../domain/schema";
-import { curveToggleEligible, pathChain } from "../engine/path";
+import { MarkerHover, useDirectorStore } from "../state/directorStore";
+import { AssetCategory, DirectorState, HandoffMode, JointName, MoveSegment, PathPoint, Pose, Vec2 } from "../domain/schema";
+import { pathChain } from "../engine/path";
 import {
   hitCameraRay,
-  hitEndpoint,
+  hitEndpointScreen,
   hitObjectRay,
   hitPath,
-  hitPathPoint,
+  hitPathPointScreen,
   pathPolyline,
 } from "../engine/pick";
 import { baseHeading, formationForwardShift, formationSlotOf, objectFacing, objectPosition, routeObstacles } from "../engine/solver";
@@ -45,7 +45,7 @@ import {
   SIDE_LABELS,
   VIEW_LABELS,
 } from "../domain/schema";
-import { RadialRing } from "./RadialRing";
+import { RadialRing, PointRadialRing } from "./RadialRing";
 import { LockBadge } from "./LockBadge";
 
 const GROUND_PLANE = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
@@ -54,10 +54,21 @@ const BASE_DISTANCE = 26;
 const DIRECTOR_FOV = 40;
 /** 径向意图环暂未匹配到合适的操作，暂时关闭（置 true 即可恢复点击对象弹出）。 */
 const RING_ENABLED = false;
+/** 路径标记（转折点 / 起终点把手）的屏幕命中半径：比图形本身大一圈，鼠标不必精确压在标记上。
+ *  按像素而非世界单位给，缩放与移机都不会改变手感；端点是公认最难点的那个，故单独放大。 */
+const POINT_PICK_PX = 24;
+const ENDPOINT_PICK_PX = 26;
+
+/** 悬停标记是否已经是同一个：省掉每次 pointermove 都写一遍 store。 */
+function sameMarker(a: MarkerHover | null, b: MarkerHover | null): boolean {
+  if (!a || !b) return a === b;
+  return a.kind === b.kind && a.segmentId === b.segmentId && a.id === b.id;
+}
 
 type DragState =
   | { kind: "object"; id: string; moved: boolean; origin: Vec2 }
-  | { kind: "point"; segmentId: string; pointId: string }
+  // moved / origin 用于区分「轻点」与「拖动」：轻点唤起环形菜单，拖动则正常搬点。
+  | { kind: "point"; segmentId: string; pointId: string; moved: boolean; origin: Vec2 }
   | { kind: "endpoint"; segmentId: string; which: "start" | "end" }
   | { kind: "new"; segmentId: string; origin: Vec2; current: Vec2 }
   | { kind: "draw"; objectId: string };
@@ -67,7 +78,9 @@ function groundPoint(event: ThreeEvent<PointerEvent>): Vec2 | null {
     const hit = new THREE.Vector3();
     if (event.ray.intersectPlane(GROUND_PLANE, hit)) return { x: hit.x, z: hit.z };
   }
-  return { x: event.point.x, z: event.point.z };
+  // event.point 同样是射线与地面平面的交点，只有射线几乎平行于地面时两者才都取不到。
+  const onPlane = event.point as { x: number; z: number } | undefined;
+  return onPlane ? { x: onPlane.x, z: onPlane.z } : null;
 }
 
 function capturePointer(event: ThreeEvent<PointerEvent>) {
@@ -637,19 +650,32 @@ function OcclusionHighlights() {
 }
 
 function EndpointMarker({ segment, which }: { segment: MoveSegment; which: "start" | "end" }) {
+  const hovered = useDirectorStore(
+    (s) =>
+      s.hoverMarker?.kind === "endpoint" &&
+      s.hoverMarker.segmentId === segment.id &&
+      s.hoverMarker.id === which,
+  );
   const x = which === "start" ? segment.startX : segment.endX;
   const z = which === "start" ? segment.startZ : segment.endZ;
   const color = which === "start" ? "#67a7ff" : "#f0a35a";
+  // 悬停色保持原有色相（端点没有「选中」态的白色语义，变白反而会和路径点混淆），只提亮、放大。
+  const hoverColor = which === "start" ? "#a9cdff" : "#ffc79a";
 
   return (
     <group>
-      <mesh position={[x, 0.26, z]}>
+      <mesh position={[x, 0.26, z]} scale={hovered ? 1.35 : 1}>
         <sphereGeometry args={[0.24, 20, 14]} />
-        <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.4} />
+        <meshStandardMaterial
+          color={hovered ? hoverColor : color}
+          emissive={color}
+          emissiveIntensity={hovered ? 1.1 : 0.4}
+        />
       </mesh>
       <Html position={[x, 0.78, z]} center style={{ pointerEvents: "none" }} zIndexRange={[25, 0]}>
-        <span className="node-label" style={{ color }}>
+        <span className="node-label" style={{ color: hovered ? hoverColor : color }}>
           {which === "start" ? "START" : "END"}
+          {hovered ? " · 拖动移动" : ""}
         </span>
       </Html>
     </group>
@@ -666,13 +692,16 @@ function PointMarker({
   index: number;
 }) {
   const isSelected = useDirectorStore((s) => s.selectedPoint === point.id);
-  const toggleCurve = useDirectorStore((s) => s.toggleCurve);
-  const deletePoint = useDirectorStore((s) => s.deletePoint);
+  const hovered = useDirectorStore(
+    (s) =>
+      s.hoverMarker?.kind === "point" &&
+      s.hoverMarker.segmentId === segment.id &&
+      s.hoverMarker.id === point.id,
+  );
   const isArc = point.shape === "ARC";
   const chain = pathChain(segment);
   const previous = chain[index];
   const next = chain[index + 2];
-  const eligible = curveToggleEligible(segment.points ?? [], index);
 
   return (
     <group>
@@ -703,46 +732,26 @@ function PointMarker({
         </>
       ) : null}
 
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[point.x, 0.09, point.z]}>
+      {/* 悬停放大 + 变亮：命中半径比图形本身大一圈（见 POINT_PICK_PX），
+          这里让「已经对准，松手就能选中 / 拖动」这件事看得见。 */}
+      <mesh
+        rotation={[-Math.PI / 2, 0, 0]}
+        position={[point.x, 0.09, point.z]}
+        scale={hovered ? 1.35 : 1}
+      >
         {isArc ? <ringGeometry args={[0.2, 0.34, 28]} /> : <circleGeometry args={[0.24, 26]} />}
-        <meshBasicMaterial color={isSelected ? "#ffffff" : "#55d88a"} side={THREE.DoubleSide} />
+        <meshBasicMaterial
+          color={isSelected ? "#ffffff" : hovered ? "#b9ffd6" : "#55d88a"}
+          side={THREE.DoubleSide}
+        />
       </mesh>
 
-      {isSelected ? (
+      {isSelected || hovered ? (
         <Html position={[point.x, 0.42, point.z]} center style={{ pointerEvents: "none" }} zIndexRange={[25, 0]}>
-          <span className="node-label">#{index + 1}</span>
-        </Html>
-      ) : null}
-
-      {/* 选中中间点时给出操作入口：删除始终可用；ARC/LINE 切换在不合法时不渲染（而非 disabled）。 */}
-      {isSelected ? (
-        <Html
-          position={[point.x, 0.6, point.z]}
-          center
-          style={{ pointerEvents: "auto" }}
-          zIndexRange={[40, 0]}
-        >
-          <div className="point-tools">
-            <button
-              type="button"
-              className="point-delete"
-              title="Delete this path point"
-              onPointerDown={(event) => event.stopPropagation()}
-              onClick={() => deletePoint(segment.id, point.id)}
-            >
-              ✕ DEL
-            </button>
-            {eligible ? (
-              <button
-                type="button"
-                className="curve-toggle"
-                onPointerDown={(event) => event.stopPropagation()}
-                onClick={() => toggleCurve(segment.id, point.id)}
-              >
-                {isArc ? "━ LINE" : "⌒ CURVE"}
-              </button>
-            ) : null}
-          </div>
+          <span className="node-label">
+            #{index + 1}
+            {hovered ? " · 拖动移动 · 点按出菜单" : ""}
+          </span>
         </Html>
       ) : null}
     </group>
@@ -1195,6 +1204,8 @@ function Interaction() {
   const livePtsRef = useRef<Vec2[]>([]);
   const [livePts, setLivePts] = useState<Vec2[]>([]);
   const controls = useThree((state) => state.controls) as { enabled: boolean } | null;
+  const camera = useThree((state) => state.camera);
+  const size = useThree((state) => state.size);
 
   // 拖拽对象 / 路径点时临时接管 OrbitControls，避免编辑路径同时把视角转走。
   const beginDrag = (drag: DragState) => {
@@ -1211,6 +1222,27 @@ function Interaction() {
     if (controls) controls.enabled = store.viewMode === "director" && !store.viewLocked;
   };
 
+  /**
+   * 光标下的路径标记：转折点与起终点把手共用同一套屏幕命中（见 engine/pick 的 markerScore）。
+   * 取更准的那个；两者重合时（手绘路径的首尾正好压在起终点上）优先起终点——
+   * 转折点还能从环形菜单另找入口，端点没有别的地方可以抓。
+   */
+  const markerUnder = (
+    event: ThreeEvent<PointerEvent>,
+    state: DirectorState,
+    objectId: string,
+  ): MarkerHover | null => {
+    const fov = (camera as THREE.PerspectiveCamera).fov || DIRECTOR_FOV;
+    const focalPx = size.height / (2 * Math.tan((fov * Math.PI) / 360));
+    const endpoint = hitEndpointScreen(state, objectId, event.ray, ENDPOINT_PICK_PX, focalPx);
+    const point = hitPathPointScreen(state, objectId, event.ray, POINT_PICK_PX, focalPx);
+    if (endpoint && (!point || endpoint.score <= point.score)) {
+      return { kind: "endpoint", segmentId: endpoint.segment.id, id: endpoint.which };
+    }
+    if (point) return { kind: "point", segmentId: point.segment.id, id: point.point.id };
+    return null;
+  };
+
   useEffect(() => {
     const finish = () => {
       const drag = dragRef.current;
@@ -1218,6 +1250,11 @@ function Interaction() {
       const store = useDirectorStore.getState();
       if (drag.kind === "object" && !drag.moved) {
         if (RING_ENABLED) store.openRing(drag.id);
+      } else if (drag.kind === "point" && !drag.moved) {
+        // 轻点路径点（按下未拖动）：唤起环形菜单做 Line/Curve 切换或删除。
+        // 这里刻意不受 RING_ENABLED 约束：那是旧的对象菜单开关且当前为 false，
+        // 若一并套用，路径点在移除内联按钮后就没有操作入口了。
+        store.openPointRing(drag.pointId);
       } else if (drag.kind === "new") {
         const moved =
           Math.hypot(drag.current.x - drag.origin.x, drag.current.z - drag.origin.z) > 0.12;
@@ -1237,15 +1274,44 @@ function Interaction() {
 
   const handleDown = (event: ThreeEvent<PointerEvent>) => {
     if (event.button !== 0) return;
-    const point = groundPoint(event);
-    if (!point) return;
 
+    const point = groundPoint(event);
     const store = useDirectorStore.getState();
     if (store.viewMode !== "director") return;
-    if (store.radialObjectId) {
+    if (store.radialTarget) {
       store.closeRing();
       return;
     }
+
+    const selectedObjectId = store.selectedKind === "object" ? store.selectedId : null;
+
+    // 路径标记先于其他一切判定：它们是浮在地面之上的几何体，只有直接拿射线才判得准
+    //（拿射线与地面的交点去比距离，会随俯角整体错位：低机位下端点怎么点都不中），
+    // 而且不再依赖地面交点是否存在。与 handleMove 的悬停反馈共用同一套判定，
+    // 于是「亮起来」的把手一定点得中。
+    if (selectedObjectId && !store.pathDrawMode) {
+      const marker = markerUnder(event, store.state, selectedObjectId);
+      if (marker) {
+        store.selectItem(marker.segmentId);
+        if (marker.kind === "point") {
+          store.selectPoint(marker.id);
+          beginDrag({
+            kind: "point",
+            segmentId: marker.segmentId,
+            pointId: marker.id,
+            moved: false,
+            origin: point ?? { x: 0, z: 0 },
+          });
+        } else {
+          store.selectPoint(null);
+          beginDrag({ kind: "endpoint", segmentId: marker.segmentId, which: marker.id });
+        }
+        capturePointer(event);
+        return;
+      }
+    }
+
+    if (!point) return;
 
     // 手绘路径模式：在画布上拖拽，把轨迹写入当前选中的资产（无选中资产时不拦截，便于先点选）。
     // set 资产是静态环境 / 障碍，不参与运动，禁用对其手绘路径。
@@ -1266,7 +1332,6 @@ function Interaction() {
     }
 
     const tolerance = 1 / store.zoom;
-    const selectedObjectId = store.selectedKind === "object" ? store.selectedId : null;
 
     const cameraHit = hitCameraRay(store.state, store.currentTime, event.ray, 0.9 * tolerance);
     const objectHit = hitObjectRay(store.state, store.currentTime, event.ray, 0.7 * tolerance);
@@ -1274,36 +1339,6 @@ function Interaction() {
     if (cameraHit && (!objectHit || cameraHit.distance <= objectHit.distance)) {
       store.selectCamera(cameraHit.camera.id);
       return;
-    }
-
-    // 选中对象的路径点 / 端点优先于「抓取资产」：set 资产（建筑等）的抓取范围
-    // 按 footprint 外扩，可能盖住落在其中的路径点，否则这些点会点不到。
-    if (selectedObjectId) {
-      const pointHit = hitPathPoint(store.state, selectedObjectId, point, 0.45 * tolerance);
-      if (pointHit) {
-        store.selectItem(pointHit.segment.id);
-        store.selectPoint(pointHit.point.id);
-        beginDrag({
-          kind: "point",
-          segmentId: pointHit.segment.id,
-          pointId: pointHit.point.id,
-        });
-        capturePointer(event);
-        return;
-      }
-
-      const endpointHit = hitEndpoint(store.state, selectedObjectId, point, 0.45 * tolerance);
-      if (endpointHit) {
-        store.selectItem(endpointHit.segment.id);
-        store.selectPoint(null);
-        beginDrag({
-          kind: "endpoint",
-          segmentId: endpointHit.segment.id,
-          which: endpointHit.which,
-        });
-        capturePointer(event);
-        return;
-      }
     }
 
     if (objectHit) {
@@ -1344,10 +1379,20 @@ function Interaction() {
 
   const handleMove = (event: ThreeEvent<PointerEvent>) => {
     const drag = dragRef.current;
-    if (!drag) return;
+    const store = useDirectorStore.getState();
+
+    if (!drag) {
+      // 空闲时维持悬停反馈：把手能不能被选中，得先让用户看得见（高亮 + 放大 + 光标变抓握）。
+      // 手绘路径模式下不提示——那时画布上一切都归「画路径」，标记点了也不作数。
+      const objectId = store.selectedKind === "object" ? store.selectedId : null;
+      const next =
+        objectId && !store.pathDrawMode ? markerUnder(event, store.state, objectId) : null;
+      if (!sameMarker(next, store.hoverMarker)) store.setHoverMarker(next);
+      return;
+    }
+
     const point = groundPoint(event);
     if (!point) return;
-    const store = useDirectorStore.getState();
 
     if (drag.kind === "object") {
       // 团队成员：拖任何一个都是整队平移（位置由锚点承载），保持"队作为一个 unit"。
@@ -1371,6 +1416,8 @@ function Interaction() {
       }
       store.moveObject(drag.id, point.x, point.z);
     } else if (drag.kind === "point") {
+      // 超过阈值才算「拖动」，抬手时不区分例外就不会误弹环形菜单。
+      if (Math.hypot(point.x - drag.origin.x, point.z - drag.origin.z) > 0.15) drag.moved = true;
       store.movePathPoint(drag.segmentId, drag.pointId, point.x, point.z);
     } else if (drag.kind === "endpoint") {
       store.moveEndpoint(drag.segmentId, drag.which, point.x, point.z);
@@ -1389,7 +1436,15 @@ function Interaction() {
 
   return (
     <>
-      <mesh rotation={[-Math.PI / 2, 0, 0]} onPointerDown={handleDown} onPointerMove={handleMove}>
+      <mesh
+        rotation={[-Math.PI / 2, 0, 0]}
+        onPointerDown={handleDown}
+        onPointerMove={handleMove}
+        onPointerOut={() => {
+          // 空闲时移出地面要清掉悬停反馈；拖拽中保留，免得把手在拖动途中忽明忽暗。
+          if (!dragRef.current) useDirectorStore.getState().setHoverMarker(null);
+        }}
+      >
         <planeGeometry args={[140, 140]} />
         <meshStandardMaterial color="#101725" roughness={0.95} />
       </mesh>
@@ -1553,11 +1608,39 @@ function RingAnchor({ objectId }: { objectId: string }) {
   );
 }
 
+function PointRingAnchor({ pointId }: { pointId: string }) {
+  const groupRef = useRef<THREE.Group>(null);
+
+  useFrame(() => {
+    const { state } = useDirectorStore.getState();
+    // 坐标写在所属 segment 的 points 上，每帧同步：播放或拖动后窗口不会掉在原地。
+    for (const segment of state.segments) {
+      const hit = (segment.points ?? []).find((p) => p.id === pointId);
+      if (hit) {
+        groupRef.current?.position.set(hit.x, 0, hit.z);
+        return;
+      }
+    }
+  });
+
+  return (
+    <group ref={groupRef}>
+      <Html center style={{ pointerEvents: "auto" }} zIndexRange={[90, 0]}>
+        <PointRadialRing pointId={pointId} />
+      </Html>
+    </group>
+  );
+}
+
 function RadialLayer() {
-  const radialObjectId = useDirectorStore((s) => s.radialObjectId);
+  const radialTarget = useDirectorStore((s) => s.radialTarget);
   const viewMode = useDirectorStore((s) => s.viewMode);
-  if (!radialObjectId || viewMode !== "director") return null;
-  return <RingAnchor objectId={radialObjectId} />;
+  if (!radialTarget || viewMode !== "director") return null;
+  return radialTarget.kind === "object" ? (
+    <RingAnchor objectId={radialTarget.id} />
+  ) : (
+    <PointRingAnchor pointId={radialTarget.id} />
+  );
 }
 
 /* ------------------------------------------------------------- World view */
@@ -1844,6 +1927,16 @@ export function WorldView() {
   const viewLocked = useDirectorStore((s) => s.viewLocked);
   const toggleViewLocked = useDirectorStore((s) => s.toggleViewLocked);
   const pathDrawMode = useDirectorStore((s) => s.pathDrawMode);
+  // 光标是否停在路径标记上（转折点 / 起终点把手）：命中与否由画布内的判定决定，
+  // 这里只负责把它翻译成「抓握」光标与文字提示。只认当前选中对象的标记——
+  // 换选中对象后旧悬停立即失效，不会留下一个抓握光标指向看不见的把手。
+  const hoverMarker = useDirectorStore((s) => {
+    const marker = s.hoverMarker;
+    if (!marker || s.selectedKind !== "object" || !s.selectedId) return null;
+    const segment = s.state.segments.find((item) => item.id === marker.segmentId);
+    return segment && segment.object === s.selectedId ? marker : null;
+  });
+  const dragging = useDirectorStore((s) => s.dragging);
   const togglePathDraw = useDirectorStore((s) => s.togglePathDraw);
   const addAsset = useDirectorStore((s) => s.addAsset);
   const addCamera = useDirectorStore((s) => s.addCamera);
@@ -2043,7 +2136,9 @@ export function WorldView() {
       ) : null}
 
       <div
-        className={`canvasWrap${pathDrawMode ? " is-drawing" : ""}`}
+        className={`canvasWrap${pathDrawMode ? " is-drawing" : ""}${
+          hoverMarker ? " is-handle" : ""
+        }${hoverMarker && dragging ? " is-handle-drag" : ""}`}
         onDragOver={(event) => {
           event.preventDefault();
           event.dataTransfer.dropEffect = "copy";

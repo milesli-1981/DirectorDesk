@@ -259,6 +259,16 @@ function initStage(): { manifest: StageManifest; activeState: DirectorState } {
 
 export type SelectionKind = "object" | "camera";
 
+/** 环形菜单（RadialRing）的宿主：可以是场景对象，也可以是某条路径上的一个转折点。
+ *  两者共用同一套甜甜圈 UI，只是可用动作不同，故用一个联合类型承载，避免两套字段各自残留。 */
+export type RadialTarget = { kind: "object" | "point"; id: string };
+
+/** 光标当前悬停的路径标记（转折点 / 起终点把手）。
+ *  纯视觉反馈：让「这个把手现在能不能点中」先看得见，命中判定仍由 WorldView 决定。 */
+export type MarkerHover =
+  | { kind: "point"; segmentId: string; id: string }
+  | { kind: "endpoint"; segmentId: string; id: "start" | "end" };
+
 interface DirectorStore {
   state: DirectorState;
   /** 片场 manifest：场景页索引 + 片场名（数据各自独立存储）。 */
@@ -270,7 +280,9 @@ interface DirectorStore {
   selectedId: string;
   selectedItem: string | null;
   selectedPoint: string | null;
-  radialObjectId: string | null;
+  /** 光标悬停的路径标记：只驱动高亮，不代表选中，也不进 undo 历史。 */
+  hoverMarker: MarkerHover | null;
+  radialTarget: RadialTarget | null;
   viewMode: ViewMode;
   activeCameraId: string | null;
   /** 锁视角：开启后拖拽不再改变 Director View 的机位。 */
@@ -294,7 +306,10 @@ interface DirectorStore {
   selectCamera: (cameraId: string) => void;
   selectItem: (itemId: string | null) => void;
   selectPoint: (pointId: string | null) => void;
+  setHoverMarker: (marker: MarkerHover | null) => void;
   openRing: (objectId: string) => void;
+  /** 轻点路径转折点打开环形菜单（Line/Curve 切换 + 删除），与对象环形菜单共用同一套 UI。 */
+  openPointRing: (pointId: string) => void;
   closeRing: () => void;
 
   moveObject: (objectId: string, x: number, z: number) => void;
@@ -360,6 +375,12 @@ interface DirectorStore {
   // —— 动作片段（ActionClip）管理 ——
   addAction: (objectId: string, time?: number) => void;
   setActionTime: (actionId: string, start: number, end: number) => void;
+  /**
+   * 整队动作：一次写入多条动作片段的时间（时间轴上「整队动作带」拖动时使用）。
+   * 逐条按 setActionTime 同样的规则夹到 [0, duration]，但只压一条历史，
+   * 避免拖动过程中每帧 N 条各压一次栈。
+   */
+  setActionTimes: (entries: { id: string; timeStart: number; timeEnd: number }[]) => void;
   updateAction: (actionId: string, patch: Partial<ActionClip>) => void;
   deleteAction: (actionId: string) => void;
   // —— 自定义动作库（命名的关节姿势，随场景持久化、可被多片段复用）——
@@ -670,7 +691,8 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
     selectedId: "M17",
     selectedItem: null,
     selectedPoint: null,
-    radialObjectId: null,
+    hoverMarker: null,
+    radialTarget: null,
     viewMode: "director",
     activeCameraId: "CAM_A",
     viewLocked: false,
@@ -732,9 +754,13 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
 
     selectPoint: (pointId) => set({ selectedPoint: pointId }),
 
-    openRing: (objectId) => set({ radialObjectId: objectId }),
+    setHoverMarker: (marker) => set({ hoverMarker: marker }),
 
-    closeRing: () => set({ radialObjectId: null }),
+    openRing: (objectId) => set({ radialTarget: { kind: "object", id: objectId } }),
+
+    openPointRing: (pointId) => set({ radialTarget: { kind: "point", id: pointId } }),
+
+    closeRing: () => set({ radialTarget: null }),
 
     moveObject: (objectId, x, z) =>
       set((store) => {
@@ -978,7 +1004,11 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           // 删掉的正是当前选中资产时，清空选择，避免后续 DRAW PATH 把轨迹写进不存在的 id（孤儿路径）。
           selectedId: store.selectedId === id ? "" : store.selectedId,
           selectedKind: store.selectedKind === "object" && store.selectedId === id ? undefined : store.selectedKind,
-          radialObjectId: store.radialObjectId === id ? null : store.radialObjectId,
+          // 删掉资产时若正开着它的环形菜单，务必一并关掉，避免菜单指向已不存在的对象。
+          radialTarget:
+            store.radialTarget?.kind === "object" && store.radialTarget.id === id
+              ? null
+              : store.radialTarget,
         };
       }),
 
@@ -1227,7 +1257,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           selectedId: parsed.objects[0]?.id ?? "",
           selectedItem: null,
           selectedPoint: null,
-          radialObjectId: null,
+          radialTarget: null,
           activeCameraId: parsed.cameras[0]?.id ?? null,
         });
       } catch (error) {
@@ -1270,7 +1300,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
             selectedId: active.objects[0]?.id ?? "",
             selectedItem: null,
             selectedPoint: null,
-            radialObjectId: null,
+            radialTarget: null,
             activeCameraId: active.cameras[0]?.id ?? null,
           });
           return;
@@ -1290,7 +1320,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           selectedId: single.objects[0]?.id ?? "",
           selectedItem: null,
           selectedPoint: null,
-          radialObjectId: null,
+          radialTarget: null,
           activeCameraId: single.cameras[0]?.id ?? null,
         });
       } catch (error) {
@@ -1324,7 +1354,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         selectedId: "",
         selectedItem: null,
         selectedPoint: null,
-        radialObjectId: null,
+        radialTarget: null,
         viewMode: "director",
         activeCameraId: null,
       });
@@ -1346,7 +1376,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         selectedId: state.objects[0]?.id ?? "",
         selectedItem: null,
         selectedPoint: null,
-        radialObjectId: null,
+        radialTarget: null,
         activeCameraId: state.cameras[0]?.id ?? null,
       });
     },
@@ -1389,7 +1419,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           selectedId: state.objects[0]?.id ?? "",
           selectedItem: null,
           selectedPoint: null,
-          radialObjectId: null,
+          radialTarget: null,
           activeCameraId: state.cameras[0]?.id ?? null,
         });
       } else {
@@ -1418,7 +1448,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         selectedId: copy.objects[0]?.id ?? "",
         selectedItem: null,
         selectedPoint: null,
-        radialObjectId: null,
+        radialTarget: null,
         activeCameraId: copy.cameras[0]?.id ?? null,
       });
     },
@@ -1461,7 +1491,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         selectedId: state.objects[0]?.id ?? "",
         selectedItem: null,
         selectedPoint: null,
-        radialObjectId: null,
+        radialTarget: null,
         activeCameraId: state.cameras[0]?.id ?? null,
       });
     },
@@ -2123,7 +2153,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         selectedKind: "object",
         selectedId: objectId,
         selectedItem: clip.id,
-        radialObjectId: null,
+        radialTarget: null,
       });
     },
 
@@ -2138,6 +2168,30 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           actions: (store.state.actions ?? []).map((a) =>
             a.id === actionId ? { ...a, timeStart: nextStart, timeEnd: nextEnd } : a,
           ),
+        },
+      }));
+    },
+
+    setActionTimes: (entries) => {
+      const duration = get().state.duration;
+      if (entries.length === 0) return;
+      // 先算好每条的目标区间（逐条夹取，规则与 setActionTime 一致），再一次性写回。
+      const targets = new Map<string, { timeStart: number; timeEnd: number }>();
+      entries.forEach((entry) => {
+        const timeStart = clamp(round1(entry.timeStart), 0, duration - 0.1);
+        targets.set(entry.id, {
+          timeStart,
+          timeEnd: clamp(round1(entry.timeEnd), timeStart + 0.1, duration),
+        });
+      });
+      set((store) => ({
+        state: {
+          ...store.state,
+          revision: store.state.revision + 1,
+          actions: (store.state.actions ?? []).map((action) => {
+            const target = targets.get(action.id);
+            return target ? { ...action, ...target } : action;
+          }),
         },
       }));
     },
@@ -2226,7 +2280,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           selectedKind: "object",
           selectedId: objectId,
           selectedItem: constraint.id,
-          radialObjectId: null,
+          radialTarget: null,
         });
         return;
       }
@@ -2277,7 +2331,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           selectedKind: "object",
           selectedId: routeId,
           selectedItem: segment.id,
-          radialObjectId: null,
+          radialTarget: null,
         });
         return;
       }
@@ -2289,7 +2343,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         if (active) {
           patchConstraint(active.id, { timeEnd: Math.max(active.timeStart + 0.1, round1(time)) });
         }
-        set({ radialObjectId: null, selectedItem: active?.id ?? null });
+        set({ radialTarget: null, selectedItem: active?.id ?? null });
         return;
       }
 
@@ -2298,7 +2352,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           state.segments.find(
             (s) => s.object === objectId && time >= s.timeStart && time <= s.timeEnd,
           ) ?? state.segments.find((s) => s.object === objectId);
-        set({ radialObjectId: null, selectedItem: segment?.id ?? "CHANGE PATH" });
+        set({ radialTarget: null, selectedItem: segment?.id ?? "CHANGE PATH" });
         return;
       }
 
@@ -2323,12 +2377,12 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           selectedItem: clip.id,
           selectedKind: undefined,
           selectedId: "",
-          radialObjectId: null,
+          radialTarget: null,
         });
         return;
       }
 
-      set({ radialObjectId: null, selectedItem: action });
+      set({ radialTarget: null, selectedItem: action });
     },
 
     undo: () => {
@@ -2370,7 +2424,10 @@ useDirectorStore.subscribe((state, prev) => {
     if (state.selectedItem) useDirectorStore.setState({ selectedItem: null, selectedPoint: null });
   } else if (itemChanged && state.selectedItem) {
     // 时间轴片段被新选中 → 清对象 / 相机选中。
-    if (state.selectedId || state.selectedKind) {
+    // 但「路径段」(MoveSegment) 是对象路径编辑的一部分（点路径点会 selectItem(segment.id)），
+    // 必须保留对象选中，否则 selectedObjectId 变 null、PathHandles 不渲染、CURVE 按钮出不来。
+    const isSegment = (state.state?.segments ?? []).some((s) => s.id === state.selectedItem);
+    if ((state.selectedId || state.selectedKind) && !isSegment) {
       useDirectorStore.setState({ selectedKind: undefined, selectedId: "" });
     }
   }

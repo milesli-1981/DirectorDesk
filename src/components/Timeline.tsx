@@ -9,6 +9,7 @@ import {
 } from "../domain/schema";
 import { buildTimelineItems, itemRange, rawContentEnd } from "../engine/timeline";
 import { easeVal, normalizeEase } from "../engine/ease";
+import { waypointKeyframes } from "../engine/path";
 
 const MAX_PX_PER_SEC = 100;
 const MIN_PX_PER_SEC = 12;
@@ -49,11 +50,29 @@ function easeSpark(ease: EaseCurve): string {
 type DragMode = "l" | "r" | "m";
 
 interface ClipDrag {
-  item: TimelineItem;
+  /** 单条拖动时的片段；拖动「整队动作带」时为 null。 */
+  item: TimelineItem | null;
+  /** 整队动作带：带内每条动作的起止快照（拖动时按同一 delta 整队同步改写）。 */
+  band?: { id: string; start: number; end: number }[];
   start: number;
   end: number;
   originX: number;
   mode: DragMode;
+}
+
+/**
+ * 整队动作带：团队（Group Dynamics）的动作行把全体成员的动作合成一条带子。
+ * 团队成员里除队首外的片段原本不参与时间轴渲染 —— 既看不到、也拖不动，
+ * 却照样计入「内容末尾」，于是片长调小后警告永远消不掉。
+ * 合成一条带子后即可见、可拖，拖动按整队同步写回。
+ */
+interface TeamActionBand {
+  id: string;
+  /** 锚点（队首）：选中它作为整队代表，Inspector 展示的动作也是它。 */
+  anchorId: string;
+  start: number;
+  end: number;
+  entries: { id: string; start: number; end: number }[];
 }
 
 function TimelineReadout() {
@@ -111,6 +130,8 @@ export function Timeline() {
   const state = useDirectorStore((s) => s.state);
   const selectedItem = useDirectorStore((s) => s.selectedItem);
   const selectItem = useDirectorStore((s) => s.selectItem);
+  const selectedPoint = useDirectorStore((s) => s.selectedPoint);
+  const selectPoint = useDirectorStore((s) => s.selectPoint);
   const selectObject = useDirectorStore((s) => s.selectObject);
   const selectCamera = useDirectorStore((s) => s.selectCamera);
   const setTime = useDirectorStore((s) => s.setTime);
@@ -121,6 +142,7 @@ export function Timeline() {
   const addCameraMove = useDirectorStore((s) => s.addCameraMove);
   const addAction = useDirectorStore((s) => s.addAction);
   const setActionTime = useDirectorStore((s) => s.setActionTime);
+  const setActionTimes = useDirectorStore((s) => s.setActionTimes);
   const setCameraJunctionMode = useDirectorStore((s) => s.setCameraJunctionMode);
   const updateCamera = useDirectorStore((s) => s.updateCamera);
   const setDuration = useDirectorStore((s) => s.setDuration);
@@ -141,16 +163,24 @@ export function Timeline() {
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
-  const pxPerSec = useMemo(
-    () => clamp(laneWidth / Math.max(1, state.duration), MIN_PX_PER_SEC, MAX_PX_PER_SEC),
-    [laneWidth, state.duration],
-  );
   const reorderObject = useDirectorStore((s) => s.reorderObject);
 
   const items = useMemo(() => buildTimelineItems(state), [state]);
   // 内容排到片长之外时给出提示：这些片段不参与播放 / 导出，但没有被删除。
   const contentEnd = useMemo(() => rawContentEnd(state), [state]);
   const overflow = contentEnd > state.duration + 1e-6;
+  // 点警告时把片长对齐到内容末尾：向上取到 0.1（duration 的存储精度），确保严格盖住内容。
+  const alignEnd = Math.ceil((contentEnd - 1e-6) * 10) / 10;
+  /**
+   * 时间轴比例基准：正常按片长铺满可滚动区；内容排到片长之外时改用「内容末尾」，
+   * 把刻度压一点，让超出的片段（尤其整队动作带的右把手）留在可视区内、拖得动，
+   * 而不是画到右侧面板底下按不着。
+   */
+  const scaleEnd = Math.max(state.duration, contentEnd);
+  const pxPerSec = useMemo(
+    () => clamp(laneWidth / Math.max(1, scaleEnd), MIN_PX_PER_SEC, MAX_PX_PER_SEC),
+    [laneWidth, scaleEnd],
+  );
   // 团队（Group）在时间轴上合并为一行：整队只共用一条路线，不再为每个队员各开一行。
   const teamGroups = useMemo(
     () => (state.groups ?? []).filter((g) => g.dynamics && g.members.length >= 2),
@@ -160,6 +190,31 @@ export function Timeline() {
     () => new Set(teamGroups.flatMap((g) => g.members)),
     [teamGroups],
   );
+  /**
+   * 整队动作带：每支团队一条，覆盖全体成员的动作片段。
+   * 带子的 end 取成员动作的最大 timeEnd，于是「队员动作排到片长之外」也看得见、拖得动。
+   */
+  const teamActionBands = useMemo(() => {
+    const bands = new Map<string, TeamActionBand>();
+    teamGroups.forEach((group) => {
+      const entries = items
+        .filter((item) => item.kind === "action" && group.members.includes(item.track))
+        .map((item) => {
+          const range = itemRange(state, item);
+          return range ? { id: item.source, start: range.start, end: range.end } : null;
+        })
+        .filter((entry): entry is { id: string; start: number; end: number } => entry !== null);
+      if (entries.length === 0) return;
+      bands.set(group.id, {
+        id: `band_${group.id}`,
+        anchorId: group.members[0],
+        start: Math.min(...entries.map((entry) => entry.start)),
+        end: Math.max(...entries.map((entry) => entry.end)),
+        entries,
+      });
+    });
+    return bands;
+  }, [items, state, teamGroups]);
   const dragRef = useRef<ClipDrag | null>(null);
   const [dragRowId, setDragRowId] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -202,6 +257,15 @@ export function Timeline() {
 
   const handleRowDragEnd = () => setDragRowId(null);
 
+  /** 由按下位置判定拖动模式：左右把手 = 改起点 / 改终点，其余 = 整条移动。 */
+  const dragModeOf = (event: React.PointerEvent<HTMLDivElement>): DragMode => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return "m";
+    if (target.classList.contains("l")) return "l";
+    if (target.classList.contains("r")) return "r";
+    return "m";
+  };
+
   const handleScrub = (event: React.PointerEvent<HTMLDivElement>) => {
     // .clip 自行处理拖拽；.label 现在是行排序的拖拽把手，都不应触发播放头定位。
     if ((event.target as Element).closest?.(".clip, .label")) return;
@@ -214,6 +278,24 @@ export function Timeline() {
     const drag = dragRef.current;
     if (!drag) return;
     const delta = (event.clientX - drag.originX) / pxPerSec;
+
+    // 整队动作带：带内每条按同一个 delta 同步改写（保留成员之间已有的相对差异）。
+    if (drag.band) {
+      setActionTimes(
+        drag.band.map((entry) => {
+          if (drag.mode === "l") {
+            return { id: entry.id, timeStart: entry.start + delta, timeEnd: entry.end };
+          }
+          if (drag.mode === "r") {
+            return { id: entry.id, timeStart: entry.start, timeEnd: entry.end + delta };
+          }
+          return { id: entry.id, timeStart: entry.start + delta, timeEnd: entry.end + delta };
+        }),
+      );
+      return;
+    }
+    if (!drag.item) return;
+
     const length = drag.end - drag.start;
     let nextStart = drag.start;
     let nextEnd = drag.end;
@@ -244,6 +326,9 @@ export function Timeline() {
       segment && range.end - range.start >= 0.9
         ? easeSpark(normalizeEase(segment.ease))
         : undefined;
+    const clipWidth = Math.max(28, (range.end - range.start) * pxPerSec);
+    // 路径转折点在该片段上的到达时刻：用于把关键帧画在片段条上。
+    const keyframes = segment ? waypointKeyframes(segment) : [];
 
     return (
       <div
@@ -266,14 +351,7 @@ export function Timeline() {
           if (item.kind === "camera") selectCamera(item.track);
           else selectObject(item.track);
           selectItem(item.source);
-          const mode: DragMode =
-            event.target instanceof HTMLElement
-              ? event.target.classList.contains("l")
-                ? "l"
-                : event.target.classList.contains("r")
-                  ? "r"
-                  : "m"
-              : "m";
+          const mode = dragModeOf(event);
           dragRef.current = {
             item,
             start: range.start,
@@ -289,6 +367,70 @@ export function Timeline() {
         }}
       >
         {item.label}
+        {keyframes.map((keyframe) => (
+          <span
+            key={keyframe.id}
+            className={`wp-key${keyframe.shape === "ARC" ? " is-arc" : ""}${
+              selectedPoint === keyframe.id ? " sel" : ""
+            }`}
+            style={{ left: clamp((keyframe.time - range.start) * pxPerSec, 0, clipWidth) }}
+            title={`转折点 #${keyframe.index + 1}${
+              keyframe.shape === "ARC" ? "（曲线）" : ""
+            } · ${keyframe.time.toFixed(2)}s（点击选中）`}
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={() => {
+              // 与画布保持一致的三层选中：归属对象 → 片段 → 该转折点。
+              // 顺序不能反，详见本函数 clip 自身的 onPointerDown 注释。
+              selectObject(item.track);
+              selectItem(item.source);
+              selectPoint(keyframe.id);
+            }}
+          />
+        ))}
+        <span className="handle l" />
+        <span className="handle r" />
+      </div>
+    );
+  };
+
+  /**
+   * 整队动作带：一条带子代表整队全体成员的动作，拖动即整队同步。
+   * 这样队员的动作不会因为「不单独成行」而变成看不见、改不动的隐形内容。
+   */
+  const renderTeamActionBand = (band: TeamActionBand) => {
+    const active = band.entries.some((entry) => entry.id === selectedItem);
+    const over = band.end > state.duration + 1e-6;
+    return (
+      <div
+        key={band.id}
+        className={`clip action team-band${active ? " sel" : ""}${over ? " over" : ""}`}
+        style={{
+          left: band.start * pxPerSec,
+          width: Math.max(28, (band.end - band.start) * pxPerSec),
+        }}
+        title={`整队动作 ×${band.entries.length}：整队共用一条动作时间轴，拖动即全体同步${
+          over ? "；右端已越过片长，超出部分不参与播放 / 导出" : ""
+        }`}
+        onPointerDown={(event) => {
+          event.stopPropagation();
+          selectObject(band.anchorId);
+          selectItem(band.entries[0].id);
+          dragRef.current = {
+            item: null,
+            band: band.entries,
+            start: band.start,
+            end: band.end,
+            originX: event.clientX,
+            mode: dragModeOf(event),
+          };
+          (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
+        }}
+        onPointerMove={handleClipMove}
+        onPointerUp={() => {
+          dragRef.current = null;
+        }}
+      >
+        整队动作 ×{band.entries.length}
         <span className="handle l" />
         <span className="handle r" />
       </div>
@@ -322,21 +464,28 @@ export function Timeline() {
               if (event.key === "Escape") setDurDraft(null);
             }}
           />
-          {/* 片长调得比内容短时明确告知：超出部分只是不出片，片段仍在 */}
-          {overflow ? (
-            <span
-              className="dur-warn"
-              title={`有片段排到 ${contentEnd.toFixed(1)}s；超出片长的部分不参与播放 / 导出，但片段没有被删除，把片长调回去即可`}
-            >
-              ⚠ 内容到 {contentEnd.toFixed(1)}s
-            </span>
-          ) : null}
         </label>
+        {/* 片长调得比内容短时明确告知：超出部分只是不出片，片段仍在。点一下即把片长对齐到内容末尾。 */}
+        {overflow ? (
+          <button
+            type="button"
+            className="dur-warn"
+            title={`有片段排到 ${contentEnd.toFixed(1)}s（含团队队员的动作）。点击把片长设到 ${alignEnd}s；超出的部分不参与播放 / 导出，片段不会被删除`}
+            onClick={() => setDuration(alignEnd)}
+          >
+            ⚠ 内容到 {contentEnd.toFixed(1)}s · 对齐片长
+          </button>
+        ) : null}
       </div>
       <div className="scroll" id="scroll" ref={scrollRef} onPointerDown={handleScrub}>
         <div className="ruler" id="ruler">
-          {Array.from({ length: state.duration + 1 }, (_, index) => (
-            <div key={index} className="tick" style={{ left: index * pxPerSec }}>
+          {/* 刻度画到「比例基准」为止：内容超出片长时，多出来的刻度让溢出时段也有参照。 */}
+          {Array.from({ length: Math.floor(scaleEnd) + 1 }, (_, index) => (
+            <div
+              key={index}
+              className={`tick${index > state.duration ? " over" : ""}`}
+              style={{ left: index * pxPerSec }}
+            >
               {index}s
             </div>
           ))}
@@ -352,6 +501,7 @@ export function Timeline() {
               if (team) {
                 const teamCollapsed = collapsed.has(team.id);
                 const anchorId = team.members[0];
+                const band = teamActionBands.get(team.id);
                 return (
                   <Fragment key={team.id}>
                     <div className="row asset-node group-node">
@@ -395,10 +545,9 @@ export function Timeline() {
                           <span className="connector">↳</span>
                           <span>动作</span>
                         </div>
+                        {/* 整队动作带：全体成员的动作合成一条（原来只渲染队首，队员片段是隐形的）。 */}
                         <div className="lane" data-track={anchorId}>
-                          {items
-                            .filter((item) => item.track === anchorId && item.kind === "action")
-                            .map(renderClip)}
+                          {band ? renderTeamActionBand(band) : null}
                         </div>
                         <button
                           type="button"

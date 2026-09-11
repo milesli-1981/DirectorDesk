@@ -358,7 +358,9 @@ export function ObjectList({
                   title={`${camera.name} · 双击改名`}
                 >
                   <span className="dot" style={{ background: camera.color }} />
-                  {camera.name}
+                  {/* 名字必须包一层可选中的容器：裸文本节点在 flex 里是匿名 flex item，
+                      CSS 选不中、无法应用 text-overflow，长相机名会换行而非省略。 */}
+                  <span className="obj-name">{camera.name}</span>
                   {activeCameraId === camera.id ? " ●" : ""}
                 </button>
               )}

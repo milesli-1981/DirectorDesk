@@ -80,6 +80,38 @@ export function easeVal(a: EaseCurve, u: number): number {
   return ((ay * q + by) * q + cy) * q;
 }
 
+/**
+ * easeVal 的逆解：给定**已缓动的值** v，求满足 ease(u) = v 的时间进度 u。
+ *
+ * 运动求解里「走了多远」是 ease(u) × 总里程，所以要把某个空间位置换算成时刻，
+ * 必须反解而不是直接按里程比例线性取时间——否则 ease-out 段落的关键帧会明显偏移。
+ *
+ * 采样 + 线性插值求首次跨越：比牛顿迭代稳，且不要求曲线严格单调（overshoot 缓动也退化的可用）。
+ */
+export function easeTimeForValue(a: EaseCurve, value: number): number {
+  if (value <= 0) return 0;
+  if (value >= 1) return 1;
+  const [x1, y1, x2, y2] = a;
+  if (x1 === 0 && y1 === 0 && x2 === 1 && y2 === 1) return value;
+
+  const STEPS = 64;
+  let prevU = 0;
+  let prevV = easeVal(a, 0);
+  for (let i = 1; i <= STEPS; i += 1) {
+    const u = i / STEPS;
+    const v = easeVal(a, u);
+    const crossed = prevV <= value ? v >= value : v <= value;
+    if (crossed) {
+      const dv = v - prevV;
+      const ratio = Math.abs(dv) < 1e-9 ? 0 : (value - prevV) / dv;
+      return prevU + (u - prevU) * ratio;
+    }
+    prevU = u;
+    prevV = v;
+  }
+  return 1;
+}
+
 /** 归一化速度（曲线斜率），用于 Speed Curve 下方的速度条。 */
 export function easeSpeed(a: EaseCurve, u: number): number {
   const h = 0.008;
