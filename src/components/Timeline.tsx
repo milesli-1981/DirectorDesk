@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useDirectorStore } from "../state/directorStore";
 import {
   AssetCategory,
+  CameraKey,
   EaseCurve,
   HandoffMode,
   objectDisplayName,
@@ -9,7 +10,7 @@ import {
   TimelineItem,
 } from "../domain/schema";
 import { buildTimelineItems, itemRange, rawContentEnd } from "../engine/timeline";
-import { curveVal, normalizeEase } from "../engine/ease";
+import { CAMERA_CHANNELS, curveVal, normalizeEase } from "../engine/ease";
 import { waypointKeyframes } from "../engine/path";
 
 const MAX_PX_PER_SEC = 100;
@@ -74,6 +75,11 @@ interface TeamActionBand {
   start: number;
   end: number;
   entries: { id: string; start: number; end: number }[];
+}
+
+/** 关键帧是否已接管任一通道（用于标记上色：实心 = 已定制，空心 = 空帧）。 */
+function keyHasChannels(key: CameraKey): boolean {
+  return CAMERA_CHANNELS.some((channel) => key[channel] !== undefined);
 }
 
 function TimelineReadout() {
@@ -147,6 +153,11 @@ export function Timeline() {
   const setCameraJunctionMode = useDirectorStore((s) => s.setCameraJunctionMode);
   const updateCamera = useDirectorStore((s) => s.updateCamera);
   const setDuration = useDirectorStore((s) => s.setDuration);
+  const selectedKeyId = useDirectorStore((s) => s.selectedKeyId);
+  const selectCameraKey = useDirectorStore((s) => s.selectCameraKey);
+  const addCameraKey = useDirectorStore((s) => s.addCameraKey);
+  const updateCameraKey = useDirectorStore((s) => s.updateCameraKey);
+  const deleteCameraKey = useDirectorStore((s) => s.deleteCameraKey);
 
   // Scene Duration 输入框：编辑期间用本地草稿接管，失焦 / 回车才写入。
   // 否则每敲一个字符都写库，且清空时 Number("") === 0 会被钳到下限，导致无法连续输入多位数。
@@ -217,6 +228,14 @@ export function Timeline() {
     return bands;
   }, [items, state, teamGroups]);
   const dragRef = useRef<ClipDrag | null>(null);
+  /** 关键帧标记的拖动状态：只改 key.t（归一化时刻，段内线性）。 */
+  const keyDragRef = useRef<{
+    moveId: string;
+    keyId: string;
+    startT: number;
+    originX: number;
+    span: number;
+  } | null>(null);
   const [dragRowId, setDragRowId] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   // 相机行双击改名（name 可改、id 不变）。
@@ -330,6 +349,10 @@ export function Timeline() {
     const clipWidth = Math.max(28, (range.end - range.start) * pxPerSec);
     // 路径转折点在该片段上的到达时刻：用于把关键帧画在片段条上。
     const keyframes = segment ? waypointKeyframes(segment) : [];
+    // 相机片段：其 CameraMove 的通道关键帧，画成可增删拖拽的刻度。
+    const move = item.kind === "camera" ? state.cameraMoves.find((value) => value.id === item.source) : undefined;
+    const moveKeys = move?.keys ?? [];
+    const moveSpan = range.end - range.start || 1;
 
     return (
       <div
@@ -366,8 +389,62 @@ export function Timeline() {
         onPointerUp={() => {
           dragRef.current = null;
         }}
+        onDoubleClick={(event) => {
+          // 双击相机片段空白处：在该时刻插入一个空关键帧。
+          if (item.kind !== "camera" || !move) return;
+          const rect = event.currentTarget.getBoundingClientRect();
+          const t = clamp((event.clientX - rect.left) / pxPerSec / moveSpan, 0, 1);
+          addCameraKey(item.source, t);
+        }}
       >
         {item.label}
+        {moveKeys.map((key, index) => (
+          <span
+            key={key.id}
+            className={`kf-key${keyHasChannels(key) ? " has" : ""}${selectedKeyId === key.id ? " sel" : ""}`}
+            style={{ left: clamp(key.t * moveSpan * pxPerSec, 0, clipWidth) }}
+            title={`关键帧 #${index + 1} · ${(range.start + key.t * moveSpan).toFixed(2)}s${
+              keyHasChannels(key) ? "" : "（空帧）"
+            } · 拖动改时刻 · 右键删除`}
+            onPointerDown={(event) => {
+              event.stopPropagation();
+              // 三层选中：归属相机 → 片段 → 该关键帧（顺序同 wp-key，详见 clip 注释）。
+              selectCamera(item.track);
+              selectItem(item.source);
+              selectCameraKey(key.id);
+              setTime(range.start + key.t * moveSpan);
+              keyDragRef.current = {
+                moveId: item.source,
+                keyId: key.id,
+                startT: key.t,
+                originX: event.clientX,
+                span: moveSpan,
+              };
+              (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
+            }}
+            onPointerMove={(event) => {
+              const drag = keyDragRef.current;
+              if (!drag || drag.keyId !== key.id) return;
+              const nextT = clamp(
+                drag.startT + (event.clientX - drag.originX) / pxPerSec / drag.span,
+                0,
+                1,
+              );
+              updateCameraKey(drag.moveId, drag.keyId, { t: nextT });
+              setTime(range.start + nextT * moveSpan);
+            }}
+            onPointerUp={() => {
+              keyDragRef.current = null;
+            }}
+            onDoubleClick={(event) => event.stopPropagation()}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              deleteCameraKey(item.source, key.id);
+              if (selectedKeyId === key.id) selectCameraKey(null);
+            }}
+          />
+        ))}
         {keyframes.map((keyframe) => (
           <span
             key={keyframe.id}

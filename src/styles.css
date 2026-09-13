@@ -1492,6 +1492,130 @@ canvas {
   border-left-color: #ffffff;
 }
 
+/* 相机运镜关键帧在 CameraMove 片段上的刻度：琥珀色方块 + 竖线，
+   与路径转折点（绿色圆点 / 菱形）区分。实心 = 已接管通道，空心 = 空帧。 */
+.clip .kf-key {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 11px;
+  transform: translateX(-50%);
+  cursor: grab;
+  z-index: 4;
+}
+
+.clip .kf-key::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: #f0a35a;
+  opacity: 0.9;
+}
+
+.clip .kf-key::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 3px;
+  width: 7px;
+  height: 7px;
+  margin-left: -3.5px;
+  transform: rotate(45deg);
+  background: transparent;
+  border: 1.5px solid #f0a35a;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
+}
+
+.clip .kf-key.has::after {
+  background: #f0a35a;
+}
+
+.clip .kf-key:hover::before,
+.clip .kf-key:hover::after {
+  background: #ffffff;
+  border-color: #ffffff;
+}
+
+.clip .kf-key.sel::before {
+  background: #ffffff;
+  width: 2px;
+}
+
+.clip .kf-key.sel::after {
+  background: #ffffff;
+  border-color: #67a7ff;
+  box-shadow: 0 0 0 2px #67a7ff;
+}
+
+/* 关键帧通道编辑：分组标题 + 「标签 / 滑块 / 数值 / 清除」行 */
+.kf-group {
+  margin: 9px 0 3px;
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: #55646f;
+}
+
+.kf-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 3px;
+  margin: 2px 0;
+  border-radius: 5px;
+}
+
+.kf-row.set {
+  background: #16283d;
+  box-shadow: inset 0 0 0 1px #2f4f77;
+}
+
+.kf-name {
+  flex: 0 0 64px;
+  font-size: 11px;
+  color: #7b8d9c;
+}
+
+.kf-row.set .kf-name {
+  color: #cfe0f0;
+}
+
+.kf-slider {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.kf-num {
+  flex: 0 0 62px;
+  width: 62px;
+}
+
+.kf-clear {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  line-height: 1;
+  border-radius: 5px;
+  border: 1px solid #2b3d4d;
+  background: transparent;
+  color: #7b8d9c;
+  cursor: pointer;
+}
+
+.kf-clear:disabled {
+  opacity: 0.25;
+  cursor: default;
+}
+
+.kf-clear:not(:disabled):hover {
+  border-color: #ff7b91;
+  color: #ff7b91;
+}
+
 .ph {
   position: absolute;
   top: 0;

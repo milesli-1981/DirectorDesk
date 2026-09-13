@@ -283,6 +283,8 @@ interface DirectorStore {
   selectedId: string;
   selectedItem: string | null;
   selectedPoint: string | null;
+  /** 当前选中的相机关键帧 id（时间轴 / Inspector 共享；纯 UI 状态，不进历史）。 */
+  selectedKeyId: string | null;
   /** 光标悬停的路径标记：只驱动高亮，不代表选中，也不进 undo 历史。 */
   hoverMarker: MarkerHover | null;
   radialTarget: RadialTarget | null;
@@ -309,6 +311,7 @@ interface DirectorStore {
   selectCamera: (cameraId: string) => void;
   selectItem: (itemId: string | null) => void;
   selectPoint: (pointId: string | null) => void;
+  selectCameraKey: (keyId: string | null) => void;
   setHoverMarker: (marker: MarkerHover | null) => void;
   openRing: (objectId: string) => void;
   /** 轻点路径转折点打开环形菜单（Line/Curve 切换 + 删除），与对象环形菜单共用同一套 UI。 */
@@ -756,6 +759,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
     selectedId: "M17",
     selectedItem: null,
     selectedPoint: null,
+    selectedKeyId: null,
     hoverMarker: null,
     radialTarget: null,
     viewMode: "director",
@@ -815,9 +819,19 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         selectedPoint: null,
       }),
 
-    selectItem: (itemId) => set({ selectedItem: itemId }),
+    selectItem: (itemId) =>
+      set((store) => {
+        const move = itemId ? store.state.cameraMoves.find((m) => m.id === itemId) : undefined;
+        // 选中一段相机运镜时，把「镜头视图」同步到它的相机：
+        // 否则会出现「director view 里机位在动、camera view 仍是另一台相机」的脱节。
+        return move
+          ? { selectedItem: itemId, activeCameraId: move.camera }
+          : { selectedItem: itemId };
+      }),
 
     selectPoint: (pointId) => set({ selectedPoint: pointId }),
+
+    selectCameraKey: (keyId) => set({ selectedKeyId: keyId }),
 
     setHoverMarker: (marker) => set({ hoverMarker: marker }),
 

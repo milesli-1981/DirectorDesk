@@ -191,7 +191,8 @@ function placeCamera(
   const framing = options.framing ?? camera.framing;
   const view = options.view ?? camera.view;
   const side = options.side ?? camera.side;
-  const targetType = camera.targetType ?? "OBJECT";
+  // 段级 targetType 覆盖必须参与分支判定，否则「某段单独设成 GROUP / POV」会被相机级类型盖掉。
+  const targetType = options.targetType ?? camera.targetType ?? "OBJECT";
   const droneLift = camera.kind === "drone" ? DRONE_BASE_ALTITUDE : 0;
   const altitude = camera.altitude ?? 0;
 
@@ -234,7 +235,8 @@ function placeCamera(
           ? baseHeading(state, anchorId, time)
           : objectFacing(state, targetId, time);
       // facing 是弧度、SIDE_ANGLE 是角度，必须各自换算后再相加（不可整体当角度换算）。
-      const yaw = facing + (SIDE_ANGLE[side] * Math.PI) / 180;
+      // orbitDeg 与 OBJECT 分支一致地叠加到 yaw 上，否则整队目标无法环绕（关键帧「环绕」/原生 ORBIT 都会失效）。
+      const yaw = facing + ((SIDE_ANGLE[side] + (options.orbitDeg ?? 0)) * Math.PI) / 180;
       const groupTarget: Vec3 = [cx, 1.3, cz];
       if (view === "overhead") {
         const h = framingDistance(framing) + 4 + droneLift + altitude + (options.craneHeight ?? 0);
@@ -339,15 +341,25 @@ function placeCamera(
       dz = nz;
     }
     if (tiltDeg) {
+      // 绕相机「右轴」做真正的俯仰：右轴 = normalize(d × up)，与 d 正交且单位化，
+      // 旋转用 Rodrigues（k⊥d 时 d' = d·cos + (k×d)·sin），保证视线长度不变、只改俯仰。
+      // 旧实现直接用未归一化的右向量做仿射：水平视线时会退化成偏航（与 pan 混淆），
+      // 且会压缩视线长度（顺带改了距离）。
       const a = (tiltDeg * Math.PI) / 180;
       const c = Math.cos(a);
       const s = Math.sin(a);
-      const rx = -dz;
-      const ry = 0;
-      const rz = dx;
-      dx = dx * c + rx * s;
-      dy = dy * c + ry * s;
-      dz = dz * c + rz * s;
+      const h = Math.hypot(dx, dz);
+      if (h > 1e-4) {
+        const crossX = (-dx * dy) / h; // (k × d).x
+        const crossY = h; // (k × d).y
+        const crossZ = (-dz * dy) / h; // (k × d).z
+        const nx = dx * c + crossX * s;
+        const ny = dy * c + crossY * s;
+        const nz = dz * c + crossZ * s;
+        dx = nx;
+        dy = ny;
+        dz = nz;
+      }
     }
     target = [ox + dx * dist, oy + dy * dist, oz + dz * dist];
   }
@@ -416,11 +428,19 @@ function primitiveChannels(move: CameraMove, camera: CameraObject, progress: num
   };
 }
 
-/** 把关键帧按通道摊平成「每通道一条曲线」。未定义该通道的帧被跳过。 */
-function buildChannelTracks(keys?: CameraKey[]): Map<CameraChannel, ChannelPoint[]> {
+/**
+ * 把关键帧按通道摊平成「每通道一条曲线」。未定义该通道的帧被跳过。
+ *
+ * 关键：若某通道的第一个关键帧不在段首，会自动在 t=0 **锚定该通道的基元原值**。
+ * 于是「只在中间加一帧」不会把整段（含帧之前）都变成新值，
+ * 而是从段首的原值线性过渡到该帧的新值，之后再保持（末帧之后可再加帧打断）。
+ */
+function buildChannelTracks(move: CameraMove, camera: CameraObject): Map<CameraChannel, ChannelPoint[]> {
   const tracks = new Map<CameraChannel, ChannelPoint[]>();
+  const keys = move.keys;
   if (!keys || !keys.length) return tracks;
   const sorted = [...keys].sort((a, b) => a.t - b.t);
+  const startPrimitive = primitiveChannels(move, camera, 0);
   for (const channel of CAMERA_CHANNELS) {
     const points: ChannelPoint[] = [];
     for (const key of sorted) {
@@ -429,7 +449,11 @@ function buildChannelTracks(keys?: CameraKey[]): Map<CameraChannel, ChannelPoint
         points.push({ t: key.t, v: value, ease: normalizeEase(key.ease) });
       }
     }
-    if (points.length) tracks.set(channel, points);
+    if (!points.length) continue;
+    if (points[0].t > 1e-4) {
+      points.unshift({ t: 0, v: startPrimitive[channel], ease: normalizeEase(move.ease) });
+    }
+    tracks.set(channel, points);
   }
   return tracks;
 }
@@ -460,7 +484,7 @@ export function moveChannelsAt(
   const u = clamp((time - move.timeStart) / span, 0, 1);
   const progress = curveVal(normalizeEase(move.ease), move.speedKeys, u);
   const base = primitiveChannels(move, camera, progress);
-  const tracks = buildChannelTracks(move.keys);
+  const tracks = buildChannelTracks(move, camera);
   const pick = (channel: CameraChannel) => keyedChannel(tracks, channel, u) ?? base[channel];
   return {
     orbitDeg: pick("orbitDeg"),
@@ -517,7 +541,7 @@ function resolveMove(
 
   // 通道 = 关键帧覆盖 ?? 运镜基元：未打帧的通道完全保持原行为，打帧的通道走关键帧曲线。
   const base = primitiveChannels(move, camera, progress);
-  const tracks = buildChannelTracks(move.keys);
+  const tracks = buildChannelTracks(move, camera);
   const pick = (channel: CameraChannel) => keyedChannel(tracks, channel, u) ?? base[channel];
   const keyedLens = keyedChannel(tracks, "lensMm", u);
   const outLens = keyedLens ?? base.lensMm;
