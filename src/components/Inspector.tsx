@@ -4,6 +4,7 @@ import {
   CameraFraming,
   CameraMotionType,
   CameraSide,
+  CameraKey,
   CameraStyle,
   CameraView,
   EaseCurve,
@@ -29,7 +30,8 @@ import {
 import { EaseEditor } from "./EaseEditor";
 import { PoseCustomizeModal } from "./PoseCustomizeModal";
 import { clonePose, POSE_PRESETS, POSE_PRESET_NAMES } from "../engine/poses";
-import { solveCamera } from "../engine/cameraSolver";
+import { moveChannelsAt, solveCamera } from "../engine/cameraSolver";
+import { CAMERA_CHANNELS, CameraChannel } from "../engine/ease";
 import { axisSide, cameraAxis } from "../engine/axis";
 import { waypointKeyframes } from "../engine/path";
 import { LockBadge } from "./LockBadge";
@@ -50,6 +52,19 @@ const CUSTOM_PREFIX = "custom:";
 const NEW_CUSTOM = "__new_custom__";
 // 对象面板只展示静态基线姿势；步态类（walk/run）没有静态关节角度，只在动作片段里选。
 const STATIC_POSE_NAMES = POSE_PRESET_NAMES.filter((name) => name !== "walk" && name !== "run");
+
+/** 关键帧通道的中文标签与数字输入步进。 */
+const KEY_CHANNEL_META: Record<CameraChannel, { label: string; step: number }> = {
+  orbitDeg: { label: "环绕°", step: 5 },
+  craneHeight: { label: "升降 m", step: 0.5 },
+  dollyScale: { label: "推拉 ×", step: 0.05 },
+  panDeg: { label: "摇摄°", step: 5 },
+  tiltDeg: { label: "俯仰°", step: 5 },
+  truckDist: { label: "横移 m", step: 0.5 },
+  lensMm: { label: "镜头 mm", step: 1 },
+  roll: { label: "荷兰角°", step: 1 },
+  otsOffset: { label: "过肩偏", step: 0.05 },
+};
 
 const MOTION_TYPES: CameraMotionType[] = [
   "STATIC",
@@ -216,6 +231,7 @@ export function Inspector() {
   const selectedKind = useDirectorStore((s) => s.selectedKind);
   const selectedId = useDirectorStore((s) => s.selectedId);
   const selectedItem = useDirectorStore((s) => s.selectedItem);
+  const currentTime = useDirectorStore((s) => s.currentTime);
   const selectedPoint = useDirectorStore((s) => s.selectedPoint);
   const viewMode = useDirectorStore((s) => s.viewMode);
   const activeCameraId = useDirectorStore((s) => s.activeCameraId);
@@ -225,6 +241,10 @@ export function Inspector() {
   const addCameraMove = useDirectorStore((s) => s.addCameraMove);
   const patchCameraMove = useDirectorStore((s) => s.patchCameraMove);
   const deleteCameraMove = useDirectorStore((s) => s.deleteCameraMove);
+  const addCameraKey = useDirectorStore((s) => s.addCameraKey);
+  const updateCameraKey = useDirectorStore((s) => s.updateCameraKey);
+  const deleteCameraKey = useDirectorStore((s) => s.deleteCameraKey);
+  const clearCameraKeys = useDirectorStore((s) => s.clearCameraKeys);
   const addReverseShot = useDirectorStore((s) => s.addReverseShot);
   const removeCamera = useDirectorStore((s) => s.removeCamera);
   const setSegmentEase = useDirectorStore((s) => s.setSegmentEase);
@@ -293,7 +313,7 @@ export function Inspector() {
   const customActions = useDirectorStore((s) => s.state.customActions) ?? [];
   // 该相机上被 CameraMove 写死的段级覆盖：相机级同名属性在那些时间段内不生效。
   const overriddenByMoves = camera
-    ? (["framing", "view", "side", "lensMm", "roll", "shoulderId", "otsOffset"] as const).filter((key) =>
+    ? (["framing", "view", "side", "lensMm", "roll", "shoulderId", "otsOffset", "stabilize"] as const).filter((key) =>
         state.cameraMoves.some((item) => item.camera === camera.id && item[key] !== undefined),
       )
     : [];
@@ -333,6 +353,8 @@ export function Inspector() {
   const [customize, setCustomize] = useState<{ mode: "create" } | { mode: "edit"; id: string } | null>(
     null,
   );
+  // 关键帧编辑：当前选中的关键帧 id（纯 UI 状态，不入历史）。
+  const [selectedKeyId, setSelectedKeyId] = useState<string | null>(null);
 
   const pointCount = segment ? segment.points.length : 0;
   const selectedPointShape = segment?.points.find((point) => point.id === selectedPoint)?.shape;
@@ -1076,6 +1098,21 @@ export function Inspector() {
                   <p className="hint">{STYLE_HINTS[camera.style ?? "locked"]}</p>
                 </>
               )}
+              <Field label={`防抖 Stabilization ${Math.round((camera.stabilize ?? 0) * 100)}%`}>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={camera.stabilize ?? 0}
+                  onChange={(event) =>
+                    updateCamera(camera.id, { stabilize: Number(event.target.value) })
+                  }
+                />
+              </Field>
+              <p className="hint">
+                跟随阻尼：相机对目标瞬变（转向 / 绕障让位 / 扭动）的响应滞后一点；瞬变若很快消失则被忽略。0 = 完全跟手，越大越「拖」。可在单个运镜段覆盖。
+              </p>
             </SubGroup>
           </div>
 
@@ -1388,7 +1425,163 @@ export function Inspector() {
                 onChange={(event) => patchCameraMove(move.id, { roll: Number(event.target.value) })}
               />
             </Field>
+            <Field
+              label={`防抖 Stabilization ${Math.round((move.stabilize ?? moveCamera?.stabilize ?? 0) * 100)}%（覆盖相机）`}
+            >
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={move.stabilize ?? moveCamera?.stabilize ?? 0}
+                onChange={(event) =>
+                  patchCameraMove(move.id, { stabilize: Number(event.target.value) })
+                }
+              />
+            </Field>
           </SubGroup>
+
+          {(() => {
+            const keys = move.keys ?? [];
+            const span = move.timeEnd - move.timeStart || 1;
+            const activeKey = keys.find((key) => key.id === selectedKeyId) ?? keys[0];
+            const absTime = activeKey ? move.timeStart + activeKey.t * span : move.timeStart;
+            const eff = moveChannelsAt(state, move.camera, move, absTime);
+            const playheadT = Math.max(0, Math.min(1, (currentTime - move.timeStart) / span));
+            const patchKey = (keyId: string, patch: Partial<CameraKey>) =>
+              updateCameraKey(move.id, keyId, patch);
+            return (
+              <SubGroup
+                title="关键帧 Keyframes"
+                hint="在运镜基元之上定制通道：只填你要改的通道（留空 = 沿用基元）。同一通道 ≥2 帧之间按后一帧的缓动插值；只有 1 帧 = 整段恒定。可据此在环绕时叠加升降等，拼出复杂运镜。"
+              >
+                <div className="mini-btns">
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    title="在播放头处插入一个空关键帧（不填通道前不改变画面）"
+                    onClick={() => {
+                      addCameraKey(move.id, playheadT);
+                      setSelectedKeyId(null);
+                    }}
+                  >
+                    ＋ 关键帧@播放头 {currentTime.toFixed(1)}s
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    disabled={!keys.length}
+                    onClick={() => {
+                      clearCameraKeys(move.id);
+                      setSelectedKeyId(null);
+                    }}
+                  >
+                    清空
+                  </button>
+                </div>
+                {keys.length ? (
+                  <>
+                    <div className="mini-btns">
+                      {keys.map((key, index) => (
+                        <button
+                          key={key.id}
+                          type="button"
+                          className={`ghost-button ${activeKey?.id === key.id ? "on" : ""}`}
+                          onClick={() => setSelectedKeyId(key.id)}
+                        >
+                          #{index + 1} · {(move.timeStart + key.t * span).toFixed(1)}s
+                        </button>
+                      ))}
+                    </div>
+                    {activeKey ? (
+                      <>
+                        <Field
+                          label={`时刻 ${(move.timeStart + activeKey.t * span).toFixed(2)}s（${Math.round(activeKey.t * 100)}%）`}
+                        >
+                          <input
+                            type="range"
+                            min={0}
+                            max={1}
+                            step={0.01}
+                            value={activeKey.t}
+                            onChange={(event) => patchKey(activeKey.id, { t: Number(event.target.value) })}
+                          />
+                        </Field>
+                        <div
+                          style={{
+                            display: "grid",
+                            gridTemplateColumns: "1fr 1fr",
+                            gap: "4px 8px",
+                            margin: "6px 0",
+                          }}
+                        >
+                          {CAMERA_CHANNELS.map((channel) => {
+                            const meta = KEY_CHANNEL_META[channel];
+                            const value = activeKey[channel];
+                            const placeholder = eff ? eff[channel].toFixed(2) : "";
+                            return (
+                              <label
+                                key={channel}
+                                style={{ display: "flex", alignItems: "center", gap: 4 }}
+                              >
+                                <span style={{ flex: "0 0 58px", fontSize: 11, color: "#7b8d9c" }}>
+                                  {meta.label}
+                                </span>
+                                <input
+                                  type="number"
+                                  step={meta.step}
+                                  value={value ?? ""}
+                                  placeholder={placeholder}
+                                  onChange={(event) => {
+                                    const raw = event.target.value;
+                                    patchKey(activeKey.id, {
+                                      [channel]: raw === "" ? undefined : Number(raw),
+                                    } as Partial<CameraKey>);
+                                  }}
+                                  style={{ width: "100%" }}
+                                />
+                                <button
+                                  type="button"
+                                  className="ghost-button"
+                                  title="清除该通道（回落到运镜基元 / 相邻帧）"
+                                  disabled={value === undefined}
+                                  onClick={() =>
+                                    patchKey(activeKey.id, { [channel]: undefined } as Partial<CameraKey>)
+                                  }
+                                >
+                                  ×
+                                </button>
+                              </label>
+                            );
+                          })}
+                        </div>
+                        <div className="mini-btns">
+                          <button
+                            type="button"
+                            className="ghost-button danger-button"
+                            onClick={() => {
+                              deleteCameraKey(move.id, activeKey.id);
+                              setSelectedKeyId(null);
+                            }}
+                          >
+                            删除此帧
+                          </button>
+                        </div>
+                        <p className="hint">
+                          灰字是该通道当前实际值（基元 / 相邻帧）；留空即沿用，填了才被本帧接管。
+                        </p>
+                      </>
+                    ) : null}
+                  </>
+                ) : (
+                  <p className="hint">
+                    暂无关键帧。把播放头移到目标时刻，点「＋ 关键帧@播放头」加一帧；例如给 ORBIT 段在
+                    t=0 与 t=1 各加一帧、填「升降」0 → 5m，即成环绕攀升。
+                  </p>
+                )}
+              </SubGroup>
+            );
+          })()}
 
           {(() => {
             const junction = state.cameraJunctions.find(

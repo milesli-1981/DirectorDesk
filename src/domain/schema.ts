@@ -277,6 +277,12 @@ export interface CameraObject {
   motion: CameraMotionType;
   /** 稳定方式 / 风格轴（默认 locked）：与 motion 正交。旧场景 motion:"HANDHELD" 仍按 handheld 兼容。 */
   style?: CameraStyle;
+  /**
+   * 防抖强度 0..1（默认 0 = 关闭）。对机位 / 注视点在过去一小段时间做滑动平均，
+   * 使相机对目标的瞬变（转向、绕障让位、扭动）响应滞后一点；瞬变若在窗口内自行消失即被忽略，
+   * 类似软件的电子防抖。与 style 正交：style 是「主动晃动质感」，stabilize 是「被动跟随阻尼」。
+   */
+  stabilize?: number;
   /** 过肩镜头：镜头所越过的演员（前景）；为空则不是过肩。 */
   shoulderId?: string;
   /** 过肩：越过前景演员的哪一侧肩膀（默认 R 右肩）。 */
@@ -306,6 +312,39 @@ export interface CameraObject {
   tiltDeg?: number;
   /** 相机级默认：TRUCK 横向平移距离（米，正负=左右）。 */
   truckDist?: number;
+}
+
+/**
+ * 相机关键帧：在 CameraMove 运镜基元之上，对「通道」做曲线定制。
+ *
+ * 只有被显式赋值的通道才被关键帧接管；未赋值的通道继续走该段运镜基元
+ * （例如 ORBIT 段只给 craneHeight 打帧 = 一边环绕一边升降）。
+ * 于是可以在不新增运镜类型的前提下组合出复杂运镜。
+ */
+export interface CameraKey {
+  id: string;
+  /** 归一化时刻 0..1（相对所在 CameraMove 的 [timeStart, timeEnd]），按真实时间线性分布。 */
+  t: number;
+  /** 从上一关键帧插到本帧所用的缓动（首帧忽略）。 */
+  ease: EaseCurve;
+  /** 环绕角（度）：叠加在基元方位角之上。 */
+  orbitDeg?: number;
+  /** 升降（米）：相对基准机位的高度偏移。 */
+  craneHeight?: number;
+  /** 推拉：距离系数（1 = 基准取景距离）。 */
+  dollyScale?: number;
+  /** 原地水平摇摄（度）。 */
+  panDeg?: number;
+  /** 原地俯仰（度）。 */
+  tiltDeg?: number;
+  /** 横向平移（米，垂直视线方向）。 */
+  truckDist?: number;
+  /** 焦距（mm）。 */
+  lensMm?: number;
+  /** 荷兰角 / 画面滚转（度）。 */
+  roll?: number;
+  /** 过肩错位量（0..1，主体偏离画面中心的比例）。 */
+  otsOffset?: number;
 }
 
 /**
@@ -349,9 +388,13 @@ export interface CameraMove {
   lensMm?: number;
   /** 风格轴：本段稳定方式覆盖（为空沿用相机默认）。 */
   style?: CameraStyle;
+  /** 段级覆盖：防抖强度 0..1（为空沿用相机设置，0 = 关闭）。 */
+  stabilize?: number;
   ease: EaseCurve;
   /** 多段速度曲线关键点（≥2 时接管时序）。为空 = 单段 cubic-bezier。 */
   speedKeys?: SpeedKey[];
+  /** 通道关键帧（≥1 即生效）：在运镜基元之上定制 / 组合通道曲线。 */
+  keys?: CameraKey[];
 }
 
 export type AspectRatio = "16:9" | "2.39:1" | "1.85:1" | "4:3" | "9:16";

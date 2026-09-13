@@ -1,4 +1,4 @@
-import { EaseCurve, SpeedKey } from "../domain/schema";
+import { CameraKey, EaseCurve, SpeedKey } from "../domain/schema";
 
 export interface EasePreset {
   name: string;
@@ -235,4 +235,91 @@ export function curveTimeForValue(
     prevV = v;
   }
   return last.t;
+}
+
+/* ------------------------------------------------- 相机通道关键帧（CameraKey） */
+
+/** 相邻相机关键帧之间的最小时间间距（归一化），避免同刻多帧。 */
+export const CAMERA_KEY_MIN_GAP = 0.02;
+
+/** 可被关键帧接管的通道名（与 CameraKey 的数值字段一一对应）。 */
+export type CameraChannel =
+  | "orbitDeg"
+  | "craneHeight"
+  | "dollyScale"
+  | "panDeg"
+  | "tiltDeg"
+  | "truckDist"
+  | "lensMm"
+  | "roll"
+  | "otsOffset";
+
+export const CAMERA_CHANNELS: readonly CameraChannel[] = [
+  "orbitDeg",
+  "craneHeight",
+  "dollyScale",
+  "panDeg",
+  "tiltDeg",
+  "truckDist",
+  "lensMm",
+  "roll",
+  "otsOffset",
+];
+
+/**
+ * 相机关键帧规范化：排序 → 夹紧时刻并保证最小间距。
+ *
+ * 与 SpeedKey 不同，这里**不强制首末帧**：只有被赋值的通道才生效，
+ * 单帧即「整段恒定为该值」，所以长度为 1 也有效。
+ */
+export function normalizeCameraKeys(value?: readonly CameraKey[] | null): CameraKey[] | null {
+  if (!Array.isArray(value) || value.length < 1) return null;
+  const keys = value
+    .map((key) => {
+      const out: CameraKey = {
+        id: key.id,
+        t: Number.isFinite(key.t) ? clamp01(key.t) : 0,
+        ease: normalizeEase(key.ease),
+      };
+      for (const channel of CAMERA_CHANNELS) {
+        const v = key[channel];
+        if (typeof v === "number" && Number.isFinite(v)) out[channel] = v;
+      }
+      return out;
+    })
+    .sort((a, b) => a.t - b.t);
+  let prevT = -Infinity;
+  keys.forEach((key, index) => {
+    const floor = index === 0 ? 0 : prevT + CAMERA_KEY_MIN_GAP;
+    key.t = Math.min(1, Math.max(key.t, floor));
+    prevT = key.t;
+  });
+  return keys;
+}
+
+/** 单通道的一个采样点（由关键帧投影而来）。 */
+export interface ChannelPoint {
+  t: number;
+  v: number;
+  ease: EaseCurve;
+}
+
+/**
+ * 单通道求值：`points` 已按 t 升序、且只含定义了该通道的帧。
+ * 段内用「后一帧的缓动」插值；首帧之前 / 末帧之后保持端点值（常数外推）。
+ */
+export function channelVal(points: readonly ChannelPoint[], u: number): number | undefined {
+  if (!points.length) return undefined;
+  if (u <= points[0].t) return points[0].v;
+  const last = points[points.length - 1];
+  if (u >= last.t) return last.v;
+  for (let i = 0; i < points.length - 1; i += 1) {
+    const a = points[i];
+    const b = points[i + 1];
+    if (u < a.t || u > b.t) continue;
+    const span = b.t - a.t;
+    if (span <= 1e-6) return b.v;
+    return a.v + (b.v - a.v) * easeVal(b.ease, (u - a.t) / span);
+  }
+  return last.v;
 }

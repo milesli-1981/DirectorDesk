@@ -3,6 +3,7 @@ import {
   AspectRatio,
   CameraFraming,
   CameraJunction,
+  CameraKey,
   CameraMove,
   CameraMotionType,
   CameraObject,
@@ -30,7 +31,7 @@ import {
 import { createBlankState } from "../engine/demoShot";
 import { normalizePathPointModes, pathInsertIndex, simplifyPath } from "../engine/path";
 import { contentEndTime } from "../engine/timeline";
-import { normalizeSpeedKeys } from "../engine/ease";
+import { normalizeCameraKeys, normalizeEase, normalizeSpeedKeys } from "../engine/ease";
 import { ASSET_PRESETS } from "../engine/assetPresets";
 import { separateSetAsset } from "../engine/collision";
 import {
@@ -426,6 +427,7 @@ interface DirectorStore {
         | "tiltDeg"
         | "truckDist"
         | "style"
+        | "stabilize"
       >
     >,
   ) => void;
@@ -437,6 +439,13 @@ interface DirectorStore {
   setCameraMoveSpeedKeys: (moveId: string, keys: SpeedKey[] | null) => void;
   patchCameraMove: (moveId: string, patch: Partial<CameraMove>) => void;
   deleteCameraMove: (moveId: string) => void;
+  /** 在归一化时刻 t（0..1）插入一个空关键帧：不含通道覆盖，插入本身不改变画面。 */
+  addCameraKey: (moveId: string, t: number) => void;
+  /** 修改关键帧：patch 中值为 undefined 的通道会被清除（该通道回落到运镜基元）。 */
+  updateCameraKey: (moveId: string, keyId: string, patch: Partial<CameraKey>) => void;
+  deleteCameraKey: (moveId: string, keyId: string) => void;
+  /** 清空该段所有关键帧，回到纯运镜基元。 */
+  clearCameraKeys: (moveId: string) => void;
   /** 基于某条过肩 move 生成正反打：互换前景 / 主体、翻转肩侧，并保持同一侧轴线。 */
   addReverseShot: (moveId: string) => void;
   setAspectRatio: (ratio: AspectRatio) => void;
@@ -695,6 +704,44 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         },
       };
     });
+
+  /** 规范化后的关键帧集合写回某条 move（null = 清空）。 */
+  const setMoveKeys = (moveId: string, keys: CameraKey[] | null) =>
+    set((store) => ({
+      state: {
+        ...store.state,
+        revision: store.state.revision + 1,
+        cameraMoves: store.state.cameraMoves.map((move) =>
+          move.id === moveId ? { ...move, keys: keys ?? undefined } : move,
+        ),
+      },
+    }));
+
+  const addCameraKey = (moveId: string, t: number) => {
+    const move = get().state.cameraMoves.find((m) => m.id === moveId);
+    if (!move) return;
+    const at = clamp(t, 0, 1);
+    const existing = move.keys ?? [];
+    const id = `${moveId}_K${existing.length + 1}_${Math.round(at * 100)}`;
+    setMoveKeys(moveId, normalizeCameraKeys([...existing, { id, t: at, ease: normalizeEase(move.ease) }]));
+  };
+
+  const updateCameraKey = (moveId: string, keyId: string, patch: Partial<CameraKey>) => {
+    const move = get().state.cameraMoves.find((m) => m.id === moveId);
+    if (!move) return;
+    setMoveKeys(
+      moveId,
+      normalizeCameraKeys(
+        (move.keys ?? []).map((key) => (key.id === keyId ? { ...key, ...patch } : key)),
+      ),
+    );
+  };
+
+  const deleteCameraKey = (moveId: string, keyId: string) => {
+    const move = get().state.cameraMoves.find((m) => m.id === moveId);
+    if (!move) return;
+    setMoveKeys(moveId, normalizeCameraKeys((move.keys ?? []).filter((key) => key.id !== keyId)));
+  };
 
   const init = initStage();
   return {
@@ -2194,6 +2241,14 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           selectedItem: store.selectedItem === moveId ? null : store.selectedItem,
         };
       }),
+
+    addCameraKey: (moveId, t) => addCameraKey(moveId, t),
+
+    updateCameraKey: (moveId, keyId, patch) => updateCameraKey(moveId, keyId, patch),
+
+    deleteCameraKey: (moveId, keyId) => deleteCameraKey(moveId, keyId),
+
+    clearCameraKeys: (moveId) => setMoveKeys(moveId, null),
 
     removeCamera: (cameraId) =>
       set((store) => {
