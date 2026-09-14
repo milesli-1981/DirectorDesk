@@ -8,12 +8,14 @@ import { AssetCategory, DirectorState, HandoffMode, JointName, MoveSegment, Path
 import { pathChain } from "../engine/path";
 import {
   hitCameraRay,
+  hitCameraPathPointScreen,
   hitEndpointScreen,
   hitObjectRay,
   hitPath,
   hitPathPointScreen,
   pathPolyline,
 } from "../engine/pick";
+import { nearestOnCamPath } from "../engine/cameraPath";
 import { baseHeading, formationForwardShift, formationSlotOf, objectFacing, objectPosition, routeObstacles } from "../engine/solver";
 import { actionPoseAt, staticPoseWeight } from "../engine/actionPose";
 import { MODEL_CONFIG } from "../engine/modelConfig";
@@ -46,7 +48,7 @@ import {
   SIDE_LABELS,
   VIEW_LABELS,
 } from "../domain/schema";
-import { RadialRing, PointRadialRing } from "./RadialRing";
+import { RadialRing, PointRadialRing, CameraPointRadialRing } from "./RadialRing";
 import { LockBadge } from "./LockBadge";
 
 const GROUND_PLANE = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
@@ -59,6 +61,8 @@ const RING_ENABLED = false;
  *  按像素而非世界单位给，缩放与移机都不会改变手感；端点是公认最难点的那个，故单独放大。 */
 const POINT_PICK_PX = 24;
 const ENDPOINT_PICK_PX = 26;
+/** 相机 PATH 路径点（含首尾端点）的屏幕命中半径（px）。 */
+const CAM_POINT_PICK_PX = 26;
 
 /** 悬停标记是否已经是同一个：省掉每次 pointermove 都写一遍 store。 */
 function sameMarker(a: MarkerHover | null, b: MarkerHover | null): boolean {
@@ -74,7 +78,18 @@ type DragState =
   | { kind: "point"; segmentId: string; pointId: string; moved: boolean; origin: Vec2 }
   | { kind: "endpoint"; segmentId: string; which: "start" | "end" }
   | { kind: "new"; segmentId: string; origin: Vec2; current: Vec2 }
-  | { kind: "draw"; objectId: string };
+  | { kind: "draw"; objectId: string }
+  | { kind: "camerapoint"; moveId: string; pointId: string; moved: boolean; origin: Vec2 }
+  // 按住相机路径线拖动加点：insertAt = 插入位置，y = 落点高度（取被按线段中点高度）。
+  | {
+      kind: "cameraNew";
+      moveId: string;
+      insertAt: number;
+      y: number;
+      moved: boolean;
+      origin: Vec2;
+      current: Vec2;
+    };
 
 function groundPoint(event: ThreeEvent<PointerEvent>): Vec2 | null {
   if (event.ray) {
@@ -84,6 +99,15 @@ function groundPoint(event: ThreeEvent<PointerEvent>): Vec2 | null {
   // event.point 同样是射线与地面平面的交点，只有射线几乎平行于地面时两者才都取不到。
   const onPlane = event.point as { x: number; z: number } | undefined;
   return onPlane ? { x: onPlane.x, z: onPlane.z } : null;
+}
+
+/** 射线与「高度 y = h 的水平面」的交点：用于拖拽悬在空中的把手（相机路径点）。
+ *  投到地面（y=0）会让把手整体偏出光标，看着像漂移 / 不跟手。 */
+function planePointAtHeight(event: ThreeEvent<PointerEvent>, h: number): Vec2 | null {
+  if (!event.ray) return null;
+  const hit = new THREE.Vector3();
+  if (!event.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), -h), hit)) return null;
+  return { x: hit.x, z: hit.z };
 }
 
 /** 地面交点的最大可信距离（世界单位）。
@@ -97,6 +121,24 @@ function groundHitUsable(event: ThreeEvent<PointerEvent>, point: Vec2): boolean 
   const ray = event.ray;
   if (!ray) return true;
   return Math.hypot(point.x - ray.origin.x, point.z - ray.origin.z) <= GROUND_HIT_MAX;
+}
+
+/**
+ * 光标射线是否正压在某相机的 PATH 路径点上。
+ * 播放头在第一帧时，相机解算位置正好等于路径起点，相机代理（机身 / 无人机）会盖住蓝点并抢走点击；
+ * 这里让代理让路（不 stopPropagation），把事件继续交给地面把手去拾取路径点。
+ */
+function cameraPathPointUnder(event: ThreeEvent<PointerEvent>, cameraId: string): boolean {
+  const ray = event.ray;
+  if (!ray) return false;
+  const v = new THREE.Vector3();
+  for (const m of useDirectorStore.getState().state.cameraMoves) {
+    if (m.camera !== cameraId || m.type !== "PATH") continue;
+    for (const p of m.pathPoints ?? []) {
+      if (ray.distanceToPoint(v.set(p.x, p.y, p.z)) < 0.8) return true;
+    }
+  }
+  return false;
 }
 
 function capturePointer(event: ThreeEvent<PointerEvent>) {
@@ -555,9 +597,9 @@ function Actors() {
   const objects = useDirectorStore((s) => s.state.objects);
   return (
     <>
-      {objects.map((object) => (
-        <ActorView key={object.id} objectId={object.id} />
-      ))}
+      {objects.map((object) =>
+        object.hidden ? null : <ActorView key={object.id} objectId={object.id} />,
+      )}
     </>
   );
 }
@@ -577,6 +619,8 @@ function SegmentPaths() {
   return (
     <>
       {segments.map((segment) => {
+        // 隐藏对象连同其行动路径一起隐藏，便于在画布上聚焦当前编辑内容。
+        if (state.objects.find((o) => o.id === segment.object)?.hidden) return null;
         const active = segment.object === selectedObjectId;
         // 停留腿（stub 拖回起点）：退化为零长度，用 HOLD 环表示，不画线（文档 §7.2）。
         const degenerate =
@@ -955,11 +999,13 @@ function DroneRig({
   color,
   selected,
   active,
+  cameraId,
   onSelect,
 }: {
   color: string;
   selected: boolean;
   active: boolean;
+  cameraId: string;
   onSelect: () => void;
 }) {
   const rotors: Array<[number, number, number]> = [
@@ -972,6 +1018,7 @@ function DroneRig({
     <group>
       <mesh
         onPointerDown={(event) => {
+          if (cameraPathPointUnder(event, cameraId)) return;
           event.stopPropagation();
           onSelect();
         }}
@@ -1036,12 +1083,15 @@ function CameraProxy({ cameraId }: { cameraId: string }) {
           color={camera.color}
           selected={isSelected}
           active={isActive}
+          cameraId={cameraId}
           onSelect={() => selectCamera(cameraId)}
         />
       ) : (
         <>
           <mesh
             onPointerDown={(event) => {
+              // 机位与 PATH 路径点重合时（首帧相机 = 起点）让路，交给地面把手拾取路径点。
+              if (cameraPathPointUnder(event, cameraId)) return;
               event.stopPropagation();
               selectCamera(cameraId);
             }}
@@ -1117,6 +1167,61 @@ function CameraPaths() {
   );
 }
 
+/** 相机 PATH 把手：首尾标 START/END（球 + 标签），中间是控制点（折线圆盘 / 曲线圆环），全部可拖拽。 */
+function CameraPathHandles() {
+  const selCamId = useDirectorStore((s) =>
+    s.selectedKind === "camera" ? s.selectedId : s.activeCameraId,
+  );
+  const viewMode = useDirectorStore((s) => s.viewMode);
+  const moves = useDirectorStore((s) => s.state.cameraMoves);
+  if (viewMode !== "director" || !selCamId) return null;
+  const pathMoves = moves.filter(
+    (m) => m.camera === selCamId && m.type === "PATH" && (m.pathPoints?.length ?? 0) >= 2,
+  );
+  return (
+    <>
+      {pathMoves.map((m) =>
+        (m.pathPoints ?? []).map((p, i, arr) => {
+          const isStart = i === 0;
+          const isEnd = i === arr.length - 1;
+          if (isStart || isEnd) {
+            const color = isStart ? "#67a7ff" : "#f0a35a";
+            return (
+              <group key={p.id} position={[p.x, p.y, p.z]}>
+                <mesh>
+                  <sphereGeometry args={[0.22, 20, 14]} />
+                  <meshBasicMaterial color={color} />
+                </mesh>
+                <Html
+                  center
+                  position={[0, 0.5, 0]}
+                  style={{ pointerEvents: "none" }}
+                  zIndexRange={[25, 0]}
+                >
+                  <span className="node-label" style={{ color }}>
+                    {isStart ? "START" : "END"}
+                  </span>
+                </Html>
+              </group>
+            );
+          }
+          const isArc = p.shape === "ARC";
+          return (
+            <mesh key={p.id} position={[p.x, p.y, p.z]} rotation={[-Math.PI / 2, 0, 0]}>
+              {isArc ? (
+                <ringGeometry args={[0.18, 0.3, 26]} />
+              ) : (
+                <circleGeometry args={[0.24, 26]} />
+              )}
+              <meshBasicMaterial color="#7ad7ff" side={THREE.DoubleSide} />
+            </mesh>
+          );
+        }),
+      )}
+    </>
+  );
+}
+
 /** 相机视图：把渲染相机驱动到导演相机的解算结果上。 */
 /** 把渲染画布暴露给视频导出模块（供 canvas.captureStream 录制）。 */
 function CaptureBridge() {
@@ -1157,16 +1262,61 @@ function CameraRig() {
     // 荷兰角：lookAt 之后再绕视线轴滚转画面（正值顺时针）。
     if (resolved.roll) camera.rotateZ((resolved.roll * Math.PI) / 180);
 
-    // 供景深后处理使用：对焦点 = 镜头 target（过肩时是远处的主体，前景肩膀因此自然虚化）。
-    liveShot.focusPoint[0] = resolved.target[0];
-    liveShot.focusPoint[1] = resolved.target[1];
-    liveShot.focusPoint[2] = resolved.target[2];
-    liveShot.focusDistance = Math.hypot(
-      resolved.target[0] - resolved.position[0],
-      resolved.target[1] - resolved.position[1],
-      resolved.target[2] - resolved.position[2],
-    );
     liveShot.lensMm = resolved.lensMm;
+
+    // ---- 自动对焦（供景深后处理）----
+    // ① 有意图主体（targetId）时沿用镜头 target：过肩时那是远处主体，前景肩膀因此自然虚化。
+    // ② 无意图主体时（自由 PATH 的「固定方向 / 沿轨迹」、LOCATION 等），镜头 target 只是机位前方
+    //    1m 的虚拟点，拿它对焦会让整画面虚掉 —— 改为自动对焦到画面内最靠近构图中心的演员；
+    //    画面里一个演员都没有时退到较深的对焦距离，避免糊成一片。
+    const camObj = state.cameras.find((c) => c.id === activeCameraId);
+    const activeMove = activeCameraMove(state, activeCameraId, currentTime);
+    const intendedTargetId = activeMove?.targetId ?? camObj?.targetId;
+    const camX = resolved.position[0];
+    const camY = resolved.position[1];
+    const camZ = resolved.position[2];
+    let focusPoint: [number, number, number] = [resolved.target[0], resolved.target[1], resolved.target[2]];
+    let focusDistance = Math.hypot(
+      resolved.target[0] - camX,
+      resolved.target[1] - camY,
+      resolved.target[2] - camZ,
+    );
+    if (!intendedTargetId) {
+      const tanV = Math.tan((resolved.fovDeg * Math.PI) / 360);
+      const tanH = tanV * aspectValue(state.aspectRatio);
+      const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+      const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+      const up = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+      let best: { point: [number, number, number]; dist: number; center: number } | null = null;
+      for (const obj of state.objects) {
+        if (obj.type !== "actor") continue;
+        const op = objectPosition(state, obj.id, currentTime);
+        const rx = op.x - camX;
+        const ry = 1.5 - camY; // 对焦到演员胸口 / 面部高度
+        const rz = op.z - camZ;
+        const depth = rx * fwd.x + ry * fwd.y + rz * fwd.z;
+        if (depth <= 0.5) continue;
+        const cx = rx * right.x + ry * right.y + rz * right.z;
+        const cy = rx * up.x + ry * up.y + rz * up.z;
+        // 容许略微出框（1.15 倍）：人物刚进画就对上焦，避免虚焦后再切。
+        if (Math.abs(cy) > depth * tanV * 1.15 || Math.abs(cx) > depth * tanH * 1.15) continue;
+        const center = Math.hypot(cx / (depth * tanH || 1e-6), cy / (depth * tanV || 1e-6));
+        const dist = Math.hypot(rx, ry, rz);
+        if (!best || center < best.center) best = { point: [op.x, 1.5, op.z], dist, center };
+      }
+      if (best) {
+        focusPoint = best.point;
+        focusDistance = best.dist;
+      } else {
+        // 画面内没有演员：退到较深对焦距离，保证整场景不糊。
+        focusDistance = Math.max(8, focusDistance);
+        focusPoint = [camX + fwd.x * focusDistance, camY + fwd.y * focusDistance, camZ + fwd.z * focusDistance];
+      }
+    }
+    liveShot.focusPoint[0] = focusPoint[0];
+    liveShot.focusPoint[1] = focusPoint[1];
+    liveShot.focusPoint[2] = focusPoint[2];
+    liveShot.focusDistance = focusDistance;
 
     const frame = computeFrame(aspectValue(state.aspectRatio), size.width, size.height);
     if (frame.height <= 0 || frame.width <= 0) return;
@@ -1279,6 +1429,21 @@ function Interaction() {
         // 这里刻意不受 RING_ENABLED 约束：那是旧的对象菜单开关且当前为 false，
         // 若一并套用，路径点在移除内联按钮后就没有操作入口了。
         store.openPointRing(drag.pointId);
+      } else if (drag.kind === "camerapoint" && !drag.moved) {
+        // 轻点相机 PATH 中间点：唤起环形菜单（CURVE / DEL）；首尾端点不弹菜单。
+        const pts = store.state.cameraMoves.find((m) => m.id === drag.moveId)?.pathPoints ?? [];
+        const idx = pts.findIndex((p) => p.id === drag.pointId);
+        if (idx > 0 && idx < pts.length - 1) store.openCameraPointRing(drag.pointId);
+      } else if (drag.kind === "cameraNew") {
+        if (drag.moved) {
+          store.insertCameraPathPoint(
+            drag.moveId,
+            drag.current.x,
+            drag.y,
+            drag.current.z,
+            drag.insertAt,
+          );
+        }
       } else if (drag.kind === "new") {
         const moved =
           Math.hypot(drag.current.x - drag.origin.x, drag.current.z - drag.origin.z) > 0.12;
@@ -1336,6 +1501,54 @@ function Interaction() {
     }
 
     if (!point) return;
+
+    // 相机 PATH：选中相机时，路径点 / 端点（屏幕命中）可拖拽；按住路径线拖动可加点。
+    const selCamId = store.selectedKind === "camera" ? store.selectedId : store.activeCameraId;
+    if (selCamId && !store.pathDrawMode) {
+      const fovPx = (camera as THREE.PerspectiveCamera).fov || DIRECTOR_FOV;
+      const focalPx = size.height / (2 * Math.tan((fovPx * Math.PI) / 360));
+      const ptHit = hitCameraPathPointScreen(
+        store.state,
+        selCamId,
+        event.ray,
+        CAM_POINT_PICK_PX,
+        focalPx,
+      );
+      if (ptHit) {
+        store.selectCamera(selCamId);
+        store.selectItem(ptHit.moveId);
+        beginDrag({
+          kind: "camerapoint",
+          moveId: ptHit.moveId,
+          pointId: ptHit.point.id,
+          moved: false,
+          origin: planePointAtHeight(event, ptHit.point.y) ?? point ?? { x: 0, z: 0 },
+        });
+        capturePointer(event);
+        return;
+      }
+      const camMove = store.state.cameraMoves.find(
+        (m) => m.camera === selCamId && m.type === "PATH" && (m.pathPoints?.length ?? 0) >= 2,
+      );
+      if (camMove) {
+        const near = nearestOnCamPath(camMove.pathPoints ?? [], event.ray);
+        if (near && near.distance < 0.45) {
+          store.selectCamera(selCamId);
+          store.selectItem(camMove.id);
+          beginDrag({
+            kind: "cameraNew",
+            moveId: camMove.id,
+            insertAt: near.insertAt,
+            y: near.y,
+            moved: false,
+            origin: planePointAtHeight(event, near.y) ?? point ?? { x: 0, z: 0 },
+            current: { x: near.x, z: near.z },
+          });
+          capturePointer(event);
+          return;
+        }
+      }
+    }
 
     // 手绘路径模式：在画布上拖拽，把轨迹写入当前选中的资产（无选中资产时不拦截，便于先点选）。
     // set 资产是静态环境 / 障碍，不参与运动，禁用对其手绘路径。
@@ -1447,6 +1660,22 @@ function Interaction() {
       store.movePathPoint(drag.segmentId, drag.pointId, point.x, point.z);
     } else if (drag.kind === "endpoint") {
       store.moveEndpoint(drag.segmentId, drag.which, point.x, point.z);
+    } else if (drag.kind === "camerapoint") {
+      // 只改 XZ，Y 保持把手原有高度；光标投到「把手所在高度的水平面」，把手才贴住光标。
+      const mv = store.state.cameraMoves.find((m) => m.id === drag.moveId);
+      const py = mv?.pathPoints?.find((p) => p.id === drag.pointId)?.y ?? 1.6;
+      const onPlane = planePointAtHeight(event, py);
+      const nx = onPlane ? onPlane.x : point.x;
+      const nz = onPlane ? onPlane.z : point.z;
+      if (Math.hypot(nx - drag.origin.x, nz - drag.origin.z) > 0.15) drag.moved = true;
+      store.moveCameraPathPoint(drag.moveId, drag.pointId, nx, py, nz);
+    } else if (drag.kind === "cameraNew") {
+      // 在落点高度平面上跟随光标；拖动超过阈值才算「加点」，避免误触。
+      const onPlane = planePointAtHeight(event, drag.y);
+      const nx = onPlane ? onPlane.x : point.x;
+      const nz = onPlane ? onPlane.z : point.z;
+      if (Math.hypot(nx - drag.origin.x, nz - drag.origin.z) > 0.15) drag.moved = true;
+      drag.current = { x: nx, z: nz };
     } else if (drag.kind === "draw") {
       const last = livePtsRef.current[livePtsRef.current.length - 1];
       if (!last || Math.hypot(point.x - last.x, point.z - last.z) > 0.15) {
@@ -1658,15 +1887,37 @@ function PointRingAnchor({ pointId }: { pointId: string }) {
   );
 }
 
+function CameraPointRingAnchor({ pointId }: { pointId: string }) {
+  const groupRef = useRef<THREE.Group>(null);
+
+  useFrame(() => {
+    const { state } = useDirectorStore.getState();
+    // 相机路径点带高度（y）：窗口挂在点的 3D 位置上，而非地面。
+    for (const move of state.cameraMoves) {
+      const hit = (move.pathPoints ?? []).find((p) => p.id === pointId);
+      if (hit) {
+        groupRef.current?.position.set(hit.x, hit.y, hit.z);
+        return;
+      }
+    }
+  });
+
+  return (
+    <group ref={groupRef}>
+      <Html center style={{ pointerEvents: "auto" }} zIndexRange={[90, 0]}>
+        <CameraPointRadialRing pointId={pointId} />
+      </Html>
+    </group>
+  );
+}
+
 function RadialLayer() {
   const radialTarget = useDirectorStore((s) => s.radialTarget);
   const viewMode = useDirectorStore((s) => s.viewMode);
   if (!radialTarget || viewMode !== "director") return null;
-  return radialTarget.kind === "object" ? (
-    <RingAnchor objectId={radialTarget.id} />
-  ) : (
-    <PointRingAnchor pointId={radialTarget.id} />
-  );
+  if (radialTarget.kind === "object") return <RingAnchor objectId={radialTarget.id} />;
+  if (radialTarget.kind === "point") return <PointRingAnchor pointId={radialTarget.id} />;
+  return <CameraPointRingAnchor pointId={radialTarget.id} />;
 }
 
 /* ------------------------------------------------------------- World view */
@@ -1699,6 +1950,7 @@ function WorldScene() {
       <GroupGraph />
       <OcclusionHighlights />
       <CameraPaths />
+      <CameraPathHandles />
       <CameraProxies />
       <ActionAxisLine />
       <RadialLayer />

@@ -24,6 +24,7 @@ import {
   normalizeEase,
 } from "./ease";
 import { baseHeading, objectFacing, objectPosition, travelHeading } from "./solver";
+import { sampleCamPath } from "./cameraPath";
 
 export interface ResolvedCamera {
   position: Vec3;
@@ -509,6 +510,69 @@ function resolveMove(
   const style = move.style ?? camera.style ?? (camera.motion === "HANDHELD" ? "handheld" : "locked");
   const sp = shakePreset(camera, style);
   const hasKeys = !!move.keys && move.keys.length > 0;
+
+  // PATH：相机沿可编辑 3D 折线运动（不经 placeCamera 反推）。无路径点时退回基础机位，避免崩溃。
+  if (move.type === "PATH") {
+    const pts = move.pathPoints;
+    if (pts && pts.length >= 2) {
+      const span = move.timeEnd - move.timeStart || 1;
+      const u = clamp((time - move.timeStart) / span, 0, 1);
+      const progress = curveVal(normalizeEase(move.ease), move.speedKeys, u);
+      const position = sampleCamPath(pts, progress);
+      let target: Vec3;
+      const tid = move.targetId ?? camera.targetId;
+      const yawDeg = move.fixedYawDeg ?? camera.fixedYawDeg;
+      const pitchDeg = move.fixedPitchDeg ?? camera.fixedPitchDeg;
+      if (tid) {
+        target = focusPoint(state, tid, time);
+      } else if (yawDeg !== undefined || pitchDeg !== undefined) {
+        // 固定朝向（旋转系统）：由「平面方位角 + 立面俯仰角」换算出单位方向向量，机位平移时朝向恒定不变。
+        // 约定与全站一致：yaw=0 → +Z，yaw=90 → +X；pitch=0 水平、90 正上、270 正下。
+        const yaw = ((yawDeg ?? 0) * Math.PI) / 180;
+        const pitch = ((pitchDeg ?? 0) * Math.PI) / 180;
+        const cp = Math.cos(pitch);
+        const dx = Math.sin(yaw) * cp;
+        const dy = Math.sin(pitch);
+        const dz = Math.cos(yaw) * cp;
+        target = [position[0] + dx, position[1] + dy, position[2] + dz];
+      } else {
+        // 无目标：朝自身行进方向看，使「自由飞行掠过」时画面朝前、不锁定任何人/物。
+        // 用一小段前后采样求切线方向（首尾钳到端点），避免端点退化成零向量导致朝向崩掉。
+        const eps = 0.02;
+        const pa = sampleCamPath(pts, clamp(progress - eps, 0, 1));
+        const pb = sampleCamPath(pts, clamp(progress + eps, 0, 1));
+        let tx = pb[0] - pa[0];
+        let ty = pb[1] - pa[1];
+        let tz = pb[2] - pa[2];
+        const tl = Math.hypot(tx, ty, tz) || 1;
+        target = [position[0] + tx / tl, position[1] + ty / tl, position[2] + tz / tl];
+      }
+      const style = move.style ?? camera.style ?? (camera.motion === "HANDHELD" ? "handheld" : "locked");
+      const sp = shakePreset(camera, style);
+      // PATH 不走 placeCamera 的通道体系；这里补上「焦距 / 荷兰角」两个与轨迹无关的关键帧通道，
+      // 让关键帧面板里的它们对 PATH 也生效（orbit/crane/dolly 等与路径语义冲突，不参与）。
+      const tracks = buildChannelTracks(move, camera);
+      const keyedLens = keyedChannel(tracks, "lensMm", u);
+      const keyedRoll = keyedChannel(tracks, "roll", u);
+      const outLens = keyedLens ?? move.lensMm ?? camera.lensMm;
+      let pos = position;
+      if (sp.shakeAmp > 0 || sp.bobAmp > 0) {
+        const a = sp.shakeAmp;
+        const jx = Math.sin(time * (sp.shakeFreq + 1.3)) * a + Math.sin(time * (sp.shakeFreq * 0.42 + 3.1)) * a * 0.6;
+        const jy = Math.sin(time * (sp.bobFreq + 1.3)) * sp.bobAmp + Math.sin(time * (sp.bobFreq * 0.4)) * sp.bobAmp * 0.4;
+        const jz = Math.cos(time * (sp.shakeFreq + 1.4)) * a + Math.sin(time * (sp.shakeFreq * 0.4 + 2.7)) * a * 0.5;
+        pos = [position[0] + jx, position[1] + jy, position[2] + jz];
+      }
+      return {
+        position: pos,
+        target,
+        lensMm: outLens,
+        fovDeg: lensFovDeg(outLens),
+        roll: (keyedRoll ?? move.roll ?? camera.roll ?? 0) + styleRollDrift(sp, time),
+        move,
+      };
+    }
+  }
 
   if (move.type === "STATIC" && !hasKeys) {
     // 锁死机位：用片段开始时刻的构图，之后不再改变。（打了关键帧则按关键帧动。）

@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import {
   CameraObject,
+  CameraPathPoint,
   DirectorObject,
   DirectorState,
   MoveSegment,
@@ -78,6 +79,7 @@ export function hitObjectRay(
 ): ObjectHit | null {
   let best: ObjectHit | null = null;
   for (const object of state.objects) {
+    if (object.hidden) continue;
     const position = objectPosition(state, object.id, time);
     // 用资产自身体块（footprint）做命中，而不是固定 ACTOR_HEIGHT 的细线段：
     // 高度取资产实际高度，抓取容差按 footprint 半宽外扩，
@@ -114,6 +116,39 @@ export function hitCameraRay(
     const distance = ray.distanceToPoint(point);
     if (distance <= radius && (!best || distance < best.distance)) {
       best = { camera, distance };
+    }
+  }
+  return best;
+}
+
+export interface CameraPathPointHit {
+  moveId: string;
+  point: CameraPathPoint;
+  index: number;
+  score: number;
+}
+
+/**
+ * 相机 PATH 路径点（含首尾端点）的屏幕命中：光标落在标记 radiusPx 像素内即命中（同人物路径）。
+ * 标记在 3D 位置上（带高度 y），因此按点自身高度算评分，而不是投到地面。
+ */
+export function hitCameraPathPointScreen(
+  state: DirectorState,
+  cameraId: string,
+  ray: THREE.Ray,
+  radiusPx: number,
+  focalPx: number,
+): CameraPathPointHit | null {
+  let best: CameraPathPointHit | null = null;
+  for (const move of state.cameraMoves) {
+    if (move.camera !== cameraId || move.type !== "PATH") continue;
+    const pts = move.pathPoints ?? [];
+    for (let i = 0; i < pts.length; i += 1) {
+      const p = pts[i];
+      const score = markerScore(ray, new THREE.Vector3(p.x, p.y, p.z), radiusPx, focalPx);
+      if (score <= 1 && (!best || score < best.score)) {
+        best = { moveId: move.id, point: p, index: i, score };
+      }
     }
   }
   return best;

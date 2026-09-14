@@ -145,6 +145,7 @@ const MOTION_TYPES: CameraMotionType[] = [
   "DOLLY_ZOOM",
   "CRANE",
   "DRONE",
+  "PATH",
 ];
 
 const poseEquals = (pose: Pose | undefined, preset: Pose) =>
@@ -314,6 +315,7 @@ export function Inspector() {
   const deleteCameraMove = useDirectorStore((s) => s.deleteCameraMove);
   const addCameraKey = useDirectorStore((s) => s.addCameraKey);
   const updateCameraKey = useDirectorStore((s) => s.updateCameraKey);
+  const addCameraPathPoint = useDirectorStore((s) => s.addCameraPathPoint);
   const deleteCameraKey = useDirectorStore((s) => s.deleteCameraKey);
   const clearCameraKeys = useDirectorStore((s) => s.clearCameraKeys);
   const addReverseShot = useDirectorStore((s) => s.addReverseShot);
@@ -1290,6 +1292,123 @@ export function Inspector() {
                 </option>
               </select>
             </Field>
+
+            {!moveOts && move.type === "PATH" ? (
+              <div className="path-editor">
+                <Row label={`路径点 ${move.pathPoints?.length ?? 0}`}>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={() => {
+                      const pts = move.pathPoints ?? [];
+                      const cam = state.cameras.find((c) => c.id === move.camera);
+                      const t = state.objects.find((o) => o.id === (move.targetId ?? cam?.targetId));
+                      const last = pts[pts.length - 1];
+                      const prev = pts[pts.length - 2];
+                      if (last && prev) {
+                        // 沿最后一段方向继续延伸 3m：避免新点固定堆在终点上（旧实现恒为 (bx-4,·,bz+3)，正好压住 P2）。
+                        const dx = last.x - prev.x;
+                        const dz = last.z - prev.z;
+                        const len = Math.hypot(dx, dz) || 1;
+                        addCameraPathPoint(move.id, last.x + (dx / len) * 3, last.y, last.z + (dz / len) * 3);
+                      } else if (last) {
+                        addCameraPathPoint(move.id, last.x + 3, last.y, last.z + 3);
+                      } else {
+                        addCameraPathPoint(move.id, t?.x ?? 0, 1.6, (t?.z ?? 0) + 3);
+                      }
+                    }}
+                  >
+                    ＋ 加点
+                  </button>
+                </Row>
+                <p className="hint">
+                  在 Director View 拖拽蓝色路径点塑形；轻点蓝点弹菜单删除（与人物 move 一致）。
+                  相机沿折线行进。朝向三选一：跟随对象 / 固定方向（用平面 · 立面两个角度设定，机位平移、朝向不变）/ 沿轨迹（朝行进方向）。
+                </p>
+                {(() => {
+                  const hasFixedDir =
+                    move.fixedYawDeg !== undefined || move.fixedPitchDeg !== undefined;
+                  const lookMode = hasFixedDir ? "fixed" : move.targetId ? "target" : "tangent";
+                  return (
+                    <>
+                      <Field label="朝向 Look">
+                        <select
+                          value={lookMode}
+                          onChange={(event) => {
+                            const mode = event.target.value;
+                            if (mode === "target") {
+                              patchCameraMove(move.id, {
+                                fixedYawDeg: undefined,
+                                fixedPitchDeg: undefined,
+                                targetId: move.targetId ?? moveCamera?.targetId ?? undefined,
+                              });
+                            } else if (mode === "fixed") {
+                              // 从当前朝向反推「平面 / 立面」两角，切换瞬间画面不跳。
+                              let yawDeg = move.fixedYawDeg;
+                              let pitchDeg = move.fixedPitchDeg;
+                              if (yawDeg === undefined && pitchDeg === undefined) {
+                                const solved = solveCamera(state, move.camera, (move.timeStart + move.timeEnd) / 2);
+                                if (solved) {
+                                  const dx = solved.target[0] - solved.position[0];
+                                  const dy = solved.target[1] - solved.position[1];
+                                  const dz = solved.target[2] - solved.position[2];
+                                  const len = Math.hypot(dx, dy, dz) || 1;
+                                  yawDeg = ((Math.atan2(dx / len, dz / len) * 180) / Math.PI + 360) % 360;
+                                  pitchDeg = ((Math.asin(Math.max(-1, Math.min(1, dy / len))) * 180) / Math.PI + 360) % 360;
+                                }
+                              }
+                              patchCameraMove(move.id, {
+                                targetId: undefined,
+                                fixedYawDeg: yawDeg ?? 0,
+                                fixedPitchDeg: pitchDeg ?? 0,
+                              });
+                            } else {
+                              patchCameraMove(move.id, {
+                                targetId: undefined,
+                                fixedYawDeg: undefined,
+                                fixedPitchDeg: undefined,
+                              });
+                            }
+                          }}
+                        >
+                          <option value="target">跟随对象 Target</option>
+                          <option value="fixed">固定方向 Fixed</option>
+                          <option value="tangent">沿轨迹 Tangent</option>
+                        </select>
+                      </Field>
+                      {lookMode === "fixed" ? (
+                        <>
+                          <Field label={`平面 Yaw ${(move.fixedYawDeg ?? 0).toFixed(0)}°`}>
+                            <input
+                              type="range"
+                              min={0}
+                              max={360}
+                              step={1}
+                              value={move.fixedYawDeg ?? 0}
+                              onChange={(event) =>
+                                patchCameraMove(move.id, { fixedYawDeg: Number(event.target.value) })
+                              }
+                            />
+                          </Field>
+                          <Field label={`立面 Pitch ${(move.fixedPitchDeg ?? 0).toFixed(0)}°`}>
+                            <input
+                              type="range"
+                              min={0}
+                              max={360}
+                              step={1}
+                              value={move.fixedPitchDeg ?? 0}
+                              onChange={(event) =>
+                                patchCameraMove(move.id, { fixedPitchDeg: Number(event.target.value) })
+                              }
+                            />
+                          </Field>
+                        </>
+                      ) : null}
+                    </>
+                  );
+                })()}
+              </div>
+            ) : null}
 
             {!moveOts && (move.type === "ORBIT" || move.type === "DRONE") ? (
               <Field label={`Orbit ${(move.orbitDeg ?? 0).toFixed(0)}°`}>

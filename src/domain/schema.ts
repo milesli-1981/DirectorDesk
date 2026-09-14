@@ -107,6 +107,8 @@ export interface DirectorObject {
   species?: AnimalSpecies;
   /** 锁定后不可通过拖拽改变位置（防误触）；仍可点选以便解锁。 */
   locked?: boolean;
+  /** 隐藏：画布上不渲染、不可拾取（仅视图层，不影响求解 / 导出）。用于减少画布杂乱。 */
+  hidden?: boolean;
   /** human 类资产的静态姿势基线（本地欧拉角）；缺省 = 标准站姿。 */
   pose?: Pose;
 }
@@ -123,6 +125,16 @@ export interface PathPoint {
   shape: PathPointShape;
   x: number;
   z: number;
+}
+
+/** 相机自定义路径点（3D）：x/z 平面位置 + y 高度（米），用于 PATH 运镜沿折线运动。 */
+export interface CameraPathPoint {
+  id: string;
+  x: number;
+  y: number;
+  z: number;
+  /** 折线 LINE / 曲线 ARC（仅中间点可切换；首尾是端点，恒为 LINE）。 */
+  shape?: PathPointShape;
 }
 
 /**
@@ -219,7 +231,8 @@ export type CameraMotionType =
   | "TILT"
   | "TRUCK"
   | "STEADICAM"
-  | "HANDHELD";
+  | "HANDHELD"
+  | "PATH";
 
 /** 目标类型：单对象 / 过肩 / 群组 / 主观 / 环境。决定 cameraSolver 如何取景。 */
 export type CameraTargetType = "OBJECT" | "OTS" | "GROUP" | "POV" | "LOCATION";
@@ -322,6 +335,10 @@ export interface CameraObject {
   tiltDeg?: number;
   /** 相机级默认：TRUCK 横向平移距离（米，正负=左右）。 */
   truckDist?: number;
+  /** PATH 默认固定朝向 · 平面方位角（度，0–360）：含义同 CameraMove.fixedYawDeg，段未单独设时沿用。 */
+  fixedYawDeg?: number;
+  /** PATH 默认固定朝向 · 立面俯仰角（度，0–360）：含义同 CameraMove.fixedPitchDeg。 */
+  fixedPitchDeg?: number;
 }
 
 /**
@@ -391,6 +408,12 @@ export interface CameraMove {
   tiltDeg?: number;
   /** TRUCK：纯横向平移距离（米，正负=左右），垂直视线方向。 */
   truckDist?: number;
+  /** PATH：相机沿可编辑 3D 折线运动（不依赖 placeCamera 反推），点的顺序即行进顺序。 */
+  pathPoints?: CameraPathPoint[];
+  /** PATH 固定朝向 · 平面方位角（度，0–360，绕竖直轴）。与 fixedPitchDeg 构成旋转系统；设置后机位沿轨道平移、朝向不变（不跟人、不随路径弯曲）。 */
+  fixedYawDeg?: number;
+  /** PATH 固定朝向 · 立面俯仰角（度，0–360）。0 = 水平，90 = 正上，270 = 正下。 */
+  fixedPitchDeg?: number;
   /** 段级覆盖：景别 / 视角 / 方位 / 镜头。为空则沿用 CameraObject 默认值。 */
   framing?: CameraFraming;
   view?: CameraView;
@@ -564,6 +587,7 @@ export const MOTION_LABELS: Record<CameraMotionType, string> = {
   TRUCK: "TRUCK 横移",
   STEADICAM: "STEADICAM 斯坦尼康",
   HANDHELD: "HANDHELD 手持",
+  PATH: "PATH 自定义轨迹",
 };
 
 export const TARGET_TYPE_LABELS: Record<CameraTargetType, string> = {
@@ -593,6 +617,7 @@ export const MOTION_HINTS: Record<CameraMotionType, string> = {
   TRUCK: "横向平移（垂直视线方向的轨道横移）：保持距离与透视，平行掠过主体。",
   STEADICAM: "斯坦尼康式平滑跟随：三维连续跟随目标，比普通 FOLLOW 更顺滑稳定。",
   HANDHELD: "手持微晃：机位叠加细微正弦抖动，模拟手持摄影的不稳定质感。",
+  PATH: "自定义空间路径：相机沿可编辑折线（任意曲线）运动，不锁定任何目标关系，用于精确复刻手绘运镜。",
 };
 
 /** 风格轴 → 底层参数（模板映射，UI 不暴露原始数值）。 */

@@ -1389,6 +1389,16 @@ canvas {
   margin-top: 6px;
 }
 
+/* 相机 PATH 编辑器：与 .inspector-row 同一栅格，垂直节奏统一为 8。 */
+.path-editor {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--ap-sep);
+}
+.path-editor .hint {
+  margin: 0 0 8px;
+}
+
 .ghost-button.on {
   border-color: #67a7ff;
   background: #18283a;

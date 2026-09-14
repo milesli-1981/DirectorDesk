@@ -7,6 +7,7 @@ import {
   CameraMove,
   CameraMotionType,
   CameraObject,
+  CameraPathPoint,
   CameraSide,
   CameraView,
   Constraint,
@@ -30,6 +31,7 @@ import {
 } from "../domain/schema";
 import { createBlankState } from "../engine/demoShot";
 import { normalizePathPointModes, pathInsertIndex, simplifyPath } from "../engine/path";
+import { normalizeCamPathShapes } from "../engine/cameraPath";
 import { contentEndTime } from "../engine/timeline";
 import { normalizeCameraKeys, normalizeEase, normalizeSpeedKeys } from "../engine/ease";
 import { ASSET_PRESETS } from "../engine/assetPresets";
@@ -266,7 +268,7 @@ export type SelectionKind = "object" | "camera";
 
 /** 环形菜单（RadialRing）的宿主：可以是场景对象，也可以是某条路径上的一个转折点。
  *  两者共用同一套甜甜圈 UI，只是可用动作不同，故用一个联合类型承载，避免两套字段各自残留。 */
-export type RadialTarget = { kind: "object" | "point"; id: string };
+export type RadialTarget = { kind: "object" | "point" | "cameraPoint"; id: string };
 
 /** 光标当前悬停的路径标记（转折点 / 起终点把手）。
  *  纯视觉反馈：让「这个把手现在能不能点中」先看得见，命中判定仍由 WorldView 决定。 */
@@ -318,6 +320,8 @@ interface DirectorStore {
   openRing: (objectId: string) => void;
   /** 轻点路径转折点打开环形菜单（Line/Curve 切换 + 删除），与对象环形菜单共用同一套 UI。 */
   openPointRing: (pointId: string) => void;
+  /** 轻点相机 PATH 路径点打开环形菜单（删除），与人物路径点一致。 */
+  openCameraPointRing: (pointId: string) => void;
   closeRing: () => void;
 
   moveObject: (objectId: string, x: number, z: number) => void;
@@ -444,6 +448,19 @@ interface DirectorStore {
   /** 写入多段速度曲线关键点（null / 少于 2 个点 = 退回单段 cubic-bezier）。 */
   setCameraMoveSpeedKeys: (moveId: string, keys: SpeedKey[] | null) => void;
   patchCameraMove: (moveId: string, patch: Partial<CameraMove>) => void;
+  addCameraPathPoint: (moveId: string, x: number, y: number, z: number) => void;
+  /** 在指定位置插入一个相机路径点（按住路径拖动加点），返回新点 id。 */
+  insertCameraPathPoint: (
+    moveId: string,
+    x: number,
+    y: number,
+    z: number,
+    insertAt: number,
+  ) => string | null;
+  moveCameraPathPoint: (moveId: string, pointId: string, x: number, y: number, z: number) => void;
+  deleteCameraPathPoint: (moveId: string, pointId: string) => void;
+  /** 切换相机路径中间点的折线 / 曲线（首尾端点不可）。 */
+  toggleCameraPathCurve: (moveId: string, pointId: string) => void;
   deleteCameraMove: (moveId: string) => void;
   /** 在归一化时刻 t（0..1）插入一个空关键帧：不含通道覆盖，插入本身不改变画面。 */
   addCameraKey: (moveId: string, t: number) => void;
@@ -543,6 +560,17 @@ function nextCameraMoveId(state: DirectorState, cameraId: string): string {
     id = `MOVE_${cameraId}_${String(index).padStart(2, "0")}`;
   }
   return id;
+}
+
+/** PATH 段的初始折线：横跨相机目标前方的一条 2 点直线（无目标时以原点为锚）。 */
+function seedCameraPathPoints(moveId: string, cameraId: string, state: DirectorState): CameraPathPoint[] {
+  const target = state.objects.find((o) => o.id === state.cameras.find((c) => c.id === cameraId)?.targetId);
+  const bx = target?.x ?? 0;
+  const bz = target?.z ?? 0;
+  return [
+    { id: `${moveId}_P1`, x: bx + 4, y: 1.6, z: bz + 3 },
+    { id: `${moveId}_P2`, x: bx - 4, y: 1.6, z: bz + 3 },
+  ];
 }
 
 /**
@@ -698,9 +726,16 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
 
   const patchCameraMove = (moveId: string, patch: Partial<CameraMove>) =>
     set((store) => {
-      const cameraMoves = store.state.cameraMoves.map((move) =>
-        move.id === moveId ? { ...move, ...patch } : move,
-      );
+      const cameraMoves = store.state.cameraMoves.map((move) => {
+        if (move.id !== moveId) return move;
+        const next = { ...move, ...patch };
+        // 切到 PATH 但还没有路径点 → 种一条可用折线，避免出现「空 PATH」无从下手（旧实现只改 type）。
+        // 反方向（PATH → 其它）保留 pathPoints，切回来即可复原。
+        if (patch.type === "PATH" && (next.pathPoints?.length ?? 0) < 2) {
+          return { ...next, pathPoints: seedCameraPathPoints(next.id, next.camera, store.state) };
+        }
+        return next;
+      });
       return {
         state: {
           ...store.state,
@@ -841,6 +876,8 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
     openRing: (objectId) => set({ radialTarget: { kind: "object", id: objectId } }),
 
     openPointRing: (pointId) => set({ radialTarget: { kind: "point", id: pointId } }),
+
+    openCameraPointRing: (pointId) => set({ radialTarget: { kind: "cameraPoint", id: pointId } }),
 
     closeRing: () => set({ radialTarget: null }),
 
@@ -2041,43 +2078,35 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
       const store = get();
       const { state } = store;
       const duration = state.duration;
-      // 每段独立、互不重叠：新段插在播放头处，被夹在相邻两段之间。
+      // 新段从播放头接管，一直铺到下一条更晚的片段起点（没有则铺到片尾）。
+      // 关键：不留空档——空档会让相机掉回「默认机位」（placeCamera 反推的构图位，不在路径上），
+      // 那正是「相机默认位置不在路径点上 / 播放到后面会跳到奇怪位置」的来源。
       const atTime = clamp(round1(store.currentTime), 0, Math.max(0, duration - 0.5));
       const camera = state.cameras.find((c) => c.id === cameraId);
       const siblings = state.cameraMoves
         .filter((m) => m.camera === cameraId)
         .sort((a, b) => a.timeStart - b.timeStart);
-      // 落在某条已有段内部 → 把它从播放头截断，本段接管后续时间。
-      const host = siblings.find((m) => atTime > m.timeStart && atTime < m.timeEnd);
-      // 播放头之后的第一条段，新段右端不能超过它的起点。
-      const next = siblings.filter((m) => m.timeStart >= atTime).sort((a, b) => a.timeStart - b.timeStart)[0];
+      const later = siblings.find((m) => m.timeStart > atTime);
+      const newStart = atTime;
+      const newEnd = round1(later ? later.timeStart : duration);
 
-      let newStart = atTime;
-      let newEnd = round1(Math.min(atTime + 2, duration));
-      if (next) newEnd = round1(Math.min(newEnd, next.timeStart));
-      if (newEnd - newStart < 0.5) {
-        // 旁边没有空间，改放到该段之后，仍不与其重叠。
-        newStart = next ? next.timeEnd : round1(duration - 0.5);
-        newEnd = round1(Math.min(newStart + 2, duration));
-        if (next) newEnd = Math.min(newEnd, next.timeEnd);
-      }
-
-      const cameraMoves = [...state.cameraMoves];
-      if (host) {
-        const hi = cameraMoves.findIndex((m) => m.id === host.id);
-        if (hi >= 0) {
-          if (atTime - host.timeStart < 0.05) {
-            // 几乎压在起点：直接删除原段，新段从其起点接管。
-            cameraMoves.splice(hi, 1);
-            newStart = host.timeStart;
-          } else {
-            cameraMoves[hi] = { ...cameraMoves[hi], timeEnd: atTime };
-          }
+      // 与新段重叠的旧段：裁掉被覆盖的一侧；整段落在新段内则丢弃（新段接管这段时间）。
+      const cameraMoves: CameraMove[] = [];
+      for (const m of state.cameraMoves) {
+        if (m.camera !== cameraId || m.timeEnd <= newStart || m.timeStart >= newEnd) {
+          cameraMoves.push(m);
+          continue;
         }
+        if (m.timeStart < newStart) cameraMoves.push({ ...m, timeEnd: newStart });
+        else if (m.timeEnd > newEnd) cameraMoves.push({ ...m, timeStart: newEnd });
       }
 
+      const moveId = nextCameraMoveId(state, cameraId);
+      // PATH：种子一条横跨主体前方的 2 点折线，用户可在 Director View 拖拽塑形。
+      const pathPoints: CameraPathPoint[] | undefined =
+        type === "PATH" ? seedCameraPathPoints(moveId, cameraId, state) : undefined;
       const move: CameraMove = {
-        id: nextCameraMoveId(state, cameraId),
+        id: moveId,
         camera: cameraId,
         type,
         targetId: camera?.targetId,
@@ -2087,19 +2116,133 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         dollyScale: type === "DOLLY" ? 0.55 : 1,
         craneHeight: type === "CRANE" ? 3 : 0,
         ease: [0.42, 0, 0.58, 1],
+        ...(pathPoints ? { pathPoints } : {}),
       };
       cameraMoves.push(move);
       set({
         state: {
           ...state,
           revision: state.revision + 1,
+          // 新段可能被顺延到片尾之后：同步抬高片长，避免片段被时间轴截掉。
+          duration: Math.max(state.duration, newEnd),
           cameraMoves,
           cameraJunctions: reconcileCameraJunctions(cameraMoves, state.cameraJunctions),
         },
         selectedKind: "camera",
         selectedId: cameraId,
         selectedItem: move.id,
+        // 新增运镜即进入导演视图：PATH 的路径线与可拖拽把手只在导演视图可见，否则会像「没反应」。
+        viewMode: "director",
       });
+    },
+
+    addCameraPathPoint: (moveId, x, y, z) => {
+      const move = get().state.cameraMoves.find((m) => m.id === moveId);
+      if (!move) return;
+      const pts = move.pathPoints ?? [];
+      const node: CameraPathPoint = {
+        id: `${moveId}_P_${Date.now().toString(36)}_${Math.floor(Math.random() * 1000)}`,
+        x,
+        y,
+        z,
+        shape: "LINE",
+      };
+      const pathPoints = normalizeCamPathShapes([...pts, node]);
+      set((s) => ({
+        state: {
+          ...s.state,
+          revision: s.state.revision + 1,
+          cameraMoves: s.state.cameraMoves.map((m) =>
+            m.id === moveId ? { ...m, pathPoints } : m,
+          ),
+        },
+      }));
+    },
+
+    insertCameraPathPoint: (moveId, x, y, z, insertAt) => {
+      const move = get().state.cameraMoves.find((m) => m.id === moveId);
+      if (!move) return null;
+      const pts = [...(move.pathPoints ?? [])];
+      const node: CameraPathPoint = {
+        id: `${moveId}_P_${Date.now().toString(36)}_${Math.floor(Math.random() * 1000)}`,
+        x,
+        y,
+        z,
+        shape: "LINE",
+      };
+      // 只插在中间：不能跑到 START 之前或 END 之后。
+      const at = Math.max(1, Math.min(pts.length - 1, insertAt));
+      pts.splice(at, 0, node);
+      const pathPoints = normalizeCamPathShapes(pts);
+      set((s) => ({
+        state: {
+          ...s.state,
+          revision: s.state.revision + 1,
+          cameraMoves: s.state.cameraMoves.map((m) =>
+            m.id === moveId ? { ...m, pathPoints } : m,
+          ),
+        },
+      }));
+      return node.id;
+    },
+
+    moveCameraPathPoint: (moveId, pointId, x, y, z) => {
+      const move = get().state.cameraMoves.find((m) => m.id === moveId);
+      if (!move) return;
+      set((s) => ({
+        state: {
+          ...s.state,
+          revision: s.state.revision + 1,
+          cameraMoves: s.state.cameraMoves.map((m) =>
+            m.id === moveId
+              ? {
+                  ...m,
+                  pathPoints: (m.pathPoints ?? []).map((p) =>
+                    p.id === pointId ? { ...p, x, y, z } : p,
+                  ),
+                }
+              : m,
+          ),
+        },
+      }));
+    },
+
+    deleteCameraPathPoint: (moveId, pointId) => {
+      const move = get().state.cameraMoves.find((m) => m.id === moveId);
+      if (!move) return;
+      const pathPoints = normalizeCamPathShapes(
+        (move.pathPoints ?? []).filter((p) => p.id !== pointId),
+      );
+      set((s) => ({
+        state: {
+          ...s.state,
+          revision: s.state.revision + 1,
+          cameraMoves: s.state.cameraMoves.map((m) =>
+            m.id === moveId ? { ...m, pathPoints } : m,
+          ),
+        },
+      }));
+    },
+
+    toggleCameraPathCurve: (moveId, pointId) => {
+      const move = get().state.cameraMoves.find((m) => m.id === moveId);
+      if (!move) return;
+      const points = move.pathPoints ?? [];
+      const index = points.findIndex((p) => p.id === pointId);
+      if (index <= 0 || index >= points.length - 1) return; // 只中间点可转
+      const next = points.map((p, i) =>
+        i === index ? { ...p, shape: p.shape === "ARC" ? "LINE" : "ARC" } : p,
+      ) as CameraPathPoint[];
+      const pathPoints = normalizeCamPathShapes(next);
+      set((s) => ({
+        state: {
+          ...s.state,
+          revision: s.state.revision + 1,
+          cameraMoves: s.state.cameraMoves.map((m) =>
+            m.id === moveId ? { ...m, pathPoints } : m,
+          ),
+        },
+      }));
     },
 
     addOtsMove: (cameraId) => {

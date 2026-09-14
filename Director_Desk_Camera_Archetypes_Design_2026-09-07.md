@@ -423,7 +423,7 @@ interface CameraMove {
 |---|---|---|
 | 8.5-1 `CameraJunction`（边界交接） | ✅ 已实现 | `CameraJunction { prevMove, nextMove, mode }` 已存在；`reconcileCameraJunctions` 在相邻且时间相接的 `CameraMove` 间自动生成，确定性 id `J_<prev>_<next>`，默认 `stop`；Timeline 上渲染为菱形节点（◉ smooth / ■ stop / ✕ cut），点击循环 `stop → smooth → cut`；`setCameraJunctionMode` 保留 mode。|
 | 8.5-2 `framing/view/side/lens` 下放到 `CameraMove` | ✅ 已实现 | `CameraMove` 已有可选字段 `framing? / view? / side? / lensMm?`；`CameraObject` 仅保留默认值；Inspector 提供对应下拉覆盖，求解时 `CameraMove` 段级值优先于相机全局值。|
-| 8.5-3 相机显式空间路径 `motion: "PATH"` | ⬜ 未实现（可选） | 当前相机机位仍由 `placeCamera` 反推（目标 + framing + side + view + orbit/dolly/crane），无折线编辑。复杂自定义轨迹待后续。|
+| 8.5-3 相机显式空间路径 `motion: "PATH"` | ✅ 已实现 | `CameraMove` 新增 `pathPoints?: CameraPathPoint[]`（`{id,x,y,z}` 3D 折线）；`cameraSolver.resolveMove` 在 PATH 段直接沿折线按弧长采样机位（不再经 `placeCamera` 反推），注视目标 = `targetId`，无目标则朝行进方向。新建 PATH 段自动种子一条横跨主体前方的 2 点折线。Director View 中相机 PATH 折线上的蓝色把手可拖拽（`Interaction` 按射线到点的世界距离拾取，`moveCameraPathPoint` 更新 XZ、保留 Y 高度）；Inspector 提供「＋加点 / 删除」与坐标列表。至此图里「相机沿任意曲线飞过、不跟随人物」的运镜可 1:1 复刻。|
 
 **Demo 预置（让相机轨道默认可见 / 可编辑）**：`demoShot.ts` 的 `CAM_A` 预填两条 `CameraMove`——`MOVE_CAM_A_01`（FOLLOW，0–6s，medium / back_3_4 / 50mm）与 `MOVE_CAM_A_02`（ORBIT，6–12s，orbit 120° / close_up / side / 35mm），二者时间相接处预置 `smooth` 的 `CameraJunction`，演示「一镜到底」连续性。
 

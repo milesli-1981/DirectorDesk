@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useDirectorStore } from "../state/directorStore";
 import { curveToggleEligible } from "../engine/path";
+import { camCurveEligible } from "../engine/cameraPath";
 import { DirectorState, IntentAction } from "../domain/schema";
 
 const SECTOR_COLORS = ["#285f86", "#2d765f", "#735c2b", "#6a3d68", "#65402e"];
@@ -175,4 +176,51 @@ export function PointRadialRing({ pointId }: { pointId: string }) {
   ];
 
   return <Donut items={items} centerLabel={`#${index + 1}`} />;
+}
+
+/** 相机 PATH 中间点环形菜单：轻点唤起，提供「折线 / 曲线」切换与删除（与人物路径点一致）。 */
+export function CameraPointRadialRing({ pointId }: { pointId: string }) {
+  const state = useDirectorStore((s) => s.state);
+  const toggleCurve = useDirectorStore((s) => s.toggleCameraPathCurve);
+  const deleteCameraPathPoint = useDirectorStore((s) => s.deleteCameraPathPoint);
+  const closeRing = useDirectorStore((s) => s.closeRing);
+
+  const move = state.cameraMoves.find((m) => (m.pathPoints ?? []).some((p) => p.id === pointId));
+  const points = move?.pathPoints ?? [];
+  const index = points.findIndex((p) => p.id === pointId);
+  // 首尾是端点，不能转曲线 / 删除（删了路径就断了）；菜单只对中间点开放。
+  const isMiddle = index > 0 && index < points.length - 1;
+  if (!move || !isMiddle) return null;
+
+  const point = points[index];
+  const isArc = point.shape === "ARC";
+  const eligible = camCurveEligible(points, index);
+
+  const items: RingItem[] = [
+    {
+      key: "toggle",
+      label: isArc ? "LINE" : "CURVE",
+      tip: !eligible
+        ? "相邻已是曲线，无法再转为曲线（避免连续三个弯点）"
+        : isArc
+          ? "转回折线（LINE）"
+          : "把这个中间点转成曲线（ARC）",
+      color: SECTOR_COLORS[0],
+      disabled: !eligible,
+      // 切换后菜单保持打开：标签会在 CURVE / LINE 之间翻转，方便来回试。
+      onClick: () => toggleCurve(move.id, pointId),
+    },
+    {
+      key: "delete",
+      label: "DEL",
+      tip: "删除这个相机路径点",
+      color: DELETE_COLOR,
+      onClick: () => {
+        closeRing();
+        deleteCameraPathPoint(move.id, pointId);
+      },
+    },
+  ];
+
+  return <Donut items={items} centerLabel={`#${index}`} />;
 }
