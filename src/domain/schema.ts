@@ -14,6 +14,14 @@ export type AssetCategory =
   | "nature"
   | "prop";
 
+/** 动物物种：决定使用哪个 GLB 模型。来源见 `engine/animalModels.ts`。 */
+export type AnimalSpecies =
+  | "parrot" | "flamingo" | "stork" | "pigeon" // 鸟
+  | "horse" // 马
+  | "dog" | "wolf" // 犬科（狗 / 狼）
+  | "cat" // 猫
+  | "fish"; // 鱼
+
 /** agent = 可运动、可作目标；set = 静态环境（遮挡 + 障碍）。 */
 export type AssetRole = "agent" | "set";
 
@@ -95,6 +103,8 @@ export interface DirectorObject {
   /** 默认体块尺寸。 */
   footprint: Footprint;
   color: string;
+  /** animal 类资产的物种（决定 GLB 模型）；非 animal 留空。 */
+  species?: AnimalSpecies;
   /** 锁定后不可通过拖拽改变位置（防误触）；仍可点选以便解锁。 */
   locked?: boolean;
   /** human 类资产的静态姿势基线（本地欧拉角）；缺省 = 标准站姿。 */

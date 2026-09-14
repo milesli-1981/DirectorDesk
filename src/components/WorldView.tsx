@@ -18,6 +18,7 @@ import { baseHeading, formationForwardShift, formationSlotOf, objectFacing, obje
 import { actionPoseAt, staticPoseWeight } from "../engine/actionPose";
 import { MODEL_CONFIG } from "../engine/modelConfig";
 import { HumanoidGLB, ModelBoundary } from "./HumanoidModel";
+import { animalModelOf } from "../engine/animalModels";
 import {
   activeCameraMove,
   computeFrame,
@@ -265,7 +266,9 @@ function ActorView({ objectId }: { objectId: string }) {
     // GLB 骨骼动画自带起伏，不再叠加，避免双重弹跳。
     phaseRef.current += delta * speed * 2.6;
     const intensity = Math.min(1, speed / 2.6);
-    const useGlb = object.category === "human" && !!MODEL_CONFIG.human;
+    const useGlb =
+      (object.category === "human" && !!MODEL_CONFIG.human) ||
+      (object.category === "animal" && !!animalModelOf(object.species));
     if (bodyRef.current) {
       bodyRef.current.position.y = useGlb
         ? 0
@@ -295,10 +298,16 @@ function ActorView({ objectId }: { objectId: string }) {
       </mesh>
     );
 
-  // human 且配置了模型 → GLB 骨骼动画；加载中 / 失败都回退到方块简模。
-  const modelConfig = MODEL_CONFIG.human;
+  // 配置了 GLB 模型的类别（human / 带物种的动物）→ 骨骼动画；
+  // 加载中 / 失败都回退到方块简模。动物无物种或未配置模型时仍是方块。
+  const modelConfig =
+    object.category === "human"
+      ? MODEL_CONFIG.human
+      : object.category === "animal"
+        ? animalModelOf(object.species)?.config
+        : undefined;
   const body =
-    object.category === "human" && modelConfig ? (
+    modelConfig ? (
       <ModelBoundary fallback={blockBody}>
         <Suspense fallback={blockBody}>
           <HumanoidGLB

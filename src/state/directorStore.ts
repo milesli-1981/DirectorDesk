@@ -34,7 +34,9 @@ import { contentEndTime } from "../engine/timeline";
 import { normalizeCameraKeys, normalizeEase, normalizeSpeedKeys } from "../engine/ease";
 import { ASSET_PRESETS } from "../engine/assetPresets";
 import { separateSetAsset } from "../engine/collision";
+import { ANIMAL_MODELS, DEFAULT_ANIMAL_SPECIES } from "../engine/animalModels";
 import {
+  AnimalSpecies,
   AssetCategory,
   DirectorObject,
   FORMATION_MORPH_SECONDS,
@@ -323,7 +325,7 @@ interface DirectorStore {
   reorderObject: (dragId: string, targetId: string) => void;
   /** 锁定 / 解锁资产：锁定后不可通过拖拽移动位置（防误触），仍可点选以便解锁。 */
   toggleLock: (id: string) => void;
-  addAsset: (category: AssetCategory, at?: { x: number; z: number }) => void;
+  addAsset: (category: AssetCategory, at?: { x: number; z: number }, species?: AnimalSpecies) => void;
   /**
    * 拖入一个「团队 Group」：一次生成 count 个同类资产并建组，整队共用一条路线
    * （锚点 = members[0]），队员按 formation 跟随。
@@ -333,6 +335,7 @@ interface DirectorStore {
     count: number,
     formation: FormationKind,
     at?: { x: number; z: number },
+    species?: AnimalSpecies,
   ) => void;
   updateAsset: (id: string, patch: Partial<DirectorObject>) => void;
   removeAsset: (id: string) => void;
@@ -910,10 +913,12 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         };
       }),
 
-    addAsset: (category, at) => {
+    addAsset: (category, at, species) => {
       const store = get();
       const { state } = store;
       const preset = ASSET_PRESETS[category];
+      // 动物：用物种定义覆盖默认体块 / 颜色（缺省物种走注册表默认）。
+      const animal = category === "animal" ? ANIMAL_MODELS[species ?? DEFAULT_ANIMAL_SPECIES] : undefined;
       let count = state.objects.filter((o) => o.category === category).length + 1;
       let id = `AST_${category.toUpperCase()}_${String(count).padStart(2, "0")}`;
       while (state.objects.some((o) => o.id === id)) {
@@ -939,8 +944,9 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         x: spawnX,
         z: spawnZ,
         rotation: 0,
-        footprint: { ...preset.footprint },
-        color: preset.color,
+        footprint: animal ? { ...animal.footprint } : { ...preset.footprint },
+        color: animal ? animal.color : preset.color,
+        ...(animal ? { species: animal.species } : {}),
       };
       // set 资产落点需与已有环境资产分离，避免穿模（agent 可自由摆放）。
       const { x: placedX, z: placedZ } =
@@ -962,11 +968,13 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
      * 只给「组」设定一条路线——锚点（members[0]）承载它，其余队员由求解器按
      * formation 实时跟随（匀速保持编队、变速/变线弹簧回弹）。
      */
-    addGroupAt: (category, count, formation, at) => {
+    addGroupAt: (category, count, formation, at, species) => {
       const store = get();
       const { state } = store;
       const preset = ASSET_PRESETS[category];
       if (!preset) return;
+      // 动物团队：用物种定义覆盖默认体块 / 颜色（缺省物种走注册表默认）。
+      const animal = category === "animal" ? ANIMAL_MODELS[species ?? DEFAULT_ANIMAL_SPECIES] : undefined;
       const total = Math.max(1, Math.min(24, Math.round(count) || 1));
       const spacing = 1.3;
       const baseX = at ? Math.round(at.x * 10) / 10 : 0;
@@ -991,8 +999,9 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           x: Math.round((baseX + slot.right) * 10) / 10,
           z: Math.round((baseZ + slot.fwd) * 10) / 10,
           rotation: 0,
-          footprint: { ...preset.footprint },
-          color: preset.color,
+          footprint: animal ? { ...animal.footprint } : { ...preset.footprint },
+          color: animal ? animal.color : preset.color,
+          ...(animal ? { species: animal.species } : {}),
         });
         members.push(id);
       }

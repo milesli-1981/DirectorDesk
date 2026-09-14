@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useDirectorStore } from "../state/directorStore";
 import {
+  AnimalSpecies,
   CameraFraming,
   CameraMotionType,
   CameraSide,
@@ -27,6 +28,7 @@ import {
   SIDE_LABELS,
   VIEW_LABELS,
 } from "../domain/schema";
+import { ANIMAL_MODELS, ANIMAL_SPECIES } from "../engine/animalModels";
 import { EaseEditor } from "./EaseEditor";
 import { PoseCustomizeModal } from "./PoseCustomizeModal";
 import { clonePose, POSE_PRESETS, POSE_PRESET_NAMES } from "../engine/poses";
@@ -627,6 +629,28 @@ export function Inspector() {
                 <option value="set">set（环境 / 遮挡体）</option>
               </select>
             </Field>
+            {object.category === "animal" ? (
+              <Field label="Species 物种">
+                <select
+                  value={object.species ?? ""}
+                  onChange={(event) => {
+                    const sp = event.target.value as AnimalSpecies;
+                    const am = ANIMAL_MODELS[sp];
+                    updateAsset(object.id, {
+                      species: sp,
+                      footprint: { ...am.footprint },
+                      color: am.color,
+                    });
+                  }}
+                >
+                  {ANIMAL_SPECIES.map((sp) => (
+                    <option key={sp} value={sp}>
+                      {ANIMAL_MODELS[sp].label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            ) : null}
             {/* Rotation 只对环境（set）有意义：agent / human 的朝向由运动方向或 LOOK_AT 决定，
                 组成员更是由整队大方向统一给出，单独设它会被求解器覆盖，故不再提供。 */}
             {object.role === "set" ? (
