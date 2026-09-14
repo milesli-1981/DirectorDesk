@@ -18,7 +18,28 @@ import { blockingAssets, setRects } from "../src/engine/occlusion";
 import { placeObject, restingBaseY, Placement } from "../src/engine/place";
 import { effectiveState } from "../src/engine/worldMode";
 import { raycastGround, rayObjectBox, topSlopeDeg } from "../src/engine/raycast";
-import { DirectorObject, DirectorState } from "../src/domain/schema";
+import {
+  jumpReach,
+  jumpReachOf,
+  speedScale,
+  classifyGap,
+  dropLimit,
+  checkJumpArc,
+  checkClimb,
+  sampleArcHits,
+  standingAt,
+} from "../src/engine/jump";
+import {
+  arcHeightAt,
+  arcAtU,
+  arcVerticalSpeed,
+  arcIsFlat,
+  runupAdjusted,
+  runupMarginU,
+  JUMP_EASE,
+} from "../src/engine/arc";
+import { pathHeightAt, segmentProgressAt, arcActive } from "../src/engine/pathHeight";
+import { DirectorObject, DirectorState, MoveSegment, Locomotion } from "../src/domain/schema";
 
 let pass = 0;
 let fail = 0;
@@ -66,6 +87,39 @@ function actor(id: string, x: number, z: number, baseY?: number): DirectorObject
 
 function scene(objects: DirectorObject[], worldMode?: "planar" | "terrain"): DirectorState {
   return { ...createBlankState(), objects, ...(worldMode ? { worldMode } : {}) };
+}
+
+/** 建一个 MOVE 段（直线，默认 1 秒，线性缓动）。 */
+function seg(
+  id: string,
+  object: string,
+  from: [number, number],
+  to: [number, number],
+  extra?: Partial<MoveSegment>,
+): MoveSegment {
+  return {
+    id,
+    type: "MOVE",
+    object,
+    startX: from[0],
+    startZ: from[1],
+    endX: to[0],
+    endZ: to[1],
+    points: [],
+    timeStart: 0,
+    timeEnd: 1,
+    ease: [0, 0, 1, 1],
+    ...extra,
+  };
+}
+
+/** 一个带段 + 可选弧线的场景。 */
+function sceneWith(
+  objects: DirectorObject[],
+  segments: MoveSegment[],
+  worldMode?: "planar" | "terrain",
+): DirectorState {
+  return { ...scene(objects, worldMode), segments };
 }
 
 console.log("\n[1] 几何基元");
@@ -615,6 +669,190 @@ console.log("\n[18] 遮挡的 3D 化（高处掠过 / 桥下穿过）");
     blockingAssets(flatWall, { x: 0, z: 8 } as { x: number; z: number }, { x: 0, z: 0 }).length,
     1,
   );
+}
+
+console.log("\n[20] 跳跃包络 reach(Δh) = R/2·(1+√(1−Δh/H))");
+{
+  // human 默认旋钮：H = 0.9、R = 2.5。
+  const H = 0.9;
+  const R = 2.5;
+  // 性质表（docs/3d/02 §3）——四个都手算过：
+  //   Δh = 0  → R/2·(1+1) = R
+  //   Δh = +H → R/2·(1+0) = R/2
+  //   Δh = −H → R/2·(1+√2) ≈ 1.2071·R
+  check("Δh = 0（平地基准）→ R", Math.round(jumpReach(0, H, R) * 1e6) / 1e6, R);
+  check("Δh = +H（跳到极限高度）→ R/2", Math.round(jumpReach(H, H, R) * 1e6) / 1e6, R / 2);
+  check(
+    "Δh = −H（往下跳一个身位）→ ≈ 1.2071·R",
+    Math.round((jumpReach(-H, H, R) / R) * 1e4) / 1e4,
+    Math.round((0.5 * (1 + Math.SQRT2)) * 1e4) / 1e4,
+  );
+  check("Δh > H（高差超能力）→ 不可达 0", jumpReach(H + 0.01, H, R), 0);
+  // 单调递减：逐点严格下降。
+  let mono = true;
+  let prev = Infinity;
+  for (let dh = -2; dh <= H; dh += 0.1) {
+    const r = jumpReach(dh, H, R);
+    if (!(r < prev)) mono = false;
+    prev = r;
+  }
+  check("单调递减（Δh 越大跳得越近）", mono, true);
+  // 不会跳的主体（H = 0）恒 0。
+  check("H = 0（不会跳）→ 恒 0", jumpReach(0, 0, R), 0);
+  // 落差越大摔得越远：Δh = −0.9 的 reach 必须大于 Δh = −0.3 的。
+  check("落差越大摔得越远", jumpReach(-H, H, R) > jumpReach(-0.3, H, R), true);
+}
+
+console.log("\n[21] 三种垂直弧线的形状（parabola / fall / climb）");
+{
+  // parabola：顶点在 s=0.5，高度 = groundAtStart + apex。
+  const para = { mode: "parabola" as const, apex: 0.9 };
+  check("parabola：起步 s=0 → 地面", arcHeightAt(para, 0, 0, 0.9), 0);
+  check("parabola：顶点 s=0.5 → ground + apex", arcHeightAt(para, 0.5, 0, 0.9), 0.9);
+  check("parabola：落地 s=1 → 地面", arcHeightAt(para, 1, 0, 0.9), 0);
+  check("parabola：对称（s=0.25 与 s=0.75 同高）", arcHeightAt(para, 0.25, 0, 0.9) === arcHeightAt(para, 0.75, 0, 0.9), true);
+
+  // fall：s² 加速下坠 —— s=0.5 只走完 1/4 的落差（不是线性的一半）。
+  const fall = { mode: "fall" as const };
+  check("fall：s=0 → 起跳面", arcHeightAt(fall, 0, 3, 0), 3);
+  check("fall：s=1 → 落点面", arcHeightAt(fall, 1, 3, 0), 0);
+  check("fall：s=0.5 → 1/4 落差（加速感，非线性）", arcHeightAt(fall, 0.5, 3, 0), 2.25);
+  // 加速：前半段下降量 < 后半段下降量。
+  check(
+    "fall：后半段降得更多（加速）",
+    arcHeightAt(fall, 0.5, 3, 0) - arcHeightAt(fall, 1, 3, 0) >
+      arcHeightAt(fall, 0, 3, 0) - arcHeightAt(fall, 0.5, 3, 0),
+    true,
+  );
+
+  // climb：L 形折线 —— 两端水平，中段竖直。
+  const climb = { mode: "climb" as const };
+  check("climb：s=0 还在起始面", arcHeightAt(climb, 0, 0, 1.6), 0);
+  check("climb：s=0.2 仍水平（竖直段前）", arcHeightAt(climb, 0.2, 0, 1.6), 0);
+  check("climb：s=0.8 已上到落点面", arcHeightAt(climb, 0.8, 0, 1.6), 1.6);
+  check("climb：中点约在竖直段中（smoothstep 0.5）", Math.round(arcHeightAt(climb, 0.5, 0, 1.6) * 1e6) / 1e6, 0.8);
+  check("climb：单调不降", arcHeightAt(climb, 0.45, 0, 1.6) <= arcHeightAt(climb, 0.55, 0, 1.6), true);
+
+  // arcAtU：整条路径里程映射（区间缺省 0..1）。
+  check("arcAtU：u=0.5 落到弧顶", arcAtU(para, 0.5, 0, 0.9), 0.9);
+  check("arcAtU：区间 [0,0.5] 内 u=0.25 → s=0.5 顶点", arcAtU({ ...para, from: 0, to: 0.5 }, 0.25, 0, 0.9), 0.9);
+  // arcIsFlat：
+  check("arcIsFlat：apex=0 的抛物线算平", arcIsFlat({ mode: "parabola", apex: 0 }, 0, 0), true);
+  check("arcIsFlat：起落同高的 fall 算平", arcIsFlat({ mode: "fall" }, 2, 2), true);
+  check("arcIsFlat：有顶高的抛物线不算平", arcIsFlat(para, 0, 0.9), false);
+  // 竖直速度符号：上升为正、下降为负。
+  check("parabola：前半段竖直速度 > 0", arcVerticalSpeed(para, 0.25, 0, 0.9) > 0, true);
+  check("parabola：后半段竖直速度 < 0", arcVerticalSpeed(para, 0.75, 0, 0.9) < 0, true);
+}
+
+console.log("\n[22] 校验三条 + 落地 / 轨迹 / 助跑 + planar 退化");
+{
+  // 注意：locomotionOf 在 planar 下会整体退化成 PLANAR_LOCOMOTION（maxStep 0、不会跳），
+  // 所以这里必须建 **terrain** 场景才能拿到人 / 车的真实能力表。§17 踩过同一个坑。
+  const humanObj = actor("A", 0, 0);
+  const vehicleObj = { ...actor("V", 0, 0), category: "vehicle" as const };
+  const human = locomotionOf(scene([humanObj], "terrain"), humanObj);
+  const vehicle = locomotionOf(scene([vehicleObj], "terrain"), vehicleObj);
+  // ③ 校验三条（docs/3d/02 §4）：
+  // 弧顶低于落点 → 自动抬到 Δh，并报 issue。
+  const low = checkJumpArc({ dh: 0.6, dx: 1.0, apex: 0.3, loco: human });
+  check("校验①：弧顶 0.3 < 落点 0.6 → 报 apex-below-landing", low.issues.some((i) => i.code === "apex-below-landing"), true);
+  check("校验①：并自动把顶点抬到 Δh", low.apex, 0.6);
+  // 顶点超能力 → apex-over-capability（不可自动修正）。
+  const over = checkJumpArc({ dh: 0.6, dx: 1.0, apex: 3.0, loco: human });
+  check("校验②：顶点 3.0 > H 0.9 → 报 apex-over-capability", over.issues.some((i) => i.code === "apex-over-capability"), true);
+  // 跨度超包络：Δh=0 时 reach = R = 2.5，dx=3.0 跳不过去。
+  const far = checkJumpArc({ dh: 0, dx: 3.0, apex: 0.9, loco: human });
+  check("校验③：跨度 3.0 > 包络 2.5 → 报 span-too-far", far.issues.some((i) => i.code === "span-too-far"), true);
+  // 全部合法 → ok。
+  const good = checkJumpArc({ dh: 0.3, dx: 1.5, apex: 0.6, loco: human });
+  check("三条全过 → ok", good.ok, true);
+  check("三条全过 → 无 issue", good.issues.length, 0);
+
+  // 助跑缩放：站着跳只有一半 —— speedRatio 0 → reach ×0.5。
+  const idle = checkJumpArc({ dh: 0, dx: 2.0, apex: 0.9, loco: human, speedRatio: 0 });
+  check("助跑：无速度 → 有效跳远减半（1.25）", Math.round(idle.reach * 1e6) / 1e6, 1.25);
+  check("助跑：无速度 → 跨 2.0m 跳不过去", idle.issues.some((i) => i.code === "span-too-far"), true);
+  check("助跑：无速度 → 报 needsRunup", idle.needsRunup, true);
+  check("助跑：全速 → needsRunup false", checkJumpArc({ dh: 0, dx: 2.0, apex: 0.9, loco: human, speedRatio: 1 }).needsRunup, false);
+  check("speedScale：0 → 0.5", speedScale(0), 0.5);
+  check("speedScale：1 → 1", speedScale(1), 1);
+  check("speedScale：夹取越界", speedScale(5), 1);
+
+  // 分档判定（阈值挂在主体上）。
+  check("classifyGap：0 → flat", classifyGap(0, human), "flat");
+  check("classifyGap：+0.3（≤ maxStep）→ step", classifyGap(0.3, human), "step");
+  check("classifyGap：+0.6（> step，≤ H）→ jump", classifyGap(0.6, human), "jump");
+  check("classifyGap：+1.2（> H，≤ climb 1.6）→ climb", classifyGap(1.2, human), "climb");
+  check("classifyGap：+3.0（超全部）→ blocked", classifyGap(3.0, human), "blocked");
+  check("classifyGap：−0.3（≤ step）→ step", classifyGap(-0.3, human), "step");
+  check("classifyGap：−1.5（在 dropLimit 1.9 内）→ drop", classifyGap(-1.5, human), "drop");
+  check("classifyGap：0.3 台阶对人 step", classifyGap(0.3, human), "step");
+  check("classifyGap：0.3 台阶对车 blocked（车 maxStep 0.15）", classifyGap(0.3, vehicle), "blocked");
+  check("dropLimit：车 = maxStep（不会跳）", dropLimit(vehicle), vehicle.maxStep);
+
+  // 攀爬校验：因为盒的侧面永远竖直，只要有盒就给抓手。
+  check("攀爬：1.2m 贴墙 → 无 issue", checkClimb(1.2, 0.3, true, human).length, 0);
+  check("攀爬：2.0m 超能力 → 报错", checkClimb(2.0, 0.3, true, human).length > 0, true);
+  check("攀爬：坡道无抓手 → 报错", checkClimb(1.2, 0.3, false, human).some((i) => i.code === "hits-geometry"), true);
+  check("攀爬：不会爬的主体 → 报错", checkClimb(1.2, 0.3, true, vehicle).length > 0, true);
+
+  // 轨迹相交（§7a）：跳过一堵 0.5m 高、位于路径中点的墙，但弧顶只有 0.4 → 撞墙。
+  const wall = box("WALL", 0, 0, 1, 0.4, 0.5); // 位于 (0,0)，高 0.5
+  const moveA = actor("A", -2, 0);
+  const st1 = sceneWith([moveA, wall], [
+    seg("S1", "A", [-2, 0], [2, 0], { arc: { mode: "parabola", apex: 0.4 } }),
+  ], "terrain");
+  const pathAt = (s: number) => ({ x: -2 + 4 * s, z: 0 });
+  const hitLow = sampleArcHits(st1, "A", pathAt, (s) => arcHeightAt({ mode: "parabola", apex: 0.4 }, s, 0, 0.5));
+  check("轨迹相交：弧顶 0.4 撞上 0.5m 墙", hitLow?.object.id, "WALL");
+  // 抬高到 0.9 就掠过去了。
+  const hitHigh = sampleArcHits(st1, "A", pathAt, (s) => arcHeightAt({ mode: "parabola", apex: 0.9 }, s, 0, 0.5));
+  check("轨迹相交：弧顶 0.9 从墙顶掠过", hitHigh, null);
+
+  // 落点站得住（§7b）：终点处有个 1m 平台 → 站到 1。
+  const plat = box("P", 2, 0, 2, 2, 1);
+  const st2 = sceneWith([actor("A", -2, 0), plat], [seg("S2", "A", [-2, 0], [2, 0])], "terrain");
+  check("落点站得住：终点在 1m 平台上 → 1", standingAt(st2, "A", 2, 0), 1);
+  check("落点站得住：终点在空地 → 基准面 0", standingAt(st2, "A", -2, 0), 0);
+
+  // runup 提前量：起跳点应早于边缘、落点应晚于边缘。
+  check("runupMarginU：总里程 4m → 0.25/4", runupMarginU(4), 0.0625);
+  check("runupMarginU：总里程 0 → 0（防除零）", runupMarginU(0), 0);
+  const adj = runupAdjusted({ mode: "parabola", apex: 0.9, from: 0, to: 1 }, 0.1);
+  check("runup：起跳点内收（from > 0）", adj.from > 0, true);
+  check("runup：落点内收（to < 1）", adj.to < 1, true);
+
+  // planar 退化：段有弧线，但 planar 且未标 arcAlways → 弧线不生效，高度回到地面派生。
+  const planarArc = { ...seg("S3", "A", [-2, 0], [2, 0], { arc: { mode: "parabola", apex: 0.9 } }) };
+  const stPlanar = sceneWith([actor("A", -2, 0)], [planarArc], "planar");
+  check("planar：arc 未生效（arcActive false）", arcActive(stPlanar, planarArc), false);
+  check("planar：高度仍由地面派生 → 0", pathHeightAt(stPlanar, actor("A", -2, 0), 0, 0, 0.5), 0);
+  // arcAlways 显式打开 → 生效。
+  const planarAlways = { ...seg("S4", "A", [-2, 0], [2, 0], { arc: { mode: "parabola", apex: 0.9 }, arcAlways: true }) };
+  const stAlways = sceneWith([actor("A", -2, 0)], [planarAlways], "planar");
+  check("planar + arcAlways：弧线生效（arcActive true）", arcActive(stAlways, planarAlways), true);
+  check(
+    "planar + arcAlways：中点高度 = 0.9",
+    Math.round(pathHeightAt(stAlways, actor("A", -2, 0), 0, 0, 0.5) * 1e6) / 1e6,
+    0.9,
+  );
+
+  // terrain + 弧线：pathHeightAt 走弧线（跳跃中的人真的离地了）。
+  const jumpSeg = seg("S5", "A", [-2, 0], [2, 0], { arc: { mode: "parabola", apex: 0.9 } });
+  const stJump = sceneWith([actor("A", -2, 0)], [jumpSeg], "terrain");
+  check("terrain + 弧线：起跳瞬间在地面", pathHeightAt(stJump, actor("A", -2, 0), -2, 0, 0), 0);
+  check("terrain + 弧线：中段离地到 0.9", Math.round(pathHeightAt(stJump, actor("A", -2, 0), 0, 0, 0.5) * 1e6) / 1e6, 0.9);
+  check("terrain + 弧线：落地回到地面", Math.round(pathHeightAt(stJump, actor("A", -2, 0), 2, 0, 1) * 1e6) / 1e6, 0);
+  // 无弧线的 terrain 段：仍是瞬时对齐（老行为）。
+  const plainSeg = seg("S6", "A", [-2, 0], [2, 0]);
+  const stPlain = sceneWith([actor("A", -2, 0)], [plainSeg], "terrain");
+  check("terrain 无弧线：仍走地面派生（老路径）", pathHeightAt(stPlain, actor("A", -2, 0), 0, 0, 0.5), 0);
+
+  // JUMP_EASE 是准线性（u=0 处有速度）—— 与默认 cubic-bezier(0,0,1,1) 的零斜率对比。
+  check("JUMP_EASE 首控制点 y 不为 0（起跳有水平速度）", JUMP_EASE[1] > 0, true);
+  // segmentProgressAt：线性缓动 + 时间中点 → 0.5。
+  check("segmentProgressAt：线性中点 = 0.5", Math.round(segmentProgressAt(plainSeg, 0.5) * 1e6) / 1e6, 0.5);
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败\n`);

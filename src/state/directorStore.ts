@@ -27,6 +27,7 @@ import {
   ActionKind,
   Pose,
   Vec2,
+  VerticalArc,
   ViewMode,
   WorldMode,
 } from "../domain/schema";
@@ -37,6 +38,7 @@ import { contentEndTime } from "../engine/timeline";
 import { normalizeCameraKeys, normalizeEase, normalizeSpeedKeys } from "../engine/ease";
 import { ASSET_PRESETS } from "../engine/assetPresets";
 import { placeObject } from "../engine/place";
+import { JUMP_EASE } from "../engine/arc";
 import { ANIMAL_MODELS, DEFAULT_ANIMAL_SPECIES } from "../engine/animalModels";
 import {
   AnimalSpecies,
@@ -435,6 +437,15 @@ interface DirectorStore {
   setSegmentEase: (segmentId: string, ease: EaseCurve) => void;
   /** 写入多段速度曲线关键点（null / 少于 2 个点 = 退回单段 cubic-bezier）。 */
   setSegmentSpeedKeys: (segmentId: string, keys: SpeedKey[] | null) => void;
+  /**
+   * 写入 / 清除垂直弧线（跳跃 / 落差 / 攀爬）。
+   *
+   * 传 `null` 表示清除弧线（退回"高度由地面派生"的瞬时对齐）。
+   * 写入弧线时**同时把该段 ease 覆盖成准线性**（`JUMP_EASE`）——
+   * 默认 cubic-bezier 在 u=0 处斜率为 0，人会在原地弹起原地落下，看起来不像跳跃。
+   * 这是"跳跃段内强制准线性水平速度"落地为**一个原子 store 动作**的地方（docs/3d/02 §5）。
+   */
+  setSegmentArc: (segmentId: string, arc: VerticalArc | null) => void;
 
   addCamera: () => void;
   addDroneCamera: () => void;
@@ -1967,6 +1978,11 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
 
     setSegmentSpeedKeys: (segmentId, keys) =>
       patchSegment(segmentId, { speedKeys: normalizeSpeedKeys(keys) ?? undefined }),
+
+    setSegmentArc: (segmentId, arc) =>
+      // 有弧线 → 准线性 ease（保证起跳瞬间有水平速度）；清除弧线 → 恢复默认缓动由调用方决定，
+      // 这里只把 arc 抹掉、ease 留原样（免得"取消跳跃"把作者调过的手感也一起改掉）。
+      patchSegment(segmentId, arc ? { arc, ease: [...JUMP_EASE] } : { arc: undefined }),
 
     addCamera: () => {
       const store = get();

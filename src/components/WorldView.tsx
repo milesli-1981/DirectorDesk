@@ -29,6 +29,7 @@ import {
   standingHeightFor,
 } from "../engine/ground";
 import { raycastGround } from "../engine/raycast";
+import { pathHeightAt, arcPolyline } from "../engine/pathHeight";
 import { actionPoseAt, staticPoseWeight } from "../engine/actionPose";
 import { MODEL_CONFIG } from "../engine/modelConfig";
 import { HumanoidGLB, ModelBoundary } from "./HumanoidModel";
@@ -457,9 +458,9 @@ function ActorView({ objectId }: { objectId: string }) {
     speedRef.current = speed;
 
     if (groupRef.current) {
-      // y 由几何派生（站到脚下够得着的最高的面上），而非路径。
-      // planar 模式下这就是恒 0 —— 与扩展前的表现逐像素一致。
-      const groundY = standingHeightFor(state, object, position.x, position.z);
+      // y 由几何派生 —— 有弧线的段走弧线（跳跃 / 落差 / 攀爬），否则站到脚下够得着的最高的面上。
+      // planar 且无弧线时这就是恒 0 —— 与扩展前的表现逐像素一致。
+      const groundY = pathHeightAt(state, object, position.x, position.z, currentTime);
       groupRef.current.position.set(position.x, groundY, position.z);
       const target =
         distance > 1e-4 ? Math.atan2(dx, dz) : objectFacing(state, objectId, currentTime);
@@ -815,8 +816,11 @@ function SegmentPaths() {
         }
         // 路径线贴地走：与演员的渲染高度、标记的拾取高度**共用 pathGroundAt**，
         // 否则会出现"人站在平台上、蓝线还留在地面"的割裂（以及看着在那里却点不中）。
+        // 有弧线时改用 arcPolyline —— 线跟着弓形轨迹鼓起来，"跳过去"这件事一眼可见。
         const groundAt = (x: number, z: number) => pathGroundAt(state, segment.object, x, z);
-        const points = pathPolyline(segment, groundAt);
+        const points = segment.arc
+          ? arcPolyline(state, segment, segment.object)
+          : pathPolyline(segment, groundAt);
         if (points.length < 2) return null;
         // 障碍感知「导航层」：环境（set 资产）如何重塑该 segment 的行动路线（橙色虚线）。
         // 与运动求解共用 segmentRoutePoints **与同一份障碍集合**，因此这条线就是 agent

@@ -196,6 +196,28 @@ export interface CameraPathPoint {
 }
 
 /**
+ * 垂直弧线：把「沿路径走」的归一化里程映射到高度。
+ *
+ * 与水平运动**完全解耦** —— 路径的水平速度曲线（`ease` / `speedKeys`）不需要为跳跃做任何改动，
+ * 跳跃自动跟着路径走向走。这是"垂直三级权威"的直接收益（见 docs/3d/02 §4）。
+ *
+ * 关键设计：**顶点高度 `apex` 是作者旋钮**，不是从物理初速反推的。
+ * 系统只做可行性校验（`engine/jump.ts` 的 `checkJumpArc`），不替作者决定轨迹。
+ */
+export interface VerticalArc {
+  /** parabola = 跳上/跳过（抛物线）；fall = 落差下落（加速下坠）；climb = 攀爬（L 形贴墙）。 */
+  mode: "parabola" | "fall" | "climb";
+  /** 区间起点（归一化里程 0..1）。缺省 0。 */
+  from?: number;
+  /** 区间终点（归一化里程 0..1）。缺省 1。 */
+  to?: number;
+  /** 顶点相对「起跳点地面」的高度（米），作者拖拽设定。仅 `parabola` 用。 */
+  apex?: number;
+  /** 攀爬竖直段时长（秒）。缺省由攀爬速度推算，留作将来微调。 */
+  climbSeconds?: number;
+}
+
+/**
  * MOVE Segment = When + How to travel。
  * Segment 是唯一的时间/空间运动来源（Single Source）。
  */
@@ -213,6 +235,13 @@ export interface MoveSegment {
   ease: EaseCurve;
   /** 多段速度曲线关键点（≥2 时接管时序）。为空 = 单段 cubic-bezier。 */
   speedKeys?: SpeedKey[];
+  /** 垂直弧线（跳跃 / 落差 / 攀爬）。缺省 = 无弧线，高度由地面派生（瞬时对齐）。 */
+  arc?: VerticalArc;
+  /**
+   * 本段在 planar 世界也强制按弧线走。缺省 = 只有 terrain 世界才认弧线。
+   * 与 Shift 覆盖同理：这是**作者显式意图**，不是世界模式的替代品。
+   */
+  arcAlways?: boolean;
 }
 
 /** 相邻两条 leg 的交接点模式。 */

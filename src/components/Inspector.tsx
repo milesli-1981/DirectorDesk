@@ -36,7 +36,20 @@ import { moveChannelsAt, solveCamera } from "../engine/cameraSolver";
 import { CAMERA_CHANNELS, CameraChannel } from "../engine/ease";
 import { axisSide, cameraAxis } from "../engine/axis";
 import { waypointKeyframes } from "../engine/path";
+import { locomotionOf } from "../engine/locomotion";
+import { supportUnder } from "../engine/ground";
+import { checkJumpArc, classifyGap, type GapKind } from "../engine/jump";
 import { LockBadge } from "./LockBadge";
+
+/** 高差分档的中文标签（与 engine/jump.ts 的 GapKind 一一对应）。 */
+const GAP_LABELS: Record<GapKind, string> = {
+  flat: "平地 · 直接走过",
+  step: "台阶 · 自动迈上",
+  drop: "落差 · 加速下坠",
+  jump: "需跳跃 · 抛物线",
+  climb: "需攀爬 · 贴墙",
+  blocked: "不可达",
+};
 
 const ACTION_KINDS: ActionKind[] = [
   "stand",
@@ -323,6 +336,7 @@ export function Inspector() {
   const setSegmentEase = useDirectorStore((s) => s.setSegmentEase);
   const setCameraMoveEase = useDirectorStore((s) => s.setCameraMoveEase);
   const setSegmentSpeedKeys = useDirectorStore((s) => s.setSegmentSpeedKeys);
+  const setSegmentArc = useDirectorStore((s) => s.setSegmentArc);
   const setCameraMoveSpeedKeys = useDirectorStore((s) => s.setCameraMoveSpeedKeys);
   const setHandoffMode = useDirectorStore((s) => s.setHandoffMode);
   const setCameraJunctionMode = useDirectorStore((s) => s.setCameraJunctionMode);
@@ -457,6 +471,28 @@ export function Inspector() {
           onKeysChange: (keys: SpeedKey[] | null) => setCameraMoveSpeedKeys(move.id, keys),
         }
       : null;
+
+  /**
+   * 该段的高差诊断 + 弧线校验（Phase 4）。
+   * 只在选中 MOVE 段时算，且复用 `pathHeight` 的起落面语义，保证与渲染同源。
+   */
+  const arcInfo = useMemo(() => {
+    if (!segment) return null;
+    const owner = state.objects.find((o) => o.id === segment.object);
+    if (!owner || owner.role !== "agent") return null;
+    const loco = locomotionOf(state, owner);
+    const y0 = supportUnder(state, segment.startX, segment.startZ, Number.POSITIVE_INFINITY, 0, owner.id).y;
+    const y1 = supportUnder(state, segment.endX, segment.endZ, Number.POSITIVE_INFINITY, 0, owner.id).y;
+    const dh = y1 - y0;
+    const dx = Math.hypot(segment.endX - segment.startX, segment.endZ - segment.startZ);
+    const kind = classifyGap(dh, loco);
+    const arc = segment.arc;
+    let check: ReturnType<typeof checkJumpArc> | null = null;
+    if (arc && arc.mode === "parabola") {
+      check = checkJumpArc({ dh, dx, apex: arc.apex ?? Math.max(dh, 0), loco });
+    }
+    return { owner, loco, dh, dx, kind, arc, check, y0, y1 };
+  }, [segment, state]);
 
   // 用显示名（改名后即时联动），未命名的资产回退到 id。
   const title = camera
@@ -889,6 +925,101 @@ export function Inspector() {
           />
         ) : null}
       </div>
+
+      {/* 垂直弧线（跳跃 / 落差 / 攀爬）—— Phase 4。只在选中 MOVE 段且主体会动时出现。 */}
+      {arcInfo ? (
+        <div className="field">
+          <div className="lab">垂直弧线 · 跳跃 / 落差</div>
+          <p className="hint">
+            本段高差 <b>{arcInfo.dh >= 0 ? "+" : ""}{arcInfo.dh.toFixed(2)}m</b>、水平跨度{" "}
+            <b>{arcInfo.dx.toFixed(2)}m</b>。判定：{GAP_LABELS[arcInfo.kind]}。
+            {arcInfo.kind === "jump"
+              ? ` 在原地能跳 ${arcInfo.loco.maxJumpHeight.toFixed(2)}m、平地助跑跳远 ${arcInfo.loco.maxJumpReach.toFixed(2)}m 的前提下，这一点在包络内，可用抛物线跳过。`
+              : arcInfo.kind === "drop"
+                ? " 落差在可接受范围内，可用加速下坠。"
+                : arcInfo.kind === "climb"
+                  ? ` 高差超过跳跃高度但在攀爬能力 ${arcInfo.loco.maxClimbHeight.toFixed(2)}m 内，可贴墙攀爬。`
+                  : arcInfo.kind === "blocked"
+                    ? " ⚠ 超出该主体能力，走不过去也跳不过去。"
+                    : ""}
+          </p>
+          <div className="row">
+            <button
+              type="button"
+              className={`ghost-button${arcInfo.arc?.mode === "parabola" ? " on" : ""}`}
+              onClick={() => {
+                if (!segment) return;
+                if (arcInfo.arc?.mode === "parabola") {
+                  setSegmentArc(segment.id, null);
+                } else {
+                  const corrected = checkJumpArc({
+                    dh: arcInfo.dh,
+                    dx: arcInfo.dx,
+                    apex: Math.max(arcInfo.dh, Math.min(arcInfo.loco.maxJumpHeight, arcInfo.dh + 0.3)),
+                    loco: arcInfo.loco,
+                  });
+                  setSegmentArc(segment.id, { mode: "parabola", apex: corrected.apex });
+                }
+              }}
+            >
+              {arcInfo.arc?.mode === "parabola" ? "✕ 取消跳跃" : "⤴ 改为跳跃"}
+            </button>
+            <button
+              type="button"
+              className={`ghost-button${arcInfo.arc?.mode === "fall" ? " on" : ""}`}
+              disabled={arcInfo.dh >= 0}
+              onClick={() => {
+                if (!segment) return;
+                setSegmentArc(segment.id, arcInfo.arc?.mode === "fall" ? null : { mode: "fall" });
+              }}
+            >
+              {arcInfo.arc?.mode === "fall" ? "✕ 取消下坠" : "⤵ 改为下坠"}
+            </button>
+            {arcInfo.loco.maxClimbHeight > 0 ? (
+              <button
+                type="button"
+                className={`ghost-button${arcInfo.arc?.mode === "climb" ? " on" : ""}`}
+                disabled={arcInfo.dh <= 0}
+                onClick={() => {
+                  if (!segment) return;
+                  setSegmentArc(segment.id, arcInfo.arc?.mode === "climb" ? null : { mode: "climb" });
+                }}
+              >
+                {arcInfo.arc?.mode === "climb" ? "✕ 取消攀爬" : "🧗 改为攀爬"}
+              </button>
+            ) : null}
+          </div>
+          {arcInfo.arc?.mode === "parabola" ? (
+            <Field label="弧顶高度（相对起跳点）">
+              <input
+                type="range"
+                min={Math.max(0, arcInfo.dh)}
+                max={arcInfo.loco.maxJumpHeight}
+                step={0.05}
+                value={arcInfo.arc.apex ?? 0}
+                onChange={(event) => {
+                  if (!segment) return;
+                  setSegmentArc(segment.id, {
+                    mode: "parabola",
+                    apex: Number(event.target.value),
+                  });
+                }}
+              />
+              <span className="mono">{(arcInfo.arc.apex ?? 0).toFixed(2)}m / 上限 {arcInfo.loco.maxJumpHeight.toFixed(2)}m</span>
+            </Field>
+          ) : null}
+          {arcInfo.check && !arcInfo.check.ok ? (
+            <p className="hint" style={{ color: "var(--danger, #ff7b91)" }}>
+              {arcInfo.check.issues.map((i) => i.message).join("；")}
+            </p>
+          ) : null}
+          {arcInfo.check?.needsRunup ? (
+            <p className="hint" style={{ color: "var(--warn, #f0a35a)" }}>
+              ⚠ 起跳前没有助跑 —— 站着跳只能跳到一半远。建议在跳跃前留一段助跑。
+            </p>
+          ) : null}
+        </div>
+      ) : null}
 
       {camera ? (
         <>
