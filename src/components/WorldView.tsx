@@ -4,7 +4,7 @@ import { setCaptureCanvas } from "../engine/videoExport";
 import { Html, Line, OrbitControls, PerspectiveCamera } from "@react-three/drei";
 import * as THREE from "three";
 import { MarkerHover, useDirectorStore } from "../state/directorStore";
-import { AssetCategory, DirectorState, HandoffMode, JointName, MoveSegment, PathPoint, Pose, Vec2 } from "../domain/schema";
+import { AssetCategory, DirectorObject, DirectorState, Handoff, HandoffMode, JointName, MoveSegment, PathPoint, Pose, Vec2 } from "../domain/schema";
 import { pathChain } from "../engine/path";
 import {
   hitCameraRay,
@@ -17,6 +17,18 @@ import {
 } from "../engine/pick";
 import { nearestOnCamPath } from "../engine/cameraPath";
 import { baseHeading, formationForwardShift, formationSlotOf, objectFacing, objectPosition, routeObstacles } from "../engine/solver";
+import {
+  ENDPOINT_MARKER_LIFT,
+  FOLLOW_LINK_LIFT,
+  HANDOFF_BADGE_LIFT,
+  POINT_MARKER_LIFT,
+  objectBottom,
+  objectTop,
+  pathGroundAt,
+  snapElevation,
+  standingHeightFor,
+} from "../engine/ground";
+import { raycastGround } from "../engine/raycast";
 import { actionPoseAt, staticPoseWeight } from "../engine/actionPose";
 import { MODEL_CONFIG } from "../engine/modelConfig";
 import { HumanoidGLB, ModelBoundary } from "./HumanoidModel";
@@ -64,6 +76,10 @@ const ENDPOINT_PICK_PX = 26;
 /** 相机 PATH 路径点（含首尾端点）的屏幕命中半径（px）。 */
 const CAM_POINT_PICK_PX = 26;
 
+/** 高度手柄的标高吸附半径（世界米）：拖到另一个盒子的顶面附近就自动对齐。
+ *  没有它就只能靠落点自动吸附去堆叠，手工微调差几厘米就是穿模或悬空。 */
+const HEIGHT_SNAP = 0.35;
+
 /** 悬停标记是否已经是同一个：省掉每次 pointermove 都写一遍 store。 */
 function sameMarker(a: MarkerHover | null, b: MarkerHover | null): boolean {
   if (!a || !b) return a === b;
@@ -73,7 +89,20 @@ function sameMarker(a: MarkerHover | null, b: MarkerHover | null): boolean {
 type DragState =
   // start = 按下瞬间「真正会被移动的那个对象」的位置快照（团队成员时是锚点）。
   // 拖动一律按 start + 累计位移计算，绝不能拿上一帧的位置再叠加（那会指数级漂移）。
-  | { kind: "object"; id: string; moved: boolean; origin: Vec2; start: Vec2 }
+  // prev / layer 供「跨层重锚」用：射线命中的面在棱边处水平坐标会跳，见 dragTarget。
+  | {
+      kind: "object";
+      id: string;
+      moved: boolean;
+      origin: Vec2;
+      start: Vec2;
+      prev: Vec2;
+      layer: string;
+      /** 本次手势**真正会移动**的对象集合（团队成员时是整队）。
+       *  拾取时必须全部排除：它们正跟着指针走，若参与拾取就会命中"自己的顶面"，
+       *  每帧把自己再抬高一个身高 —— 表现为疯狂抖动、永远放不下来。见 `engine/raycast`。 */
+      movers: ReadonlySet<string>;
+    }
   // moved / origin 用于区分「轻点」与「拖动」：轻点唤起环形菜单，拖动则正常搬点。
   | { kind: "point"; segmentId: string; pointId: string; moved: boolean; origin: Vec2 }
   | { kind: "endpoint"; segmentId: string; which: "start" | "end" }
@@ -89,6 +118,16 @@ type DragState =
       moved: boolean;
       origin: Vec2;
       current: Vec2;
+    }
+  // 拖高度手柄改 baseY。按屏幕纵向位移折算世界高度，起点与折算率都在按下时锁定 ——
+  // 拖拽中途相机若被转走，手感会变但不会跳。
+  | {
+      kind: "height";
+      id: string;
+      startBaseY: number;
+      startClientY: number;
+      /** 该深度下 1 像素对应多少世界米。 */
+      worldPerPixel: number;
     };
 
 function groundPoint(event: ThreeEvent<PointerEvent>): Vec2 | null {
@@ -115,6 +154,68 @@ function planePointAtHeight(event: ThreeEvent<PointerEvent>, h: number): Vec2 | 
  *  拿它当拖拽目标就会把物体瞬间甩到画布外沿。超过此距离的点一律丢弃，
  *  让物体留在上一次有效位置 —— 宁可「这一帧拖不动」，也不要「飞出去」。 */
 const GROUND_HIT_MAX = 300;
+
+/**
+ * 拖拽目标点：光标射线命中的**那个面**（含高度与身份）。
+ *
+ * 为什么不能像扩展前那样只投到 y=0 平面：低机位下指着 3m 平台的顶面时，
+ * 平面投影落在平台**后面**的地上，落点反查得到 0 ——「明明指着平台，东西却掉到地上」。
+ *
+ * 面拾取自己也有代价：**水平坐标在棱边处会跳** `h / tan(俯角)`（30° 俯角下 h=3 就是 5.2m）。
+ * 所以调用方在**层发生变化的那一帧**把拖拽起点重锚一次（见 handleMove），
+ * 把跳变量吸收进 origin，物体就不会瞬移。
+ *
+ * planar 模式下 `raycastGround` 只返回 y=0 基准面，layer 恒为同一个值 ⇒
+ * 重锚分支永不触发，拖拽行为与扩展前逐帧一致。
+ *
+ * @param forceTerrain 本次拖拽强制按 3D 语义拾取（按住 Shift）。
+ *   注意它同时会影响 `layer` —— 所以在拖拽途中按下 / 松开 Shift 会走一次重锚，
+ *   把层切换带来的水平跳变吸收掉，盒子不会因为按了个键就飞出去。
+ * @param excludeIds 本次手势正在移动的对象集合（团队成员要全给）。
+ *   必须排掉，否则盒子会拾取到自己的顶面、每帧再抬高一次 —— 就是那个"疯狂抖动"。
+ */
+interface DragTarget {
+  x: number;
+  z: number;
+  layerY: number;
+  /** 层的身份（面所属对象 id；基准面用哨兵）。层变化 = 需要重锚。 */
+  layer: string;
+  /** 交点是否可信：近水平射线会给出极远的交点，那一帧不能用来拖动。 */
+  usable: boolean;
+}
+
+const GROUND_LAYER = "__ground__";
+
+function dragTarget(
+  event: ThreeEvent<PointerEvent>,
+  forceTerrain?: boolean,
+  excludeIds?: ReadonlySet<string>,
+): DragTarget | null {
+  const ray = event.ray;
+  if (ray) {
+    const hit = raycastGround(
+      useDirectorStore.getState().state,
+      ray,
+      forceTerrain,
+      excludeIds,
+    );
+    if (hit) {
+      const reach = Math.hypot(hit.x - ray.origin.x, hit.z - ray.origin.z);
+      return {
+        x: hit.x,
+        z: hit.z,
+        layerY: hit.y,
+        layer: hit.objectId ?? GROUND_LAYER,
+        usable: reach <= GROUND_HIT_MAX,
+      };
+    }
+    return null;
+  }
+  const fallback = groundPoint(event);
+  return fallback
+    ? { x: fallback.x, z: fallback.z, layerY: 0, layer: GROUND_LAYER, usable: true }
+    : null;
+}
 
 /** 地面交点是否可信：按到相机的距离判定，挡掉近水平射线产生的极远交点。 */
 function groundHitUsable(event: ThreeEvent<PointerEvent>, point: Vec2): boolean {
@@ -145,6 +246,67 @@ function capturePointer(event: ThreeEvent<PointerEvent>) {
   const native = event.nativeEvent;
   const element = native.target as (Element & { setPointerCapture?: (id: number) => void }) | null;
   element?.setPointerCapture?.(native.pointerId);
+}
+
+/* --------------------------------------------------------- Height handle */
+
+/**
+ * 高度手柄：选中 set 资产时，出现在它顶面上方的一条竖直杆 + 可拖把手。
+ *
+ * 为什么需要它：落点自动吸附只解决"把东西放到平台上"，解决不了"把它抬到某个精确标高"。
+ * 没有手柄时，人为抬高一个盒子只能去 Inspector 里敲数字 —— 在一个 3D 编辑器里，
+ * 这是最该用手拖的那一类操作。
+ *
+ * 只在 terrain 模式下渲染：planar 世界里没有"高度"这回事，多一个把手只会让人困惑。
+ * 读数用 DOM（`<Html>`）而不是画进场景 —— 它是编辑辅助，不该被录进导出视频
+ * （与 `NameTag` 特意用 WebGL sprite 的理由正好相反，见其注释）。
+ */
+function HeightHandle({
+  object,
+  onGrab,
+}: {
+  object: DirectorObject;
+  onGrab: (event: ThreeEvent<PointerEvent>, object: DirectorObject) => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+  const top = objectTop(object);
+  const poleBottom = top + 0.3;
+  const grip = top + 1.5;
+  const accent = hovered ? "#ffffff" : "#f0a35a";
+  return (
+    <group position={[object.x, 0, object.z]}>
+      <mesh position={[0, (poleBottom + grip) / 2, 0]}>
+        <cylinderGeometry args={[0.025, 0.025, grip - poleBottom, 8]} />
+        <meshBasicMaterial color={accent} transparent opacity={0.85} />
+      </mesh>
+      <mesh
+        position={[0, grip, 0]}
+        scale={hovered ? 1.25 : 1}
+        onPointerDown={(event) => {
+          event.stopPropagation();
+          onGrab(event, object);
+        }}
+        onPointerOver={() => setHovered(true)}
+        onPointerOut={() => setHovered(false)}
+      >
+        {/* 双箭头形状暗示"可上下拖"：上下两个锥体对接。 */}
+        <coneGeometry args={[0.16, 0.3, 12]} />
+        <meshBasicMaterial color={accent} />
+      </mesh>
+      <mesh position={[0, grip + 0.3, 0]} rotation={[Math.PI, 0, 0]}>
+        <coneGeometry args={[0.16, 0.3, 12]} />
+        <meshBasicMaterial color={accent} />
+      </mesh>
+      <Html
+        position={[0, grip + 0.85, 0]}
+        center
+        style={{ pointerEvents: "none" }}
+        zIndexRange={[28, 0]}
+      >
+        <span className="node-label height-readout">Y {top.toFixed(2)}</span>
+      </Html>
+    </group>
+  );
 }
 
 /* ------------------------------------------------------------------ Actors */
@@ -275,7 +437,7 @@ function ActorView({ objectId }: { objectId: string }) {
     // 静态环境资产：固定在摆放位置与朝向上，无运动。
     if (object.role === "set") {
       if (groupRef.current) {
-        groupRef.current.position.set(object.x, 0, object.z);
+        groupRef.current.position.set(object.x, objectBottom(object), object.z);
         groupRef.current.rotation.y = (object.rotation * Math.PI) / 180;
       }
       return;
@@ -295,7 +457,10 @@ function ActorView({ objectId }: { objectId: string }) {
     speedRef.current = speed;
 
     if (groupRef.current) {
-      groupRef.current.position.set(position.x, 0, position.z);
+      // y 由几何派生（站到脚下够得着的最高的面上），而非路径。
+      // planar 模式下这就是恒 0 —— 与扩展前的表现逐像素一致。
+      const groundY = standingHeightFor(state, object, position.x, position.z);
+      groupRef.current.position.set(position.x, groundY, position.z);
       const target =
         distance > 1e-4 ? Math.atan2(dx, dz) : objectFacing(state, objectId, currentTime);
       let diff = target - facingRef.current;
@@ -648,7 +813,10 @@ function SegmentPaths() {
             </group>
           );
         }
-        const points = pathPolyline(segment);
+        // 路径线贴地走：与演员的渲染高度、标记的拾取高度**共用 pathGroundAt**，
+        // 否则会出现"人站在平台上、蓝线还留在地面"的割裂（以及看着在那里却点不中）。
+        const groundAt = (x: number, z: number) => pathGroundAt(state, segment.object, x, z);
+        const points = pathPolyline(segment, groundAt);
         if (points.length < 2) return null;
         // 障碍感知「导航层」：环境（set 资产）如何重塑该 segment 的行动路线（橙色虚线）。
         // 与运动求解共用 segmentRoutePoints **与同一份障碍集合**，因此这条线就是 agent
@@ -656,7 +824,9 @@ function SegmentPaths() {
         // 否则会看到橙色线绕行、人却直穿过去。
         const rects = routeObstacles(state, segment.object);
         const route = segmentRoutePoints(segment, rects);
-        const routePoints = route.map((p) => [p.x, 0.13, p.z] as [number, number, number]);
+        const routePoints = route.map(
+          (p) => [p.x, groundAt(p.x, p.z) + 0.13, p.z] as [number, number, number],
+        );
         return (
           <group key={segment.id}>
             <Line points={points} color={active ? "#67a7ff" : "#35505f"} lineWidth={active ? 3 : 1.5} />
@@ -683,8 +853,10 @@ function OcclusionHighlights() {
   const targetId = resolved.move?.targetId ?? camera.targetId;
   if (!targetId) return null;
   const tgt = objectPosition(state, targetId, currentTime);
-  const camPos = { x: resolved.position[0], z: resolved.position[2] };
-  const targetPos = { x: tgt.x, z: tgt.z };
+  // 遮挡判定走 3D：用机位与目标的**真实高度**（resolved 已经给了 target 的 y）。
+  // 高机位从矮墙上方掠过、桥下的视线穿过桥体下方，都不再误报。
+  const camPos = { x: resolved.position[0], y: resolved.position[1], z: resolved.position[2] };
+  const targetPos = { x: tgt.x, y: resolved.target[1], z: tgt.z };
   const blockers = blockingAssets(state, camPos, targetPos);
   const occluded = blockers.length > 0;
   const sightColor = occluded ? "#ff5a6a" : "#5fd0c0";
@@ -702,17 +874,22 @@ function OcclusionHighlights() {
         dashSize={0.4}
         gapSize={0.25}
       />
-      {blockers.map((b) => (
-        <group key={`occ_${b.id}`} position={[b.x, 0, b.z]}>
-          <mesh position={[0, b.footprint.h / 2, 0]}>
-            <boxGeometry args={[b.footprint.w, b.footprint.h, b.footprint.d]} />
-            <meshBasicMaterial color="#ff5a6a" wireframe />
-          </mesh>
-          <Html position={[0, b.footprint.h + 0.4, 0]} center style={{ pointerEvents: "none" }} zIndexRange={[30, 0]}>
-            <span className="node-label" style={{ color: "#ff7b91" }}>BLOCKED</span>
-          </Html>
-        </group>
-      ))}
+      {blockers.map((b) => {
+        // 线框盒与标签都要跟着对象的**实体区间**走，不能写死在地面 ——
+        // 否则挡住二楼机位的道具会在脚下的地面位置画一个红框，指错了东西。
+        const bottom = objectBottom(b);
+        return (
+          <group key={`occ_${b.id}`} position={[b.x, bottom, b.z]}>
+            <mesh position={[0, b.footprint.h / 2, 0]}>
+              <boxGeometry args={[b.footprint.w, b.footprint.h, b.footprint.d]} />
+              <meshBasicMaterial color="#ff5a6a" wireframe />
+            </mesh>
+            <Html position={[0, b.footprint.h + 0.4, 0]} center style={{ pointerEvents: "none" }} zIndexRange={[30, 0]}>
+              <span className="node-label" style={{ color: "#ff7b91" }}>BLOCKED</span>
+            </Html>
+          </group>
+        );
+      })}
     </>
   );
 }
@@ -726,13 +903,17 @@ function EndpointMarker({ segment, which }: { segment: MoveSegment; which: "star
   );
   const x = which === "start" ? segment.startX : segment.endX;
   const z = which === "start" ? segment.startZ : segment.endZ;
+  // 只订阅"这一个点的地面高度"这个数字：地形变化时才重渲染，不是每次 state 变动都重渲染。
+  const groundY = useDirectorStore((s) => pathGroundAt(s.state, segment.object, x, z));
+  // 与 hitEndpointScreen 用的是同一个 pathGroundAt + 同一个 LIFT，所以"亮起来的一定点得中"。
+  const y = groundY + ENDPOINT_MARKER_LIFT;
   const color = which === "start" ? "#67a7ff" : "#f0a35a";
   // 悬停色保持原有色相（端点没有「选中」态的白色语义，变白反而会和路径点混淆），只提亮、放大。
   const hoverColor = which === "start" ? "#a9cdff" : "#ffc79a";
 
   return (
     <group>
-      <mesh position={[x, 0.26, z]} scale={hovered ? 1.35 : 1}>
+      <mesh position={[x, y, z]} scale={hovered ? 1.35 : 1}>
         <sphereGeometry args={[0.24, 20, 14]} />
         <meshStandardMaterial
           color={hovered ? hoverColor : color}
@@ -740,7 +921,7 @@ function EndpointMarker({ segment, which }: { segment: MoveSegment; which: "star
           emissiveIntensity={hovered ? 1.1 : 0.4}
         />
       </mesh>
-      <Html position={[x, 0.78, z]} center style={{ pointerEvents: "none" }} zIndexRange={[25, 0]}>
+      <Html position={[x, y + 0.52, z]} center style={{ pointerEvents: "none" }} zIndexRange={[25, 0]}>
         <span className="node-label" style={{ color: hovered ? hoverColor : color }}>
           {which === "start" ? "START" : "END"}
           {hovered ? " · 拖动移动" : ""}
@@ -770,6 +951,15 @@ function PointMarker({
   const chain = pathChain(segment);
   const previous = chain[index];
   const next = chain[index + 2];
+  // 圆盘 / 球心必须浮在**脚下那层地面**上；高度由 pathGroundAt 给，与 hitPathPointScreen 同源。
+  const groundY = useDirectorStore((s) => pathGroundAt(s.state, segment.object, point.x, point.z));
+  const prevY = useDirectorStore((s) =>
+    previous ? pathGroundAt(s.state, segment.object, previous.x, previous.z) : 0,
+  );
+  const nextY = useDirectorStore((s) =>
+    next ? pathGroundAt(s.state, segment.object, next.x, next.z) : 0,
+  );
+  const y = groundY + POINT_MARKER_LIFT;
 
   return (
     <group>
@@ -777,8 +967,8 @@ function PointMarker({
         <>
           <Line
             points={[
-              [previous.x, 0.07, previous.z],
-              [point.x, 0.07, point.z],
+              [previous.x, prevY + POINT_MARKER_LIFT, previous.z],
+              [point.x, y, point.z],
             ]}
             color="#63d39b"
             dashed
@@ -788,8 +978,8 @@ function PointMarker({
           />
           <Line
             points={[
-              [point.x, 0.07, point.z],
-              [next.x, 0.07, next.z],
+              [point.x, y, point.z],
+              [next.x, nextY + POINT_MARKER_LIFT, next.z],
             ]}
             color="#63d39b"
             dashed
@@ -804,7 +994,7 @@ function PointMarker({
           这里让「已经对准，松手就能选中 / 拖动」这件事看得见。 */}
       <mesh
         rotation={[-Math.PI / 2, 0, 0]}
-        position={[point.x, 0.09, point.z]}
+        position={[point.x, y, point.z]}
         scale={hovered ? 1.35 : 1}
       >
         {isArc ? <ringGeometry args={[0.2, 0.34, 28]} /> : <circleGeometry args={[0.24, 26]} />}
@@ -815,7 +1005,7 @@ function PointMarker({
       </mesh>
 
       {isSelected || hovered ? (
-        <Html position={[point.x, 0.42, point.z]} center style={{ pointerEvents: "none" }} zIndexRange={[25, 0]}>
+        <Html position={[point.x, y + 0.33, point.z]} center style={{ pointerEvents: "none" }} zIndexRange={[25, 0]}>
           <span className="node-label">
             #{index + 1}
             {hovered ? " · 拖动移动 · 点按出菜单" : ""}
@@ -851,10 +1041,46 @@ function PathHandles() {
   );
 }
 
+/**
+ * 交接徽标。拆成独立组件只为一件事：让每个徽标**只订阅自己那一个贴地高度数字**，
+ * 而不是让整组徽标跟着整个 state 重渲染（那会在播放时每帧重渲染一遍 DOM 按钮）。
+ */
+function HandoffBadge({ handoff, prev }: { handoff: Handoff; prev: MoveSegment }) {
+  const setHandoffMode = useDirectorStore((s) => s.setHandoffMode);
+  const groundY = useDirectorStore((s) =>
+    pathGroundAt(s.state, prev.object, prev.endX, prev.endZ),
+  );
+  const color =
+    handoff.mode === "cut" ? "#ff7b91" : handoff.mode === "smooth" ? "#67a7ff" : "#f0a35a";
+  const glyph = handoff.mode === "cut" ? "✕" : handoff.mode === "smooth" ? "◉" : "■";
+  return (
+    <Html
+      position={[prev.endX, groundY + HANDOFF_BADGE_LIFT, prev.endZ]}
+      center
+      style={{ pointerEvents: "auto" }}
+      zIndexRange={[45, 0]}
+    >
+      <button
+        type="button"
+        className="handoff-badge"
+        title={`Handoff: ${handoff.mode} — click to cycle stop/smooth/cut`}
+        style={{ borderColor: color, color }}
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={() => {
+          const order: HandoffMode[] = ["stop", "smooth", "cut"];
+          const nextMode = order[(order.indexOf(handoff.mode) + 1) % order.length];
+          setHandoffMode(handoff.id, nextMode);
+        }}
+      >
+        {glyph}
+      </button>
+    </Html>
+  );
+}
+
 function HandoffMarkers() {
   const handoffs = useDirectorStore((s) => s.state.handoffs);
   const segments = useDirectorStore((s) => s.state.segments);
-  const setHandoffMode = useDirectorStore((s) => s.setHandoffMode);
   const showHelpers = useDirectorStore((s) => s.viewMode === "director");
   if (!showHelpers) return null;
   return (
@@ -862,35 +1088,7 @@ function HandoffMarkers() {
       {handoffs.map((handoff) => {
         const prev = segments.find((segment) => segment.id === handoff.prevSeg);
         if (!prev) return null;
-        const x = prev.endX;
-        const z = prev.endZ;
-        const color =
-          handoff.mode === "cut" ? "#ff7b91" : handoff.mode === "smooth" ? "#67a7ff" : "#f0a35a";
-        const glyph = handoff.mode === "cut" ? "✕" : handoff.mode === "smooth" ? "◉" : "■";
-        return (
-          <Html
-            key={handoff.id}
-            position={[x, 1.05, z]}
-            center
-            style={{ pointerEvents: "auto" }}
-            zIndexRange={[45, 0]}
-          >
-            <button
-              type="button"
-              className="handoff-badge"
-              title={`Handoff: ${handoff.mode} — click to cycle stop/smooth/cut`}
-              style={{ borderColor: color, color }}
-              onPointerDown={(event) => event.stopPropagation()}
-              onClick={() => {
-                const order: HandoffMode[] = ["stop", "smooth", "cut"];
-                const nextMode = order[(order.indexOf(handoff.mode) + 1) % order.length];
-                setHandoffMode(handoff.id, nextMode);
-              }}
-            >
-              {glyph}
-            </button>
-          </Html>
-        );
+        return <HandoffBadge key={handoff.id} handoff={handoff} prev={prev} />;
       })}
     </>
   );
@@ -912,7 +1110,19 @@ function FollowLinks() {
       if (!inside) return;
       const a = objectPosition(state, constraint.subject, currentTime);
       const b = objectPosition(state, constraint.target, currentTime);
-      line.geometry.setPositions([a.x, 0.1, a.z, b.x, 0.1, b.z]);
+      // 连线贴地：否则队伍走上台阶后，跟随线还留在地面下。
+      const groundY = (id: string, x: number, z: number) => {
+        const owner = state.objects.find((o) => o.id === id);
+        return owner ? standingHeightFor(state, owner, x, z) : 0;
+      };
+      line.geometry.setPositions([
+        a.x,
+        groundY(constraint.subject, a.x, a.z) + FOLLOW_LINK_LIFT,
+        a.z,
+        b.x,
+        groundY(constraint.target, b.x, b.z) + FOLLOW_LINK_LIFT,
+        b.z,
+      ]);
     });
   });
 
@@ -1381,6 +1591,37 @@ function Interaction() {
   const camera = useThree((state) => state.camera);
   const size = useThree((state) => state.size);
 
+  // 高度手柄的目标：director 视图 + 选中一个可动的 set 资产 + 这个资产确实有高低可调。
+  // 选择器返回对象引用本身（objects 不变则引用稳定），不会引起多余重渲染。
+  const heightTarget = useDirectorStore((state) => {
+    if (state.viewMode !== "director") return null;
+    if (state.selectedKind !== "object" || !state.selectedId) return null;
+    const object = state.state.objects.find((o) => o.id === state.selectedId);
+    if (!object || object.role !== "set" || object.hidden || object.locked) return null;
+    // 什么时候出现手柄：世界开着 3D，**或**这个对象本身已经有标高。
+    // 后半句是必需的 —— 在平面模式里用 Shift 垫高了东西之后，
+    // 如果手柄仍然不出现，作者就再没有地方能微调那个高度了。
+    const terrain = (state.state.worldMode ?? "planar") === "terrain";
+    if (!terrain && !(object.baseY ?? 0)) return null;
+    return object;
+  });
+
+  // 绘制路径时的预览（ghost 环 / 手绘线）也要贴地。
+  // 这两种拖拽都只作用于「当前选中的对象」（`new` 从选中对象的路径上加点、`draw` 直接写它），
+  // 所以用选中 id 就够了，不必把 objectId 塞进每一处拖拽状态。
+  // （名字带 preview 前缀：`handleDown` 里另有一个同名的局部变量，别混淆。）
+  const previewOwnerId = useDirectorStore((state) =>
+    state.selectedKind === "object" ? state.selectedId : null,
+  );
+  const ghostY = useDirectorStore((state) =>
+    ghost && previewOwnerId ? pathGroundAt(state.state, previewOwnerId, ghost.x, ghost.z) : 0,
+  );
+  const liveY = useDirectorStore((state) =>
+    previewOwnerId && livePts.length > 0
+      ? pathGroundAt(state.state, previewOwnerId, livePts[0].x, livePts[0].z)
+      : 0,
+  );
+
   // 拖拽对象 / 路径点时临时接管 OrbitControls，避免编辑路径同时把视角转走。
   const beginDrag = (drag: DragState) => {
     dragRef.current = drag;
@@ -1390,10 +1631,37 @@ function Interaction() {
 
   const endDrag = () => {
     const store = useDirectorStore.getState();
+    // 手势结束就熄灭「Shift 3D」提示。提前到 return 之前：没有拖拽时它本来就该是灭的，
+    // 而 setTerrainGesture 在值没变时不写 store，所以这里的多余调用是零成本。
+    store.setTerrainGesture(false);
     if (!dragRef.current) return;
     dragRef.current = null;
     store.setDragging(false);
     if (controls) controls.enabled = store.viewMode === "director" && !store.viewLocked;
+  };
+
+  /**
+   * 抓住高度手柄：锁定起始标高与「该深度的世界米 / 像素」。
+   *
+   * 折算率用相机到把手的距离与该视口的焦距算 `depth / focalPx`，
+   * 于是手柄在屏幕上的移动量与鼠标位移一致 —— 不论相机远近、缩放多少。
+   * 在按下时锁死而不每帧重算：拖拽途中万一相机被动过，手感会变但不会跳。
+   */
+  const grabHeight = (event: ThreeEvent<PointerEvent>, object: DirectorObject) => {
+    const perspective = camera as THREE.PerspectiveCamera;
+    const fov = perspective.fov || DIRECTOR_FOV;
+    const focalPx = size.height / (2 * Math.tan((fov * Math.PI) / 360));
+    const depth = perspective.position.distanceTo(
+      new THREE.Vector3(object.x, objectTop(object), object.z),
+    );
+    beginDrag({
+      kind: "height",
+      id: object.id,
+      startBaseY: objectBottom(object),
+      startClientY: event.nativeEvent.clientY,
+      worldPerPixel: depth / Math.max(focalPx, 1),
+    });
+    capturePointer(event);
   };
 
   /**
@@ -1593,14 +1861,23 @@ function Interaction() {
       const movingId = hitTeam ? hitTeam.members[0] : objectHit.object.id;
       const moving = store.state.objects.find((o) => o.id === movingId);
       const start = { x: moving?.x ?? objectHit.object.x, z: moving?.z ?? objectHit.object.z };
+      // 按下点若不可信（近水平射线），退回对象自身位置，免得第一帧就产生巨大位移。
+      const shift = event.shiftKey;
+      // 本次手势会动的全部对象：团队整队平移，所以整个 members 都要排掉。
+      const movers = new Set<string>(hitTeam ? hitTeam.members : [objectHit.object.id]);
+      const t0 = dragTarget(event, shift, movers);
+      const anchor: Vec2 = t0 && t0.usable ? { x: t0.x, z: t0.z } : start;
       beginDrag({
         kind: "object",
         id: objectHit.object.id,
         moved: false,
-        // 按下点若不可信（近水平射线），退回对象自身位置，免得第一帧就产生巨大位移。
-        origin: groundHitUsable(event, point) ? point : start,
+        origin: anchor,
         start,
+        prev: anchor,
+        layer: t0 ? t0.layer : GROUND_LAYER,
+        movers,
       });
+      store.setTerrainGesture(shift);
       capturePointer(event);
       return;
     }
@@ -1634,26 +1911,65 @@ function Interaction() {
       return;
     }
 
+    // 高度手柄只吃屏幕纵向位移，不需要地面交点 —— 必须先于下面的「落点可信性」检查，
+    // 否则相机俯角偏小时射线接近水平，拖到画布上半部分手柄就不动了。
+    if (drag.kind === "height") {
+      const dyPx = drag.startClientY - event.nativeEvent.clientY;
+      const next = snapElevation(
+        store.state,
+        drag.startBaseY + dyPx * drag.worldPerPixel,
+        HEIGHT_SNAP,
+        drag.id,
+      );
+      store.updateAsset(drag.id, { baseY: Math.round(next * 1000) / 1000 });
+      return;
+    }
+
     const point = groundPoint(event);
     if (!point) return;
     // 近水平射线给出的极远交点不能用来拖动（会把物体甩到画布外沿），丢弃这一帧。
     if (!groundHitUsable(event, point)) return;
 
     if (drag.kind === "object") {
-      // 团队成员：拖任何一个都是整队平移（位置由锚点承载），保持"队作为一个 unit"。
+      // 团队成员：拖任何一个都是整队平移（位置由锚点承载），保持"队作为一个单位"。
       const team = (store.state.groups ?? []).find(
         (g) => g.dynamics && g.members.length >= 2 && g.members.includes(drag.id),
       );
       // 锁定对象 / 锁定整队，即使在拖拽中也绝不移动位置。
       const obj = store.state.objects.find((o) => o.id === drag.id);
       if (obj?.locked || team?.locked) return;
-      if (Math.hypot(point.x - drag.origin.x, point.z - drag.origin.z) > 0.15) drag.moved = true;
+      // 对象拖拽走面拾取（要拿"指着哪一层"），近水平射线的极远交点丢弃这一帧。
+      // Shift 在这里**实时**采样（而不是按下时锁死）：拖到一半才想起要叠上去是很自然的，
+      // 用户不希望在拖动途中还得松手重按。跨层重锚会把层切换的跳变吸收掉。
+      const shift = event.shiftKey;
+      store.setTerrainGesture(shift);
+      // 把「本次手势会动的对象」整份排掉再拾取 —— 否则指针身下那一块会命中自己的顶面，
+      // 于是 baseY 每帧被自己再加一个身高（这就是用户看到的疯狂抖动）。见 engine/raycast。
+      const target = dragTarget(event, shift, drag.movers);
+      if (!target || !target.usable) return;
+      // 跨层重锚：射线命中的面在棱边处水平坐标会跳 h/tan(俯角)，
+      // 把跳变量吸收进 origin 后，物体在跨过棱边的那一帧不会瞬移，只是"换了一层继续跟手"。
+      if (target.layer !== drag.layer) {
+        drag.origin = {
+          x: drag.origin.x + (target.x - drag.prev.x),
+          z: drag.origin.z + (target.z - drag.prev.z),
+        };
+        drag.layer = target.layer;
+      }
+      if (Math.hypot(target.x - drag.origin.x, target.z - drag.origin.z) > 0.15) drag.moved = true;
       // 位移 = 按下时的快照 + 本次拖拽的累计位移（drag.start 见 beginDrag）。
       // 这里千万别读「当前 anchor 位置」再叠加位移：pointermove 每帧都会执行，
       // 那样会把之前每一帧的位移重复累加一遍，物体呈指数级加速飞出画布。
-      const nx = drag.start.x + (point.x - drag.origin.x);
-      const nz = drag.start.z + (point.z - drag.origin.z);
-      store.moveObject(team && team.members[0] !== drag.id ? team.members[0] : drag.id, nx, nz);
+      const nx = drag.start.x + (target.x - drag.origin.x);
+      const nz = drag.start.z + (target.z - drag.origin.z);
+      drag.prev = { x: target.x, z: target.z };
+      store.moveObject(
+        team && team.members[0] !== drag.id ? team.members[0] : drag.id,
+        nx,
+        nz,
+        target.layerY,
+        shift,
+      );
     } else if (drag.kind === "point") {
       // 超过阈值才算「拖动」，抬手时不区分例外就不会误弹环形菜单。
       if (Math.hypot(point.x - drag.origin.x, point.z - drag.origin.z) > 0.15) drag.moved = true;
@@ -1705,14 +2021,16 @@ function Interaction() {
       </mesh>
       <gridHelper args={[40, 40, "#2f3d57", "#182132"]} position={[0, 0.01, 0]} />
 
+      {heightTarget ? <HeightHandle object={heightTarget} onGrab={grabHeight} /> : null}
+
       {ghost ? (
         <group>
-          <mesh rotation={[-Math.PI / 2, 0, 0]} position={[ghost.x, 0.08, ghost.z]}>
+          <mesh rotation={[-Math.PI / 2, 0, 0]} position={[ghost.x, ghostY + 0.02, ghost.z]}>
             <ringGeometry args={[0.3, 0.44, 32]} />
             <meshBasicMaterial color="#55d88a" side={THREE.DoubleSide} />
           </mesh>
           <Html
-            position={[ghost.x, 0.5, ghost.z]}
+            position={[ghost.x, ghostY + 0.44, ghost.z]}
             center
             style={{ pointerEvents: "none" }}
             zIndexRange={[35, 0]}
@@ -1724,7 +2042,7 @@ function Interaction() {
 
       {livePts.length > 1 ? (
         <Line
-          points={livePts.map((p) => [p.x, 0.07, p.z] as [number, number, number])}
+          points={livePts.map((p) => [p.x, liveY + 0.01, p.z] as [number, number, number])}
           color="#55d88a"
           lineWidth={2.5}
         />
@@ -2116,11 +2434,13 @@ function CameraHud() {
     resolved && (resolved.move?.targetId ?? camera.targetId)
       ? blockingAssets(
           state,
-          { x: resolved.position[0], z: resolved.position[2] },
+          // 与 OcclusionHighlights 同一套 3D 判据（带真实高度）——
+          // 两处若各写各的，HUD 的警告会和画布上的红框对不上。
+          { x: resolved.position[0], y: resolved.position[1], z: resolved.position[2] },
           (() => {
             const tid = resolved.move?.targetId ?? camera.targetId!;
             const p = objectPosition(state, tid, currentTime);
-            return { x: p.x, z: p.z };
+            return { x: p.x, y: resolved.target[1], z: p.z };
           })(),
         )
       : [];
@@ -2192,6 +2512,10 @@ export function WorldView() {
   const setZoom = useDirectorStore((s) => s.setZoom);
   const viewMode = useDirectorStore((s) => s.viewMode);
   const setViewMode = useDirectorStore((s) => s.setViewMode);
+  const worldMode = useDirectorStore((s) => s.state.worldMode ?? "planar");
+  const setWorldMode = useDirectorStore((s) => s.setWorldMode);
+  // 手势级 3D 提示：拖拽 / 拖放途中按住 Shift 时点亮开关 + 显示徽标。
+  const terrainGesture = useDirectorStore((s) => s.terrainGesture);
   const cameras = useDirectorStore((s) => s.state.cameras);
   const activeCameraId = useDirectorStore((s) => s.activeCameraId);
   const setActiveCamera = useDirectorStore((s) => s.setActiveCamera);
@@ -2228,19 +2552,24 @@ export function WorldView() {
     count: number;
     category: AssetCategory;
     formation: FormationKind;
+    /** 松手那一刻是否按着 Shift（手势级 3D 覆盖）—— 拖放是瞬时的，确认面板出现时
+     *  Shift 早松了，所以必须在这里把它**存下来**，而不是等到"创建团队"那一刻再读。 */
+    terrain: boolean;
   } | null>(null);
   const templateGroups = groupTemplatesByCategory();
 
-  const handleDropAdd = (kind: string, point: { x: number; z: number }) => {
+  const handleDropAdd = (kind: string, point: { x: number; z: number }, terrain = false) => {
     if (kind === "camera") {
       addCamera();
     } else if (kind === "drone") {
       addDroneCamera();
     } else if (kind === "group") {
-      setGroupDraft({ at: point, count: 4, category: "human", formation: "column" });
+      // terrain 要一起存进草稿：面板开着的时候 Shift 早就松了（见 groupDraft 的说明）。
+      setGroupDraft({ at: point, count: 4, category: "human", formation: "column", terrain });
     } else {
-      // kind 即 AssetCategory
-      addAsset(kind as AssetCategory, point);
+      // kind 即 AssetCategory。`terrain` 把「松手时按着 Shift」的意图一并带下去 ——
+      // point.y 已经是那次拾取到的层高，两者合起来才能决定 baseY 写不写、写多少。
+      addAsset(kind as AssetCategory, { ...point, terrain });
     }
   };
 
@@ -2248,7 +2577,12 @@ export function WorldView() {
     <main>
       {viewMode === "director" ? (
         <div className="addbar">
-          <span className="addbar-hint">拖拽到画布添加 →</span>
+          <span
+            className="addbar-hint"
+            title="拖拽到画布添加。拖拽时按住 Shift = 这一次按 3D 落位，可以叠到已有台阶 / 平台上（不用先开 3D 开关）。"
+          >
+            拖拽到画布添加 →　Shift 叠高
+          </span>
           {ASSET_ORDER.map((category) => (
             <button
               key={category}
@@ -2401,7 +2735,7 @@ export function WorldView() {
                     groupDraft.category,
                     groupDraft.count,
                     groupDraft.formation,
-                    groupDraft.at,
+                    { ...groupDraft.at, terrain: groupDraft.terrain },
                   );
                   setGroupDraft(null);
                 }}
@@ -2420,14 +2754,25 @@ export function WorldView() {
         onDragOver={(event) => {
           event.preventDefault();
           event.dataTransfer.dropEffect = "copy";
+          // 从 addbar 拖资产进来时也支持 Shift：dragover 阶段就点亮提示，
+          // 用户在松手前就能看到"这一次会叠上去"。
+          useDirectorStore.getState().setTerrainGesture(event.shiftKey);
         }}
+        onDragLeave={() => useDirectorStore.getState().setTerrainGesture(false)}
         onDrop={(event) => {
           event.preventDefault();
           const kind = event.dataTransfer.getData("application/director-add");
+          useDirectorStore.getState().setTerrainGesture(false);
           if (!kind) return;
-          const point = screenToGround(event.clientX, event.clientY);
+          const shift = event.shiftKey;
+          const point = screenToGround(
+            event.clientX,
+            event.clientY,
+            useDirectorStore.getState().state,
+            shift,
+          );
           if (!point) return;
-          handleDropAdd(kind, point);
+          handleDropAdd(kind, point, shift);
         }}
       >
         <Canvas
@@ -2444,6 +2789,15 @@ export function WorldView() {
           <WorldScene />
           <CaptureBridge />
         </Canvas>
+
+        {/* 手势级 3D 提示：只在「按了 Shift 且它真的改变了行为」时出现。
+            terrain 模式下 Shift 是无操作，此时不该弹提示 —— 那会让人以为松开手会退回平面。 */}
+        {terrainGesture && worldMode !== "terrain" ? (
+          <div className="shift-stack-badge">
+            <span className="shift-stack-key">Shift</span>
+            3D 堆叠：松开恢复平面
+          </div>
+        ) : null}
 
         {/* 画布内左侧悬浮工具条：视图切换 + 锁定 + 缩放 / 路径 / 相机选择，竖向排列。 */}
         <div className="view-floatbar">
@@ -2489,6 +2843,20 @@ export function WorldView() {
                 }
               >
                 {viewLocked ? "🔒" : "🔓"}
+              </button>
+              <button
+                type="button"
+                className={`vf-tool ${worldMode === "terrain" ? "on" : ""}${
+                  terrainGesture && worldMode !== "terrain" ? " is-temp" : ""
+                }`}
+                onClick={() => setWorldMode(worldMode === "terrain" ? "planar" : "terrain")}
+                title={
+                  worldMode === "terrain"
+                    ? "立体空间：开 —— 对象有高度、可堆叠，人能站到台阶 / 平台上。点击退回平面模式。"
+                    : "立体空间：关（平面）。开启后盒子会叠起来，人和物可以站在台阶 / 平台上。\n\n快捷键：拖拽时按住 Shift = 这一次按 3D 落位（叠到平台上），不用先开这个开关。"
+                }
+              >
+                3D
               </button>
               <div className="vf-sep" />
               <div className="vf-zoom" title="滚轮 / ± 缩放，WASD 或方向键平移视角">

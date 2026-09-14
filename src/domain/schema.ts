@@ -12,7 +12,9 @@ export type AssetCategory =
   | "building"
   | "furniture"
   | "nature"
-  | "prop";
+  | "prop"
+  /** 台阶 / 平台 / 墙：可站立的静态构筑物。h ≤ maxStep 时人会自动迈上去。 */
+  | "structure";
 
 /** 动物物种：决定使用哪个 GLB 模型。来源见 `engine/animalModels.ts`。 */
 export type AnimalSpecies =
@@ -24,6 +26,12 @@ export type AnimalSpecies =
 
 /** agent = 可运动、可作目标；set = 静态环境（遮挡 + 障碍）。 */
 export type AssetRole = "agent" | "set";
+
+/**
+ * 世界模式。**planar 是能力表的退化取值**，不是特例分支（见 DirectorState.worldMode）。
+ * terrain 表示"几何参与高度"，是本文件里 baseY / bottom / topShape 生效的前提。
+ */
+export type WorldMode = "planar" | "terrain";
 
 /** 默认体块尺寸（世界单位）：w=宽(x) d=深(z) h=高(y)。 */
 export type Footprint = { w: number; d: number; h: number };
@@ -84,6 +92,33 @@ export interface Pose {
  * Director World 中的对象。V1 使用平面世界（WORLD MODE = PLANAR），
  * 因此对象只保存 x / z，高度由 Proxy 语义决定。
  */
+/**
+ * 顶面形状。盒子表达不了斜坡，这是目前唯一的形状扩展。ramp = 沿局部 +Z 从 bottom 升到 top。
+ */
+export type TopShape = "flat" | "ramp";
+
+/**
+ * 运动能力：阈值挂在**运动主体**上，不是障碍上。
+ * 同一堵台阶，人上得去、车上去、马跳得更高 —— 所以 maxStep / 跳跃 / 攀爬都按类别取值。
+ * 见 `engine/locomotion.ts` 的预设表。
+ */
+export interface Locomotion {
+  /** 单步最大落差（米）：≤ 此值自动迈上去，> 此值视为阻挡或需要跳跃。 */
+  maxStep: number;
+  /** 最大可行走坡度（度）。超过即"陡坡"，退化为墙面。 */
+  maxSlopeDeg: number;
+  /** 原地起跳高度（米）。0 = 不会跳。 */
+  maxJumpHeight: number;
+  /** 平地助跑跳远（米）。 */
+  maxJumpReach: number;
+  /** 最大攀爬高度（米）。0 = 不会攀爬。 */
+  maxClimbHeight: number;
+  /** 身高（米），用于头顶净空判定。 */
+  height: number;
+  /** 脚底尺寸（米），用于落脚面积采样。 */
+  foot: { w: number; d: number };
+}
+
 export interface DirectorObject {
   id: string;
   /**
@@ -103,6 +138,29 @@ export interface DirectorObject {
   /** 默认体块尺寸。 */
   footprint: Footprint;
   color: string;
+  /**
+   * 实体底面高度（世界米）。默认 0。
+   *
+   * 这是"3D 化"最关键的一个字段：有了它，盒子才占据 [baseY, baseY + h] 而不是恒从 0 起，
+   * 于是「堆叠」成立 —— 把上层对象的 baseY 设成下方对象的顶面即可。
+   *
+   * agent 的 baseY 是"相对脚下地面的偏移"（悬停飞行、摆在架子上）；
+   * set 的 baseY 由拖拽自动吸附到下方支撑面，也可在 Inspector 手工指定。
+   */
+  baseY?: number;
+  /**
+   * 实体底面下探高度，默认 = baseY。设成低于 baseY 即"拱洞 / 桥"：
+   * 例：桥面 baseY = 2.75、bottom = 2.4 → 下方留 2.4m 净空可穿行。
+   */
+  bottom?: number;
+  /** 顶面形状，默认 "flat"。 */
+  topShape?: TopShape;
+  /** 是否可站上去。默认 true（由 maxStep 与坡度推导）。水面 / 沼泽设 false。 */
+  walkable?: boolean;
+  /** 是否水平阻挡。默认 true。栅栏 / 草丛可设 false。 */
+  blocking?: boolean;
+  /** 是否遮挡相机视线。默认 true。玻璃可设 false —— 它与 blocking 是独立的语义。 */
+  occluding?: boolean;
   /** animal 类资产的物种（决定 GLB 模型）；非 animal 留空。 */
   species?: AnimalSpecies;
   /** 锁定后不可通过拖拽改变位置（防误触）；仍可点选以便解锁。 */
@@ -504,6 +562,21 @@ export interface DirectorState {
    * 随场景自动持久化；customId 悬空的片段按「空姿势」处理，不会报错。
    */
   customActions?: CustomAction[];
+  /**
+   * 世界模式。缺省 "planar"。
+   *
+   * 注意：**"planar" 不是一条特例分支，而是能力表的退化取值** —— 等价于
+   * maxStep = 0 + 无跳跃 + 无攀爬。此时 top ≤ 0 的面才可站，所有现有 set 资产
+   * （建筑 top=24、桌子 top=0.9 …）全部保留为障碍，与 3D 化之前逐像素一致。
+   *
+   * 因此下游不需要任何 `if (worldMode === "planar")` 特判。
+   */
+  worldMode?: WorldMode;
+  /**
+   * 场景级能力表 override（按类别覆盖 `engine/locomotion.ts` 的预设）。
+   * 用途：骑马的人能跳 1.2m、受伤的人 maxStep 只有 0.2m —— 不必新增资产类别。
+   */
+  locomotion?: Partial<Record<AssetCategory, Partial<Locomotion>>>;
 }
 
 /* ------------------------------------------------------ Stage / Scenes */

@@ -29,6 +29,7 @@ const ASSET_NOUN: Record<AssetCategory, string> = {
   building: "建筑",
   furniture: "家具",
   nature: "布景",
+  structure: "台阶",
   prop: "道具",
 };
 function assetNoun(category: AssetCategory): string {

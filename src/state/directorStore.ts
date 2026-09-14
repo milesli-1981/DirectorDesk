@@ -28,6 +28,7 @@ import {
   Pose,
   Vec2,
   ViewMode,
+  WorldMode,
 } from "../domain/schema";
 import { createBlankState } from "../engine/demoShot";
 import { normalizePathPointModes, pathInsertIndex, simplifyPath } from "../engine/path";
@@ -35,7 +36,7 @@ import { normalizeCamPathShapes } from "../engine/cameraPath";
 import { contentEndTime } from "../engine/timeline";
 import { normalizeCameraKeys, normalizeEase, normalizeSpeedKeys } from "../engine/ease";
 import { ASSET_PRESETS } from "../engine/assetPresets";
-import { separateSetAsset } from "../engine/collision";
+import { placeObject } from "../engine/place";
 import { ANIMAL_MODELS, DEFAULT_ANIMAL_SPECIES } from "../engine/animalModels";
 import {
   AnimalSpecies,
@@ -300,16 +301,28 @@ interface DirectorStore {
   pathDrawMode: boolean;
   /** 是否正在拖拽场景对象 / 路径点，用于临时接管 OrbitControls。 */
   dragging: boolean;
+  /**
+   * 拖拽 / 拖放途中按住了 Shift = 本次操作强制按 3D 语义落位。
+   *
+   * 纯 UI 提示用（点亮 3D 开关、显示徽标），**不参与几何** —— 真正的覆盖
+   * 由画布把这个按键状态直接传给 `moveObject` / `addAsset`（见 `engine/worldMode`）。
+   * 之所以不进 `state`：它是手势的瞬时状态，不该被存盘、也不该进 undo 历史。
+   */
+  terrainGesture: boolean;
 
   setTime: (time: number) => void;
   setPlaying: (playing: boolean) => void;
   togglePlay: () => void;
   setZoom: (zoom: number) => void;
   setViewMode: (mode: ViewMode) => void;
+  /** 切换平面 / 立体世界。planar = 老行为（一切在 y=0），terrain = 启用堆叠与落脚高度。 */
+  setWorldMode: (mode: WorldMode) => void;
   setActiveCamera: (cameraId: string) => void;
   toggleViewLocked: () => void;
   togglePathDraw: () => void;
   setDragging: (dragging: boolean) => void;
+  /** 设置「本次手势按住 Shift」提示状态。只在值变化时写入，避免拖拽途中刷爆 store。 */
+  setTerrainGesture: (on: boolean) => void;
 
   selectObject: (objectId: string) => void;
   selectCamera: (cameraId: string) => void;
@@ -324,21 +337,37 @@ interface DirectorStore {
   openCameraPointRing: (pointId: string) => void;
   closeRing: () => void;
 
-  moveObject: (objectId: string, x: number, z: number) => void;
+  /**
+   * 拖动对象到 (x, z)。
+   * @param layerY 画布射线拾取到的"指针正指着的那一层"（优先于按 x/z 反查）。
+   * @param forceTerrain 本次拖拽强制按 3D 语义落位（按住 Shift）。见 `engine/worldMode`。
+   */
+  moveObject: (objectId: string, x: number, z: number, layerY?: number, forceTerrain?: boolean) => void;
   /** 调整对象在时间轴 / Scene Tree 中的行顺序：把 dragId 移到 targetId 所在的位置。 */
   reorderObject: (dragId: string, targetId: string) => void;
   /** 锁定 / 解锁资产：锁定后不可通过拖拽移动位置（防误触），仍可点选以便解锁。 */
   toggleLock: (id: string) => void;
-  addAsset: (category: AssetCategory, at?: { x: number; z: number }, species?: AnimalSpecies) => void;
+  /**
+   * 新增资产。
+   * @param at 落点。`y` = 射线拾取到的层高；`terrain` = 本次拖放强制按 3D 语义（按住 Shift）。
+   */
+  addAsset: (
+    category: AssetCategory,
+    at?: { x: number; z: number; y?: number; terrain?: boolean },
+    species?: AnimalSpecies,
+  ) => void;
   /**
    * 拖入一个「团队 Group」：一次生成 count 个同类资产并建组，整队共用一条路线
    * （锚点 = members[0]），队员按 formation 跟随。
+   *
+   * `at.terrain` = 松手时按着 Shift（手势级 3D 覆盖，见 `engine/worldMode`）：
+   * 每个队员都按 terrain 语义落到落点处最高的可站立面上。
    */
   addGroupAt: (
     category: AssetCategory,
     count: number,
     formation: FormationKind,
-    at?: { x: number; z: number },
+    at?: { x: number; z: number; y?: number; terrain?: boolean },
     species?: AnimalSpecies,
   ) => void;
   updateAsset: (id: string, patch: Partial<DirectorObject>) => void;
@@ -632,6 +661,15 @@ function sanitizeState(s: DirectorState): DirectorState {
   };
 }
 
+/*
+ * 「放在 (x, z)，该落在多高的面上」以及「按该层高做水平分离」——
+ * 这两件事连同它们的**先后顺序**一起搬到了 `engine/place.ts` 的 `placeObject`。
+ *
+ * 搬走的原因不是分层洁癖，而是这里原本抄了三份（moveObject / addAsset / updateAsset），
+ * 三份都把 separate 放在定高之前 —— 于是同层时垂直必然相交，盒子一靠近平台就被推开，
+ * "叠上去"永远走不到。不变量只留一处，才不会再次跑偏。
+ */
+
 /**
  * 团队路线的归属者：整队只 author 一条路线，挂在锚点（members[0]）上。
  * 任何落在队员身上的建段 / 画路径请求都重定向到锚点，避免「每个人各有一条路线」。
@@ -805,6 +843,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
     viewLocked: false,
     pathDrawMode: false,
     dragging: false,
+    terrainGesture: false,
 
     // 播放需要连续时间，不能在这里做 0.1s 量化。
     setTime: (time) =>
@@ -828,6 +867,11 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
 
     setViewMode: (mode) => set({ viewMode: mode }),
 
+    setWorldMode: (mode) =>
+      set((store) => ({
+        state: { ...store.state, revision: store.state.revision + 1, worldMode: mode },
+      })),
+
     setActiveCamera: (cameraId) => set({ activeCameraId: cameraId }),
 
     toggleViewLocked: () => set((store) => ({ viewLocked: !store.viewLocked })),
@@ -835,6 +879,9 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
     togglePathDraw: () => set((store) => ({ pathDrawMode: !store.pathDrawMode })),
 
     setDragging: (dragging) => set({ dragging }),
+
+    setTerrainGesture: (on) =>
+      set((store) => (store.terrainGesture === on ? {} : { terrainGesture: on })),
 
     selectObject: (objectId) =>
       set((store) => ({
@@ -881,7 +928,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
 
     closeRing: () => set({ radialTarget: null }),
 
-    moveObject: (objectId, x, z) =>
+    moveObject: (objectId, x, z, layerY, forceTerrain) =>
       set((store) => {
         const state = store.state;
         const target = state.objects.find((o) => o.id === objectId);
@@ -892,11 +939,12 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           (g) => g.dynamics && g.members[0] === objectId,
         );
         if (team && team.locked) return {};
-        // set 资产落点需与已有环境资产分离，避免穿模。
-        const { x: nx, z: nz } =
-          target && target.role === "set"
-            ? separateSetAsset(state.objects, objectId, x, z)
-            : { x, z };
+        // 落位：定层高 → 按该层高分离（顺序见 engine/place 的 placeObject）。
+        // 拖到平台上就叠上去（set）／站上去（agent），拖开就落回基准面。
+        const placed = placeObject(state, objectId, x, z, layerY, forceTerrain);
+        const nx = placed.x;
+        const nz = placed.z;
+        const baseY = placed.baseY;
 
         // 拖动对象时，其第一段路径的起点跟随 ORIGIN：
         // 否则播放到该段时，对象会从新的 ORIGIN 瞬移回老起点。
@@ -914,7 +962,9 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
             ...state,
             revision: state.revision + 1,
             objects: state.objects.map((object) =>
-              object.id === objectId ? { ...object, x: nx, z: nz } : object,
+              object.id === objectId
+                ? { ...object, x: nx, z: nz, ...(baseY !== undefined ? { baseY } : {}) }
+                : object,
             ),
             segments,
             handoffs: first ? reconcileHandoffs(segments, state.handoffs) : state.handoffs,
@@ -985,14 +1035,20 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         color: animal ? animal.color : preset.color,
         ...(animal ? { species: animal.species } : {}),
       };
-      // set 资产落点需与已有环境资产分离，避免穿模（agent 可自由摆放）。
-      const { x: placedX, z: placedZ } =
-        preset.role === "set"
-          ? separateSetAsset([...state.objects, asset], id, spawnX, spawnZ)
-          : { x: spawnX, z: spawnZ };
-      const placed: DirectorObject = { ...asset, x: placedX, z: placedZ };
+      // 落位：定层高 → 按该层高分离（顺序见 engine/place 的 placeObject）。
+      // 新建资产直接落在落点处最高的可站立面上（terrain 模式）；set 叠起来，
+      // agent 站上去 —— 落点语义一致。拖放携带了射线拾取的高度时以它为准。
+      // placeObject 需要对象已在 objects 里，所以先把它并进一份临时视图。
+      const staged: DirectorState = { ...state, objects: [...state.objects, asset] };
+      const placed = placeObject(staged, id, spawnX, spawnZ, at?.y, at?.terrain);
+      const next: DirectorObject = {
+        ...asset,
+        x: placed.x,
+        z: placed.z,
+        ...(placed.baseY !== undefined ? { baseY: placed.baseY } : {}),
+      };
       set({
-        state: { ...state, revision: state.revision + 1, objects: [...state.objects, placed] },
+        state: { ...state, revision: state.revision + 1, objects: [...state.objects, next] },
         selectedKind: "object",
         selectedId: id,
         selectedItem: null,
@@ -1005,8 +1061,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
      * 只给「组」设定一条路线——锚点（members[0]）承载它，其余队员由求解器按
      * formation 实时跟随（匀速保持编队、变速/变线弹簧回弹）。
      */
-    addGroupAt: (category, count, formation, at, species) => {
-      const store = get();
+    addGroupAt: (category, count, formation, at, species) => {      const store = get();
       const { state } = store;
       const preset = ASSET_PRESETS[category];
       if (!preset) return;
@@ -1019,6 +1074,12 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
 
       const created: DirectorObject[] = [];
       const members: string[] = [];
+      // 整队一起落位：每生成一个就先并进 `staged`，再走 `placeObject`。
+      // 逐个落位而不是"先生成全部再统一摆"很关键 —— 后面的队员要能看见前面的，
+      // 这样他们既会各自吸附到脚下的台面，也会互相避免挤在同一点。
+      // 不给 layerY：队员散在编队槽位上，锚点头顶拾到的那一层不代表每个队员脚下那一层，
+      // 各自按自己的 (x, z) 反查才是对的（这正是 `restingBaseY` 的 fallback 路径）。
+      let staged: DirectorState = { ...state };
       for (let i = 0; i < total; i += 1) {
         let n = state.objects.filter((o) => o.category === category).length + created.length + 1;
         let id = `AST_${category.toUpperCase()}_${String(n).padStart(2, "0")}`;
@@ -1028,18 +1089,30 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         }
         // 初始摆放沿用求解器同一套编队槽位（本地坐标 forward = +z, right = +x）。
         const slot = formationSlotOf(formation, spacing, i, total);
-        created.push({
+        const spawnX = Math.round((baseX + slot.right) * 10) / 10;
+        const spawnZ = Math.round((baseZ + slot.fwd) * 10) / 10;
+        const member: DirectorObject = {
           id,
           type: preset.role === "agent" ? "actor" : "prop",
           category,
           role: preset.role,
-          x: Math.round((baseX + slot.right) * 10) / 10,
-          z: Math.round((baseZ + slot.fwd) * 10) / 10,
+          x: spawnX,
+          z: spawnZ,
           rotation: 0,
           footprint: animal ? { ...animal.footprint } : { ...preset.footprint },
           color: animal ? animal.color : preset.color,
           ...(animal ? { species: animal.species } : {}),
-        });
+        };
+        staged = { ...staged, objects: [...staged.objects, member] };
+        const placed = placeObject(staged, id, spawnX, spawnZ, undefined, at?.terrain);
+        const next: DirectorObject = {
+          ...member,
+          x: placed.x,
+          z: placed.z,
+          ...(placed.baseY !== undefined ? { baseY: placed.baseY } : {}),
+        };
+        staged = { ...staged, objects: [...staged.objects.slice(0, -1), next] };
+        created.push(next);
         members.push(id);
       }
 
@@ -1083,13 +1156,20 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           target && needsSeparate
             ? { ...target, ...patch }
             : null;
-        const sep = merged ? separateSetAsset(state.objects, id, merged.x, merged.z) : null;
-        const effectivePatch =
-          sep && patch.x !== undefined
-            ? { ...patch, x: sep.x }
-            : sep && patch.z !== undefined
-              ? { ...patch, z: sep.z }
-              : patch;
+        const effectivePatch: Partial<DirectorObject> = { ...patch };
+        if (merged) {
+          // 落位统一走 placeObject（定层高 → 按层高分离，顺序见 engine/place）。
+          // `patch.baseY` 作为 layerY 传进去：调用方显式给了标高时它就是权威，
+          // 不该被几何反查覆盖 —— 与"指针拾取到的那一层优先"是同一条规则。
+          const placed = placeObject(state, id, merged.x, merged.z, patch.baseY);
+          // 沿用原有语义：只回写调用方实际改过的那一根轴，避免波及其它编辑路径。
+          // （当前 UI 只有 Block 尺寸会走到这里，x / z 分支是留给将来的。）
+          if (patch.x !== undefined) effectivePatch.x = placed.x;
+          else if (patch.z !== undefined) effectivePatch.z = placed.z;
+          if (patch.baseY === undefined && placed.baseY !== undefined) {
+            effectivePatch.baseY = placed.baseY;
+          }
+        }
         return {
           state: {
             ...state,

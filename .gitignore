@@ -12,3 +12,4 @@ Thumbs.db
 
 # IDE 项目数据（非源码）
 .codebuddy/
+.workbuddy/

@@ -2,14 +2,14 @@
 /**
  * Director Desk · Previs MCP server
  * ----------------------------------------------------------------------------
- * 暴露一个工具：render_previs(sceneJson) -> 视频文件。
+ * 暴露一个工具：render_previs(sceneJson) -> 视频文件（默认 mp4，webm 兜底）。
  *
  * 原理（Playwright 复用现有渲染，零重写）：
  *   1. 起一个本地 HTTP 接收器，把 App 上传的视频 Blob 落盘到临时文件。
  *   2. 启动无头 Chromium，加载已运行的 Director Desk Web App（?headless=1）。
- *   3. 调用页面上的 window.previsRender({ scene, camera, fps, receiver })：
- *      App 导入场景 -> 录制指定相机 POV（MediaRecorder）-> 上传到接收器。
- *   4. 返回视频文件的绝对路径（及 file:// 资源），供 MCP 客户端打开。
+ *   3. 调用页面上的 window.previsRender({ scene, camera, fps, receiver, format })：
+ *      App 导入场景 -> 录制指定相机 POV（默认 WebCodecs 直出 MP4，不支持时回退 MediaRecorder WebM）-> 上传到接收器。
+ *   4. 返回视频文件的绝对路径（及 file:// 资源，mimeType 为实际产出格式），供 MCP 客户端打开。
  *
  * 前置：
  *   - 先 `npm run dev` 把 Web App 跑在 http://localhost:5173（可用 PREVIS_APP_URL 覆盖）。
@@ -48,10 +48,13 @@ function startReceiver() {
       const chunks = [];
       req.on("data", (c) => chunks.push(c));
       req.on("end", () => {
-        const file = join(dir, `previs-${Date.now()}.webm`);
+        // 按上传 Blob 的 Content-Type 决定扩展名，避免 mp4/webm 误命名。
+        const ct = String(req.headers["content-type"] || "video/webm").toLowerCase();
+        const isMp4 = ct.includes("mp4");
+        const file = join(dir, `previs-${Date.now()}.${isMp4 ? "mp4" : "webm"}`);
         writeFileSync(file, Buffer.concat(chunks));
         res.setHeader("Content-Type", "application/json");
-        res.end(JSON.stringify({ path: file }));
+        res.end(JSON.stringify({ path: file, mime: isMp4 ? "video/mp4" : "video/webm" }));
         resolveUpload(file);
       });
       return;
@@ -85,8 +88,12 @@ server.tool(
       .describe("相机 id；省略则录制第一台相机。"),
     fps: z.number().int().min(1).max(60).optional().describe("帧率，默认 24。"),
     appUrl: z.string().optional().describe("Web App 地址，默认取自 PREVIS_APP_URL 或 http://localhost:5173。"),
+    format: z
+      .enum(["webm", "mp4"])
+      .optional()
+      .describe("输出格式：mp4（默认，WebCodecs 直出；不支持时自动回退 webm）或 webm（MediaRecorder 录制）。"),
   },
-  async ({ scene, camera, fps, appUrl }) => {
+  async ({ scene, camera, fps, appUrl, format }) => {
     const target = appUrl || APP_URL;
     const receiver = await startReceiver();
 
@@ -128,23 +135,24 @@ server.tool(
 
       const result = await page.evaluate(
         (req) => window.previsRender(req),
-        { scene: parsed, camera, fps: fps ?? 24, receiver: receiver.url },
+        { scene: parsed, camera, fps: fps ?? 24, receiver: receiver.url, format },
         { timeout: RENDER_TIMEOUT_MS },
       );
 
       if (result?.error) throw new Error(`渲染失败：${result.error}`);
       const path = result?.path;
+      const mime = result?.mime || "video/webm";
       if (!path) throw new Error("渲染完成但未收到视频路径（receiver 未收到上传）");
 
       return {
         content: [
           {
             type: "text",
-            text: `预演视频已生成：${path}\n（时长由场景决定，渲染为实时 1x）`,
+            text: `预演视频已生成（${mime}）：${path}\n（时长由场景决定，渲染为实时 1x）`,
           },
           {
             type: "resource",
-            resource: { uri: `file://${path}`, mimeType: "video/webm", title: "previs video" },
+            resource: { uri: `file://${path}`, mimeType: mime, title: "previs video" },
           },
         ],
       };

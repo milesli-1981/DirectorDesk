@@ -16,6 +16,8 @@ import {
   tangentAtArcLength,
 } from "./path";
 import { Rect, setRects } from "./occlusion";
+import { blockingRects, routeHeightFor } from "./avoidance";
+import { locomotionOfId } from "./locomotion";
 import { curveVal, normalizeEase } from "./ease";
 
 /**
@@ -49,14 +51,22 @@ function canStraddle(state: DirectorState, o: DirectorObject, r: Rect): boolean 
 
 /**
  * 某对象做路径规划时应考虑的静态障碍。
- * 群队锚点要排除「编队骑得过去」的小障碍（见 canStraddle）；其余对象 / 障碍一律照旧。
+ *
+ * 顺序（**不能反**）：全集 → 可达性过滤 → 「骑得过去」过滤。
+ * - 可达性过滤（`blockingRects`，见 `engine/avoidance`）：迈得上的台阶、穿得过的桥下、
+ *   语义开关标掉的草丛，都不算阻挡 —— 它们不该掰弯整条路径。这是 3D 化的落点。
+ * - `canStraddle`：编队横向跨度够不够骑过这个障碍。它问的前提是"这本来就是个障碍"，
+ *   所以必须排在可达性过滤**之后**；矮障碍已被上一步接管，它的适用面自然收窄（符合预期）。
+ *
  * **可视化与运动求解都必须走这里**，否则橙色导航层会显示绕行、agent 却直穿过去。
  */
 export function routeObstacles(state: DirectorState, objectId: string): Rect[] {
-  const all = setRects(state);
   const o = state.objects.find((item) => item.id === objectId);
-  if (!o) return all;
-  return all.filter((r) => !canStraddle(state, o, r));
+  if (!o) return setRects(state);
+  const loco = locomotionOfId(state, objectId);
+  const fromY = routeHeightFor(state, objectId);
+  // planar 下 fromY 恒 0、maxStep = 0 → blockingRects 恒等于 setRects，行为与扩展前逐值一致。
+  return blockingRects(state, objectId, fromY, loco).filter((r) => !canStraddle(state, o, r));
 }
 
 /** 无驱动（Segment / Constraint）时的基础位置。 */
@@ -357,7 +367,17 @@ function groupInfluenceOffset(state: DirectorState, objectId: string, time: numb
   // 抵消掉（过去未避让的位置被低通记住，生成反向甩动把人拽回障碍里），看着就像没避开。
   const CLEAR = 0.25; // 与障碍间的余量，避免贴边穿模
   const LEAD = 1.0; // 提前量：为「让位」留出渐入渐出的距离，避免一碰障碍就瞬移出去
-  const sets = setRects(state);
+  // —— 两个障碍集合，两种职责（最容易搞错的地方）——
+  //
+  //   intentSets：**可达性过滤后**的集合，供"侧向让位"（意图）用。
+  //     一个该迈上去的台阶不该引发侧让 —— 那是系统自作主张地掰弯了导演画的直线。
+  //   solidSets：**全集**，供"二次兜底 push-out"（防穿模保证）用。
+  //     这是"无论如何不穿模"的地板，不能因为意图过滤而失效。
+  //
+  // 兜底用全集为何不会误伤：它按 3D 语义判定（相切不算冲突）。人站在台阶上时
+  // 与台阶恰好相切 → 不推开；真正插进墙里才推。这条正是堆叠能成立的前提。
+  const sets = blockingRects(state, anchorId, routeHeightFor(state, anchorId), locomotionOfId(state, anchorId));
+  const solidSets = setRects(state);
   const meObj = state.objects.find((o) => o.id === objectId);
   const mw = (meObj?.footprint.w ?? 0.5) / 2;
   const md = (meObj?.footprint.d ?? 0.5) / 2;
@@ -579,7 +599,9 @@ function groupInfluenceOffset(state: DirectorState, objectId: string, time: numb
   const finalZ = desired.z + fz;
   let cx = 0;
   let cz = 0;
-  for (const r of sets) {
+  // 兜底用**全集**（solidSets）：一次避让只改期望位，但变线 / 转弯时甩动可达 2m 且方向不可控，
+  // 可能把人甩进障碍 —— 这里按最终落点把它推出去。因为按 3D 语义判定，站在台阶上（相切）不会误伤。
+  for (const r of solidSets) {
     const hw = r.w / 2 + mw + CLEAR;
     const hh = r.d / 2 + md + CLEAR;
     const dxr = finalX - r.x;

@@ -934,6 +934,12 @@ canvas {
   color: #55d88a;
 }
 
+/* 高度手柄的标高读数：与手柄同色（暖橙），让"这是可拖的东西"一眼可见。 */
+.height-readout {
+  color: #f0a35a;
+  font-variant-numeric: tabular-nums;
+}
+
 /* ------------------------------------------------------- Radial ring */
 
 .radialRing {
@@ -2717,6 +2723,49 @@ header {
   background: var(--ap-blue);
   border-color: var(--ap-blue);
 }
+/* Shift 手势级 3D：**临时**生效。用虚线 + 琥珀色，刻意区别于"开关真的开着"的实心蓝 ——
+   实心蓝会让人以为松手之后它还开着。琥珀色沿用高度读数 .height-readout 的语汇。 */
+.vf-tool.is-temp {
+  background: var(--ap-surface-2);
+  color: #f0a35a;
+  border-color: #f0a35a;
+  border-style: dashed;
+}
+.vf-tool.is-temp:hover {
+  border-color: #f0a35a;
+}
+
+/* 画布上方的「Shift 3D 堆叠」提示条。只在平面模式下按住 Shift 时出现。
+   压在画布顶端居中：视线正好落在拖拽的那一块区域，不用移开眼睛找状态。 */
+.shift-stack-badge {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translate(-50%, 0);
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px dashed #f0a35a;
+  background: rgba(28, 28, 30, 0.86);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  font-family: var(--ap-font);
+  font-size: 11px;
+  color: #f6d3a8;
+  pointer-events: none;
+}
+.shift-stack-key {
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid #f0a35a;
+  color: #f0a35a;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+}
+
 .vf-camera {
   background: var(--ap-surface-2);
   color: var(--ap-text);
