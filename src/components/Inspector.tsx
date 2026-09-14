@@ -1,9 +1,11 @@
 import { useMemo, useState } from "react";
 import { useDirectorStore } from "../state/directorStore";
 import {
+  AnimalSpecies,
   CameraFraming,
   CameraMotionType,
   CameraSide,
+  CameraKey,
   CameraStyle,
   CameraView,
   EaseCurve,
@@ -12,6 +14,7 @@ import {
   FORMATION_LABELS,
   HandoffMode,
   Pose,
+  SpeedKey,
   ActionKind,
   FRAMING_LABELS,
   LENS_OPTIONS,
@@ -25,11 +28,14 @@ import {
   SIDE_LABELS,
   VIEW_LABELS,
 } from "../domain/schema";
+import { ANIMAL_MODELS, ANIMAL_SPECIES } from "../engine/animalModels";
 import { EaseEditor } from "./EaseEditor";
 import { PoseCustomizeModal } from "./PoseCustomizeModal";
 import { clonePose, POSE_PRESETS, POSE_PRESET_NAMES } from "../engine/poses";
-import { solveCamera } from "../engine/cameraSolver";
+import { moveChannelsAt, solveCamera } from "../engine/cameraSolver";
+import { CAMERA_CHANNELS, CameraChannel } from "../engine/ease";
 import { axisSide, cameraAxis } from "../engine/axis";
+import { waypointKeyframes } from "../engine/path";
 import { LockBadge } from "./LockBadge";
 
 const ACTION_KINDS: ActionKind[] = [
@@ -49,6 +55,88 @@ const NEW_CUSTOM = "__new_custom__";
 // 对象面板只展示静态基线姿势；步态类（walk/run）没有静态关节角度，只在动作片段里选。
 const STATIC_POSE_NAMES = POSE_PRESET_NAMES.filter((name) => name !== "walk" && name !== "run");
 
+/**
+ * 关键帧通道定义（单一来源）：中文标签 + 取值范围/步进 + 分组 + 语义说明。
+ * hint 会作为悬停提示显示，确保「数值 = 什么」与代码行为一致。
+ */
+const KEY_CHANNEL_META: Record<
+  CameraChannel,
+  { label: string; step: number; min: number; max: number; group: "motion" | "lens"; hint: string }
+> = {
+  orbitDeg: {
+    label: "环绕 °",
+    step: 5,
+    min: -720,
+    max: 720,
+    group: "motion",
+    hint: "机位绕目标旋转的角度（范围 ±720°，即正反各两圈）。0 = 该机位的默认方位（由 Side 决定）；正值沿「正前 → 侧面 → 正后」方向绕行，360° 为一整圈。只改绕行角度，机位到目标的距离不变。",
+  },
+  craneHeight: {
+    label: "升降 m",
+    step: 0.5,
+    min: -10,
+    max: 20,
+    group: "motion",
+    hint: "相对该 View 默认高度的垂直位移（米）。0 = 默认眼高；正值升高、负值降低。直接改机位高度，不改水平位置。",
+  },
+  dollyScale: {
+    label: "推拉 ×",
+    step: 0.05,
+    min: 0.3,
+    max: 3,
+    group: "motion",
+    hint: "取景距离倍数（基准 = 由景别 Framing 决定的距离）。1.0 = 基准；>1 拉远（主体变小、纳入更多环境）；<1 推近（主体变大）。改变的是距离，不是焦距。",
+  },
+  panDeg: {
+    label: "摇摄 °",
+    step: 5,
+    min: -180,
+    max: 180,
+    group: "motion",
+    hint: "机位不动，只把「注视方向」绕垂直轴左右旋转（度）。0 = 注视 Target；正值与「环绕」同旋向（方位角增加）。",
+  },
+  tiltDeg: {
+    label: "俯仰 °",
+    step: 5,
+    min: -90,
+    max: 90,
+    group: "motion",
+    hint: "机位不动，只把「注视方向」上下俯仰（度）。0 = 注视 Target；正值抬头、负值低头。不改变视线长度（距离不变）。",
+  },
+  truckDist: {
+    label: "横移 m",
+    step: 0.5,
+    min: -15,
+    max: 15,
+    group: "motion",
+    hint: "机位与注视点一起沿「垂直于视线」的方向平行横移（米），朝向保持不变（= 轨道横移）。正值移向画面一侧、负值反向。",
+  },
+  lensMm: {
+    label: "焦距 mm",
+    step: 1,
+    min: 8,
+    max: 200,
+    group: "lens",
+    hint: "该帧的镜头焦距（毫米）。改变视场角与透视：长焦压缩背景、广角扩张环境。不改变机位到目标的距离（距离用「推拉 ×」）。",
+  },
+  roll: {
+    label: "荷兰角 °",
+    step: 1,
+    min: -360,
+    max: 360,
+    group: "lens",
+    hint: "画面的滚转 / 荷兰角（度，范围 ±360°），正值顺时针倾斜。机位与注视方向不变。",
+  },
+  otsOffset: {
+    label: "过肩偏",
+    step: 0.05,
+    min: 0,
+    max: 0.8,
+    group: "lens",
+    hint: "仅「过肩 OTS」段有效：主体被推离画面中心的比例（以画面半宽为单位）。0 = 主体居中；越大主体越靠边、前景肩膀越占画面。非过肩段无效。",
+  },
+};
+
 const MOTION_TYPES: CameraMotionType[] = [
   "STATIC",
   "FOLLOW",
@@ -57,7 +145,7 @@ const MOTION_TYPES: CameraMotionType[] = [
   "DOLLY_ZOOM",
   "CRANE",
   "DRONE",
-  "OTS",
+  "PATH",
 ];
 
 const poseEquals = (pose: Pose | undefined, preset: Pose) =>
@@ -215,6 +303,7 @@ export function Inspector() {
   const selectedKind = useDirectorStore((s) => s.selectedKind);
   const selectedId = useDirectorStore((s) => s.selectedId);
   const selectedItem = useDirectorStore((s) => s.selectedItem);
+  const currentTime = useDirectorStore((s) => s.currentTime);
   const selectedPoint = useDirectorStore((s) => s.selectedPoint);
   const viewMode = useDirectorStore((s) => s.viewMode);
   const activeCameraId = useDirectorStore((s) => s.activeCameraId);
@@ -224,10 +313,17 @@ export function Inspector() {
   const addCameraMove = useDirectorStore((s) => s.addCameraMove);
   const patchCameraMove = useDirectorStore((s) => s.patchCameraMove);
   const deleteCameraMove = useDirectorStore((s) => s.deleteCameraMove);
+  const addCameraKey = useDirectorStore((s) => s.addCameraKey);
+  const updateCameraKey = useDirectorStore((s) => s.updateCameraKey);
+  const addCameraPathPoint = useDirectorStore((s) => s.addCameraPathPoint);
+  const deleteCameraKey = useDirectorStore((s) => s.deleteCameraKey);
+  const clearCameraKeys = useDirectorStore((s) => s.clearCameraKeys);
   const addReverseShot = useDirectorStore((s) => s.addReverseShot);
   const removeCamera = useDirectorStore((s) => s.removeCamera);
   const setSegmentEase = useDirectorStore((s) => s.setSegmentEase);
   const setCameraMoveEase = useDirectorStore((s) => s.setCameraMoveEase);
+  const setSegmentSpeedKeys = useDirectorStore((s) => s.setSegmentSpeedKeys);
+  const setCameraMoveSpeedKeys = useDirectorStore((s) => s.setCameraMoveSpeedKeys);
   const setHandoffMode = useDirectorStore((s) => s.setHandoffMode);
   const setCameraJunctionMode = useDirectorStore((s) => s.setCameraJunctionMode);
   const deleteSegment = useDirectorStore((s) => s.deleteSegment);
@@ -259,14 +355,20 @@ export function Inspector() {
   const groupPose = groupAnchor?.pose;
   const groupIsHuman = groupAnchor?.category === "human";
   const segment = state.segments.find((item) => item.id === selectedItem);
+  // 路径转折点在该片段上的抵达时刻：交给 EaseEditor 画在迷你时间轴上，便于和关键点对照。
+  // 用 useMemo 缓存 —— 弧长积分不便宜，而这段代码所在的重渲染远多于片段数据变更。
+  const segmentWaypoints = useMemo(() => (segment ? waypointKeyframes(segment) : []), [segment]);
   const constraint = state.constraints.find((item) => item.id === selectedItem);
   const move = state.cameraMoves.find((item) => item.id === selectedItem);
   const moveCamera = move ? state.cameras.find((c) => c.id === move.camera) : undefined;
+  // 过肩需要至少 2 名演员（前景 + 主体）；不足时 OTS 选项禁用，新增演员后自动解封。
+  const actors = state.objects.filter((o) => o.type === "actor");
+  const canOts = actors.length >= 2;
   // 段级未设置时沿用相机级错位量，滑块显示的就是实际生效值。
   const moveOtsOffset = move?.otsOffset ?? moveCamera?.otsOffset ?? 0.35;
   // 过肩相关控件只在「可能是过肩」时展开：类型为 OTS，或已指定前景演员。
-  const cameraOts = !!camera && (camera.motion === "OTS" || !!camera.shoulderId);
-  const moveOts = !!move && (move.type === "OTS" || !!move.shoulderId);
+  const cameraOts = !!camera && camera.targetType === "OTS";
+  const moveOts = !!move && move.targetType === "OTS";
   const action = state.actions?.find((item) => item.id === selectedItem);
   // 互斥选择下，时间轴片段（segment / move / constraint / action）也是合法的 Inspector 主体，
   // 选中它们时对象轴已清空，故这里也要放行，否则片段编辑 UI（ease / handoff / joints 等）打不开。
@@ -284,7 +386,7 @@ export function Inspector() {
   const customActions = useDirectorStore((s) => s.state.customActions) ?? [];
   // 该相机上被 CameraMove 写死的段级覆盖：相机级同名属性在那些时间段内不生效。
   const overriddenByMoves = camera
-    ? (["framing", "view", "side", "lensMm", "roll", "shoulderId", "otsOffset"] as const).filter((key) =>
+    ? (["framing", "view", "side", "lensMm", "roll", "shoulderId", "otsOffset", "stabilize"] as const).filter((key) =>
         state.cameraMoves.some((item) => item.camera === camera.id && item[key] !== undefined),
       )
     : [];
@@ -324,6 +426,9 @@ export function Inspector() {
   const [customize, setCustomize] = useState<{ mode: "create" } | { mode: "edit"; id: string } | null>(
     null,
   );
+  // 关键帧选中态（与时间轴共享）。
+  const selectedKeyId = useDirectorStore((s) => s.selectedKeyId);
+  const selectCameraKey = useDirectorStore((s) => s.selectCameraKey);
 
   const pointCount = segment ? segment.points.length : 0;
   const selectedPointShape = segment?.points.find((point) => point.id === selectedPoint)?.shape;
@@ -332,17 +437,24 @@ export function Inspector() {
     ? {
         title: segment.id,
         ease: segment.ease,
+        keys: segment.speedKeys ?? null,
+        waypoints: segmentWaypoints,
         timeStart: segment.timeStart,
         timeEnd: segment.timeEnd,
         onChange: (ease: EaseCurve) => setSegmentEase(segment.id, ease),
+        onKeysChange: (keys: SpeedKey[] | null) => setSegmentSpeedKeys(segment.id, keys),
       }
     : move
       ? {
           title: move.id,
           ease: move.ease,
+          keys: move.speedKeys ?? null,
+          // 相机 move 没有路径转折点（转向由 framing / style 表达），给空集保持两分支形状一致。
+          waypoints: [],
           timeStart: move.timeStart,
           timeEnd: move.timeEnd,
           onChange: (ease: EaseCurve) => setCameraMoveEase(move.id, ease),
+          onKeysChange: (keys: SpeedKey[] | null) => setCameraMoveSpeedKeys(move.id, keys),
         }
       : null;
 
@@ -519,6 +631,28 @@ export function Inspector() {
                 <option value="set">set（环境 / 遮挡体）</option>
               </select>
             </Field>
+            {object.category === "animal" ? (
+              <Field label="Species 物种">
+                <select
+                  value={object.species ?? ""}
+                  onChange={(event) => {
+                    const sp = event.target.value as AnimalSpecies;
+                    const am = ANIMAL_MODELS[sp];
+                    updateAsset(object.id, {
+                      species: sp,
+                      footprint: { ...am.footprint },
+                      color: am.color,
+                    });
+                  }}
+                >
+                  {ANIMAL_SPECIES.map((sp) => (
+                    <option key={sp} value={sp}>
+                      {ANIMAL_MODELS[sp].label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            ) : null}
             {/* Rotation 只对环境（set）有意义：agent / human 的朝向由运动方向或 LOOK_AT 决定，
                 组成员更是由整队大方向统一给出，单独设它会被求解器覆盖，故不再提供。 */}
             {object.role === "set" ? (
@@ -742,14 +876,16 @@ export function Inspector() {
       ) : null}
 
       <div className="field" id="easeField" style={{ display: easeTarget ? "" : "none" }}>
-        <div className="lab">Speed Curve · cubic-bezier</div>
+        <div className="lab">缓动曲线 · cubic-bezier</div>
         {easeTarget ? (
           <EaseEditor
             title={easeTarget.title}
             ease={easeTarget.ease}
+            keys={easeTarget.keys}
             timeStart={easeTarget.timeStart}
             timeEnd={easeTarget.timeEnd}
             onChange={easeTarget.onChange}
+            onKeysChange={easeTarget.onKeysChange}
           />
         ) : null}
       </div>
@@ -763,7 +899,14 @@ export function Inspector() {
                 ⚠ {overriddenByMoves.join(" / ")} 已被某些 CameraMove 段级覆盖，相机级同名属性在那些时间段内不生效（段级留空即继承此处）。
               </p>
             ) : null}
-            <SubGroup title="构图 Composition" hint="拍谁、多近、从哪个角度。">
+            <SubGroup
+              title="构图 Composition"
+              hint={
+                cameraOts
+                  ? "过肩镜头下，机位角度 / 距离 / 眼高由过肩几何固定，仅 Target 与 Lens 生效；侧面关系由下方「过肩 OTS」决定。"
+                  : "拍谁、多近、从哪个角度。"
+              }
+            >
               <Field label="Target（跟随对象 / 队伍）">
                 <select
                   value={camera.targetId}
@@ -774,13 +917,13 @@ export function Inspector() {
                       // 选中的是队伍：与对象同等地位，自动按 GROUP 取景并框住全队。
                       updateCamera(camera.id, {
                         targetId: id,
-                        targetType: "GROUP",
+                        targetType: cameraOts ? "OTS" : "GROUP",
                         groupId: id,
                       });
                     } else {
                       updateCamera(camera.id, {
                         targetId: id,
-                        targetType: "OBJECT",
+                        targetType: cameraOts ? "OTS" : "OBJECT",
                         groupId: undefined,
                       });
                     }
@@ -801,6 +944,7 @@ export function Inspector() {
                   ))}
                 </select>
               </Field>
+              {cameraOts ? null : (
               <Field label="Framing">
                 <select
                   value={camera.framing}
@@ -815,6 +959,8 @@ export function Inspector() {
                   ))}
                 </select>
               </Field>
+              )}
+              {cameraOts ? null : (
               <Field label="View">
                 <select
                   value={camera.view}
@@ -829,6 +975,8 @@ export function Inspector() {
                   ))}
                 </select>
               </Field>
+              )}
+              {cameraOts ? null : (
               <Field label="Side">
                 <select
                   value={camera.side}
@@ -843,6 +991,7 @@ export function Inspector() {
                   ))}
                 </select>
               </Field>
+              )}
               <Field label="Lens">
                 <select
                   value={camera.lensMm}
@@ -867,7 +1016,7 @@ export function Inspector() {
                   onChange={(event) => updateCamera(camera.id, { altitude: Number(event.target.value) })}
                 />
               </Field>
-              {camera.motion === "PAN" ? (
+              {!cameraOts && camera.motion === "PAN" ? (
                 <Field label={`Pan ${camera.panDeg ?? 0}°（原地水平摇）`}>
                   <input
                     type="range"
@@ -879,7 +1028,7 @@ export function Inspector() {
                   />
                 </Field>
               ) : null}
-              {camera.motion === "TILT" ? (
+              {!cameraOts && camera.motion === "TILT" ? (
                 <Field label={`Tilt ${camera.tiltDeg ?? 0}°（原地俯仰）`}>
                   <input
                     type="range"
@@ -891,7 +1040,7 @@ export function Inspector() {
                   />
                 </Field>
               ) : null}
-              {camera.motion === "TRUCK" ? (
+              {!cameraOts && camera.motion === "TRUCK" ? (
                 <Field label={`Truck ${camera.truckDist ?? 0}m（横向平移）`}>
                   <input
                     type="range"
@@ -910,17 +1059,27 @@ export function Inspector() {
                 title="过肩 OTS"
                 hint="越过前景演员的肩膀拍主体：Shoulder 是前景、Target 是主体；Offset 控制主体偏离画面中心的程度。"
               >
-                <Field label="Shoulder（前景演员）">
+                {cameraOts && !canOts ? (
+                  <p className="hint" style={{ color: "#ffb86b" }}>
+                    ⚠ 过肩需要至少 2 名演员（前景 + 主体）；当前不足，过肩不生效，请先加入另一个演员。
+                  </p>
+                ) : cameraOts && (!camera.shoulderId || camera.shoulderId === camera.targetId) ? (
+                  <p className="hint" style={{ color: "#ffb86b" }}>
+                    ⚠ 需设置与主体（Target）不同的前景演员（Shoulder），否则过肩不生效、Side（左/右肩）无效。
+                  </p>
+                ) : null}
+                <Field label="前景演员（Shoulder）">
                   <select
                     value={camera.shoulderId ?? ""}
+                    disabled={!canOts}
                     onChange={(event) =>
                       updateCamera(camera.id, { shoulderId: event.target.value || undefined })
                     }
                   >
-                    <option value="">(none)</option>
-                    {state.objects.map((item) => (
+                    <option value="">{canOts ? "(自动)" : "(需至少 2 名演员)"}</option>
+                    {actors.filter((item) => item.id !== camera.targetId).map((item) => (
                       <option key={item.id} value={item.id}>
-                        {item.id}
+                        {objectDisplayName(item)}
                       </option>
                     ))}
                   </select>
@@ -978,16 +1137,33 @@ export function Inspector() {
               </Field>
               <Field label="Default Motion">
                 <select
-                  value={camera.motion}
-                  onChange={(event) =>
-                    updateCamera(camera.id, { motion: event.target.value as CameraMotionType })
-                  }
+                  value={cameraOts ? "OTS" : camera.motion}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    if (value === "OTS") {
+                      updateCamera(camera.id, {
+                        targetType: "OTS",
+                        shoulderId:
+                          camera.shoulderId ??
+                          state.objects.find((o) => o.type === "actor" && o.id !== camera.targetId)?.id,
+                      });
+                    } else {
+                      const grp = state.groups?.find((g) => g.id === camera.targetId);
+                      updateCamera(camera.id, {
+                        motion: value as CameraMotionType,
+                        targetType: grp ? "GROUP" : "OBJECT",
+                      });
+                    }
+                  }}
                 >
                   {MOTION_TYPES.map((value) => (
                     <option key={value} value={value}>
                       {MOTION_LABELS[value]}
                     </option>
                   ))}
+                  <option value="OTS" disabled={!canOts}>
+                    过肩 OTS{canOts ? "" : "（需 ≥2 名演员）"}
+                  </option>
                 </select>
               </Field>
               {camera.kind === "drone" ? (
@@ -1018,6 +1194,21 @@ export function Inspector() {
                   <p className="hint">{STYLE_HINTS[camera.style ?? "locked"]}</p>
                 </>
               )}
+              <Field label={`防抖 Stabilization ${Math.round((camera.stabilize ?? 0) * 100)}%`}>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={camera.stabilize ?? 0}
+                  onChange={(event) =>
+                    updateCamera(camera.id, { stabilize: Number(event.target.value) })
+                  }
+                />
+              </Field>
+              <p className="hint">
+                跟随阻尼：相机对目标瞬变（转向 / 绕障让位 / 扭动）的响应滞后一点；瞬变若很快消失则被忽略。0 = 完全跟手，越大越「拖」。可在单个运镜段覆盖。
+              </p>
             </SubGroup>
           </div>
 
@@ -1035,8 +1226,8 @@ export function Inspector() {
                   ＋ {MOTION_LABELS[type]}
                 </button>
               ))}
-            </div>
-            <p className="hint">{MOTION_HINTS[camera.motion]}</p>
+              </div>
+            <p className="hint">{cameraOts ? "过肩：镜头越过前景演员的肩膀拍摄主体；在下方「过肩 OTS」组里设置前景演员与肩侧。" : MOTION_HINTS[camera.motion]}</p>
             <div className="mini-btns">
               <button
                 type="button"
@@ -1073,40 +1264,173 @@ export function Inspector() {
           <SubGroup title="运镜 Motion" hint={MOTION_HINTS[move.type]}>
             <Field label="Motion">
               <select
-                value={move.type}
-                onChange={(event) =>
-                  patchCameraMove(move.id, { type: event.target.value as CameraMotionType })
-                }
+                value={moveOts ? "OTS" : move.type}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  if (value === "OTS") {
+                    patchCameraMove(move.id, {
+                      targetType: "OTS",
+                      shoulderId:
+                        move.shoulderId ??
+                        moveCamera?.shoulderId ??
+                        state.objects.find(
+                          (o) => o.type === "actor" && o.id !== (move.targetId ?? moveCamera?.targetId),
+                        )?.id,
+                    });
+                  } else {
+                    patchCameraMove(move.id, { type: value as CameraMotionType, targetType: undefined });
+                  }
+                }}
               >
                 {MOTION_TYPES.map((value) => (
                   <option key={value} value={value}>
                     {MOTION_LABELS[value]}
                   </option>
                 ))}
+                <option value="OTS" disabled={!canOts}>
+                  过肩 OTS{canOts ? "" : "（需 ≥2 名演员）"}
+                </option>
               </select>
             </Field>
 
-            {move.type === "ORBIT" || move.type === "DRONE" ? (
-              <Field label={`Orbit ${move.orbitDeg.toFixed(0)}°`}>
+            {!moveOts && move.type === "PATH" ? (
+              <div className="path-editor">
+                <Row label={`路径点 ${move.pathPoints?.length ?? 0}`}>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={() => {
+                      const pts = move.pathPoints ?? [];
+                      const cam = state.cameras.find((c) => c.id === move.camera);
+                      const t = state.objects.find((o) => o.id === (move.targetId ?? cam?.targetId));
+                      const last = pts[pts.length - 1];
+                      const prev = pts[pts.length - 2];
+                      if (last && prev) {
+                        // 沿最后一段方向继续延伸 3m：避免新点固定堆在终点上（旧实现恒为 (bx-4,·,bz+3)，正好压住 P2）。
+                        const dx = last.x - prev.x;
+                        const dz = last.z - prev.z;
+                        const len = Math.hypot(dx, dz) || 1;
+                        addCameraPathPoint(move.id, last.x + (dx / len) * 3, last.y, last.z + (dz / len) * 3);
+                      } else if (last) {
+                        addCameraPathPoint(move.id, last.x + 3, last.y, last.z + 3);
+                      } else {
+                        addCameraPathPoint(move.id, t?.x ?? 0, 1.6, (t?.z ?? 0) + 3);
+                      }
+                    }}
+                  >
+                    ＋ 加点
+                  </button>
+                </Row>
+                <p className="hint">
+                  在 Director View 拖拽蓝色路径点塑形；轻点蓝点弹菜单删除（与人物 move 一致）。
+                  相机沿折线行进。朝向三选一：跟随对象 / 固定方向（用平面 · 立面两个角度设定，机位平移、朝向不变）/ 沿轨迹（朝行进方向）。
+                </p>
+                {(() => {
+                  const hasFixedDir =
+                    move.fixedYawDeg !== undefined || move.fixedPitchDeg !== undefined;
+                  const lookMode = hasFixedDir ? "fixed" : move.targetId ? "target" : "tangent";
+                  return (
+                    <>
+                      <Field label="朝向 Look">
+                        <select
+                          value={lookMode}
+                          onChange={(event) => {
+                            const mode = event.target.value;
+                            if (mode === "target") {
+                              patchCameraMove(move.id, {
+                                fixedYawDeg: undefined,
+                                fixedPitchDeg: undefined,
+                                targetId: move.targetId ?? moveCamera?.targetId ?? undefined,
+                              });
+                            } else if (mode === "fixed") {
+                              // 从当前朝向反推「平面 / 立面」两角，切换瞬间画面不跳。
+                              let yawDeg = move.fixedYawDeg;
+                              let pitchDeg = move.fixedPitchDeg;
+                              if (yawDeg === undefined && pitchDeg === undefined) {
+                                const solved = solveCamera(state, move.camera, (move.timeStart + move.timeEnd) / 2);
+                                if (solved) {
+                                  const dx = solved.target[0] - solved.position[0];
+                                  const dy = solved.target[1] - solved.position[1];
+                                  const dz = solved.target[2] - solved.position[2];
+                                  const len = Math.hypot(dx, dy, dz) || 1;
+                                  yawDeg = ((Math.atan2(dx / len, dz / len) * 180) / Math.PI + 360) % 360;
+                                  pitchDeg = ((Math.asin(Math.max(-1, Math.min(1, dy / len))) * 180) / Math.PI + 360) % 360;
+                                }
+                              }
+                              patchCameraMove(move.id, {
+                                targetId: undefined,
+                                fixedYawDeg: yawDeg ?? 0,
+                                fixedPitchDeg: pitchDeg ?? 0,
+                              });
+                            } else {
+                              patchCameraMove(move.id, {
+                                targetId: undefined,
+                                fixedYawDeg: undefined,
+                                fixedPitchDeg: undefined,
+                              });
+                            }
+                          }}
+                        >
+                          <option value="target">跟随对象 Target</option>
+                          <option value="fixed">固定方向 Fixed</option>
+                          <option value="tangent">沿轨迹 Tangent</option>
+                        </select>
+                      </Field>
+                      {lookMode === "fixed" ? (
+                        <>
+                          <Field label={`平面 Yaw ${(move.fixedYawDeg ?? 0).toFixed(0)}°`}>
+                            <input
+                              type="range"
+                              min={0}
+                              max={360}
+                              step={1}
+                              value={move.fixedYawDeg ?? 0}
+                              onChange={(event) =>
+                                patchCameraMove(move.id, { fixedYawDeg: Number(event.target.value) })
+                              }
+                            />
+                          </Field>
+                          <Field label={`立面 Pitch ${(move.fixedPitchDeg ?? 0).toFixed(0)}°`}>
+                            <input
+                              type="range"
+                              min={0}
+                              max={360}
+                              step={1}
+                              value={move.fixedPitchDeg ?? 0}
+                              onChange={(event) =>
+                                patchCameraMove(move.id, { fixedPitchDeg: Number(event.target.value) })
+                              }
+                            />
+                          </Field>
+                        </>
+                      ) : null}
+                    </>
+                  );
+                })()}
+              </div>
+            ) : null}
+
+            {!moveOts && (move.type === "ORBIT" || move.type === "DRONE") ? (
+              <Field label={`Orbit ${(move.orbitDeg ?? 0).toFixed(0)}°`}>
                 <input
                   type="range"
                   min={-360}
                   max={360}
                   step={5}
-                  value={move.orbitDeg}
+                  value={move.orbitDeg ?? 0}
                   onChange={(event) => patchCameraMove(move.id, { orbitDeg: Number(event.target.value) })}
                 />
               </Field>
             ) : null}
 
-            {move.type === "DOLLY" || move.type === "DRONE" || move.type === "DOLLY_ZOOM" ? (
-              <Field label={`Dolly ×${move.dollyScale.toFixed(2)}`}>
+            {!moveOts && (move.type === "DOLLY" || move.type === "DRONE" || move.type === "DOLLY_ZOOM") ? (
+              <Field label={`Dolly ×${(move.dollyScale ?? 1).toFixed(2)}`}>
                 <input
                   type="range"
                   min={0.3}
                   max={2}
                   step={0.05}
-                  value={move.dollyScale}
+                  value={move.dollyScale ?? 1}
                   onChange={(event) =>
                     patchCameraMove(move.id, { dollyScale: Number(event.target.value) })
                   }
@@ -1114,14 +1438,14 @@ export function Inspector() {
               </Field>
             ) : null}
 
-            {move.type === "CRANE" || move.type === "DRONE" ? (
-              <Field label={`Crane +${move.craneHeight.toFixed(1)}m`}>
+            {!moveOts && (move.type === "CRANE" || move.type === "DRONE") ? (
+              <Field label={`Crane +${(move.craneHeight ?? 0).toFixed(1)}m`}>
                 <input
                   type="range"
                   min={-6}
                   max={8}
                   step={0.1}
-                  value={move.craneHeight}
+                  value={move.craneHeight ?? 0}
                   onChange={(event) =>
                     patchCameraMove(move.id, { craneHeight: Number(event.target.value) })
                   }
@@ -1130,7 +1454,14 @@ export function Inspector() {
             ) : null}
           </SubGroup>
 
-          <SubGroup title="构图 Composition" hint="留空即继承相机级设置。">
+          <SubGroup
+            title="构图 Composition"
+            hint={
+              moveOts
+                ? "过肩镜头下，机位角度 / 距离 / 眼高由过肩几何固定，仅 Target 与 Lens 生效；侧面关系由下方「过肩 OTS」决定。"
+                : "留空即继承相机级设置。"
+            }
+          >
             <Field label="Target">
               <select
                 value={move.targetId ?? ""}
@@ -1141,11 +1472,12 @@ export function Inspector() {
                 <option value="">(camera default)</option>
                 {state.objects.map((item) => (
                   <option key={item.id} value={item.id}>
-                    {item.id}
+                    {objectDisplayName(item)}
                   </option>
                 ))}
               </select>
             </Field>
+            {moveOts ? null : (
             <Field label="Framing">
               <select
                 value={move.framing ?? ""}
@@ -1161,6 +1493,8 @@ export function Inspector() {
                 ))}
               </select>
             </Field>
+            )}
+            {moveOts ? null : (
             <Field label="View">
               <select
                 value={move.view ?? ""}
@@ -1176,6 +1510,8 @@ export function Inspector() {
                 ))}
               </select>
             </Field>
+            )}
+            {moveOts ? null : (
             <Field label="Side">
               <select
                 value={move.side ?? ""}
@@ -1191,6 +1527,8 @@ export function Inspector() {
                 ))}
               </select>
             </Field>
+            )}
+            {moveOts ? null : (
             <Field label="Lens">
               <select
                 value={move.lensMm ?? ""}
@@ -1206,24 +1544,38 @@ export function Inspector() {
                 ))}
               </select>
             </Field>
+            )}
           </SubGroup>
 
           {moveOts ? (
             <SubGroup
               title="过肩 OTS"
               hint="越过前景演员的肩膀拍主体：Shoulder 是前景、Target 是主体（在上方构图组里设置）。"
-            >
-              <Field label="Shoulder（前景演员）">
+              >
+              {moveOts && !canOts ? (
+              <p className="hint" style={{ color: "#ffb86b" }}>
+                ⚠ 过肩需要至少 2 名演员（前景 + 主体）；当前不足，过肩不生效，请先加入另一个演员。
+              </p>
+              ) : moveOts &&
+              (!(move.shoulderId ?? moveCamera?.shoulderId) ||
+              (move.shoulderId ?? moveCamera?.shoulderId) ===
+                (move.targetId ?? moveCamera?.targetId)) ? (
+              <p className="hint" style={{ color: "#ffb86b" }}>
+                ⚠ 需设置与主体（Target）不同的前景演员（Shoulder），否则过肩不生效、Side（左/右肩）无效。
+              </p>
+              ) : null}
+              <Field label="前景演员（Shoulder）">
                 <select
                   value={move.shoulderId ?? ""}
+                  disabled={!canOts}
                   onChange={(event) =>
                     patchCameraMove(move.id, { shoulderId: event.target.value || undefined })
                   }
                 >
-                  <option value="">(camera default)</option>
-                  {state.objects.map((item) => (
+                  <option value="">{canOts ? "(camera default)" : "(需至少 2 名演员)"}</option>
+                  {actors.filter((item) => item.id !== (move.targetId ?? moveCamera?.targetId)).map((item) => (
                     <option key={item.id} value={item.id}>
-                      {item.id}
+                      {objectDisplayName(item)}
                     </option>
                   ))}
                 </select>
@@ -1286,7 +1638,200 @@ export function Inspector() {
                 onChange={(event) => patchCameraMove(move.id, { roll: Number(event.target.value) })}
               />
             </Field>
+            <Field
+              label={`防抖 Stabilization ${Math.round((move.stabilize ?? moveCamera?.stabilize ?? 0) * 100)}%（覆盖相机）`}
+            >
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={move.stabilize ?? moveCamera?.stabilize ?? 0}
+                onChange={(event) =>
+                  patchCameraMove(move.id, { stabilize: Number(event.target.value) })
+                }
+              />
+            </Field>
           </SubGroup>
+
+          {(() => {
+            const keys = move.keys ?? [];
+            const span = move.timeEnd - move.timeStart || 1;
+            const activeKey = keys.find((key) => key.id === selectedKeyId) ?? keys[0];
+            const absTime = activeKey ? move.timeStart + activeKey.t * span : move.timeStart;
+            const eff = moveChannelsAt(state, move.camera, move, absTime);
+            const playheadT = Math.max(0, Math.min(1, (currentTime - move.timeStart) / span));
+            const keyIndex = Math.max(0, keys.findIndex((key) => key.id === activeKey?.id));
+            const patchKey = (keyId: string, patch: Partial<CameraKey>) =>
+              updateCameraKey(move.id, keyId, patch);
+            return (
+              <SubGroup
+                title="关键帧 Keyframes"
+                hint="在运镜基元之上定制通道：只填你要改的通道（留空 = 沿用基元）。同一通道从「段首原值」过渡到第一个帧，帧间按后一帧的缓动插值，末帧之后保持（段首帧 = 整段恒定）。可据此在环绕时叠加升降等，拼出复杂运镜。"
+              >
+                <div className="mini-btns">
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    title="在播放头处插入一个空关键帧（不填通道前不改变画面）"
+                    onClick={() => {
+                      addCameraKey(move.id, playheadT);
+                      selectCameraKey(null);
+                    }}
+                  >
+                    ＋ 关键帧@播放头 {currentTime.toFixed(1)}s
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    disabled={!keys.length}
+                    onClick={() => {
+                      clearCameraKeys(move.id);
+                      selectCameraKey(null);
+                    }}
+                  >
+                    清空
+                  </button>
+                </div>
+                {keys.length ? (
+                  <>
+                    <p className="hint">
+                      在时间轴上操作关键帧：拖动改时刻 · 双击片段空白处新增 · 右键删除。这里编辑选中帧的通道值（当前 #
+                      {Math.max(0, keys.findIndex((key) => key.id === activeKey?.id)) + 1} / {keys.length}）。
+                    </p>
+                    {activeKey ? (
+                      <>
+                        <div className="mini-btns">
+                          <button
+                            type="button"
+                            className="ghost-button"
+                            disabled={keyIndex <= 0}
+                            onClick={() => selectCameraKey(keys[keyIndex - 1].id)}
+                          >
+                            ◀ 上一帧
+                          </button>
+                          <button
+                            type="button"
+                            className="ghost-button"
+                            disabled={keyIndex >= keys.length - 1}
+                            onClick={() => selectCameraKey(keys[keyIndex + 1].id)}
+                          >
+                            下一帧 ▶
+                          </button>
+                        </div>
+                        <Field
+                          label={`时刻 ${(move.timeStart + activeKey.t * span).toFixed(2)}s（${Math.round(activeKey.t * 100)}%）`}
+                        >
+                          <input
+                            type="range"
+                            min={0}
+                            max={1}
+                            step={0.01}
+                            value={activeKey.t}
+                            onChange={(event) => patchKey(activeKey.id, { t: Number(event.target.value) })}
+                          />
+                        </Field>
+                        {(["motion", "lens"] as const).map((group) => (
+                          <div key={group}>
+                            <div className="kf-group">
+                              {group === "motion" ? "运动 Motion" : "镜头 Lens"}
+                            </div>
+                            {CAMERA_CHANNELS.filter(
+                              (channel) => KEY_CHANNEL_META[channel].group === group,
+                            ).map((channel) => {
+                              const meta = KEY_CHANNEL_META[channel];
+                              const value = activeKey[channel];
+                              const base = eff ? eff[channel] : 0;
+                              const isSet = value !== undefined;
+                              const shown = value ?? Math.min(meta.max, Math.max(meta.min, base));
+                              const apply = (next: number | undefined) =>
+                                patchKey(activeKey.id, { [channel]: next } as Partial<CameraKey>);
+                              return (
+                                <div key={channel} className={`kf-row${isSet ? " set" : ""}`}>
+                                  <span className="kf-name" title={meta.hint}>
+                                    {meta.label}
+                                  </span>
+                                  <input
+                                    className="kf-slider"
+                                    type="range"
+                                    min={meta.min}
+                                    max={meta.max}
+                                    step={meta.step}
+                                    value={shown}
+                                    title={`${meta.hint}\n\n${
+                                      isSet
+                                        ? `本帧已覆盖（${value}）`
+                                        : `未覆盖 · 当前实际值 ${base.toFixed(2)}（拖动即覆盖）`
+                                    }`}
+                                    onChange={(event) => apply(Number(event.target.value))}
+                                  />
+                                  <input
+                                    className="kf-num"
+                                    type="number"
+                                    min={meta.min}
+                                    max={meta.max}
+                                    step={meta.step}
+                                    value={value ?? ""}
+                                    placeholder={base.toFixed(2)}
+                                    onChange={(event) => {
+                                      const raw = event.target.value;
+                                      apply(raw === "" ? undefined : Number(raw));
+                                    }}
+                                  />
+                                  <button
+                                    type="button"
+                                    className="kf-clear"
+                                    title="清除该通道（回落到运镜基元 / 相邻帧）"
+                                    disabled={!isSet}
+                                    onClick={() => apply(undefined)}
+                                  >
+                                    ×
+                                  </button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ))}
+                        {(() => {
+                          const off = [
+                            activeKey.panDeg ? "摇摄" : null,
+                            activeKey.tiltDeg ? "俯仰" : null,
+                            activeKey.truckDist ? "横移" : null,
+                          ].filter(Boolean);
+                          return off.length ? (
+                            <p className="hint" style={{ color: "#ffb86b" }}>
+                              ⚠ 本帧设置了 {off.join(" / ")}：它们会让镜头主动离开主体（摇摄/俯仰转视线、横移平移机位）。
+                              想让主体始终居中，请把它们清成 0（点行尾 ×）。
+                            </p>
+                          ) : null;
+                        })()}
+                        <div className="mini-btns">
+                          <button
+                            type="button"
+                            className="ghost-button danger-button"
+                            onClick={() => {
+                              deleteCameraKey(move.id, activeKey.id);
+                              selectCameraKey(null);
+                            }}
+                          >
+                            删除此帧
+                          </button>
+                        </div>
+                        <p className="hint">
+                          拖动滑块 / 输入数值 = 本帧覆盖该通道（整行高亮）；点 × 取消覆盖、回落基元或相邻帧。未高亮的行显示的是当前实际值（灰字）。
+                        </p>
+                      </>
+                    ) : null}
+                  </>
+                ) : (
+                  <p className="hint">
+                    暂无关键帧。把播放头移到目标时刻，点「＋ 关键帧@播放头」加一帧；例如给 ORBIT 段在
+                    t=0 与 t=1 各加一帧、填「升降」0 → 5m，即成环绕攀升。
+                  </p>
+                )}
+              </SubGroup>
+            );
+          })()}
 
           {(() => {
             const junction = state.cameraJunctions.find(

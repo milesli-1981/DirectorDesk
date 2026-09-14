@@ -1,0 +1,106 @@
+{
+  "manifest": {
+    "name": "防抖对比片场",
+    "order": [{ "id": "SCN_STAB", "name": "防抖对比 · 跟拍绕障" }],
+    "activeSceneId": "SCN_STAB"
+  },
+  "scenes": {
+    "SCN_STAB": {
+      "revision": 1,
+      "duration": 12,
+      "aspectRatio": "16:9",
+      "objects": [
+        { "id": "ROW_1", "type": "actor", "category": "human", "role": "agent", "x": -9, "z": 0, "rotation": 0, "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 }, "color": "#7bd88f", "name": "队首" },
+        { "id": "ROW_2", "type": "actor", "category": "human", "role": "agent", "x": -9, "z": 1.65, "rotation": 0, "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 }, "color": "#7bd88f", "name": "队员2" },
+        { "id": "ROW_3", "type": "actor", "category": "human", "role": "agent", "x": -9, "z": 0.55, "rotation": 0, "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 }, "color": "#7bd88f", "name": "队员3" },
+        { "id": "ROW_4", "type": "actor", "category": "human", "role": "agent", "x": -9, "z": -0.55, "rotation": 0, "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 }, "color": "#7bd88f", "name": "队员4" },
+        { "id": "ROW_5", "type": "actor", "category": "human", "role": "agent", "x": -9, "z": -1.65, "rotation": 0, "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 }, "color": "#7bd88f", "name": "队员5" },
+        { "id": "ROW_6", "type": "actor", "category": "human", "role": "agent", "x": -9, "z": -2.75, "rotation": 0, "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 }, "color": "#7bd88f", "name": "队员6" },
+        { "id": "ROCK", "type": "prop", "category": "prop", "role": "set", "x": 0, "z": 0, "rotation": 0, "footprint": { "w": 2, "d": 2, "h": 1.6 }, "color": "#9aa7b5", "name": "路中石墩", "locked": true }
+      ],
+      "segments": [
+        {
+          "id": "SEG_ROW_1",
+          "type": "MOVE",
+          "object": "ROW_1",
+          "startX": -9,
+          "startZ": 0,
+          "endX": 9,
+          "endZ": 0,
+          "points": [],
+          "timeStart": 0,
+          "timeEnd": 12,
+          "ease": [0.33, 0, 0.67, 1]
+        }
+      ],
+      "handoffs": [],
+      "constraints": [],
+      "cameras": [
+        {
+          "id": "CAM_RAW",
+          "name": "跟拍 0% 无防抖",
+          "color": "#ff7b72",
+          "targetId": "TEAM_ROW",
+          "targetType": "GROUP",
+          "groupId": "TEAM_ROW",
+          "framing": "medium",
+          "view": "eye_level",
+          "side": "back_3_4",
+          "lensMm": 50,
+          "motion": "FOLLOW",
+          "stabilize": 0
+        },
+        {
+          "id": "CAM_MID",
+          "name": "跟拍 50% 中防抖",
+          "color": "#ffd866",
+          "targetId": "TEAM_ROW",
+          "targetType": "GROUP",
+          "groupId": "TEAM_ROW",
+          "framing": "medium",
+          "view": "eye_level",
+          "side": "back_3_4",
+          "lensMm": 50,
+          "motion": "FOLLOW",
+          "stabilize": 0.5
+        },
+        {
+          "id": "CAM_STAB",
+          "name": "跟拍 90% 强防抖",
+          "color": "#7bd88f",
+          "targetId": "TEAM_ROW",
+          "targetType": "GROUP",
+          "groupId": "TEAM_ROW",
+          "framing": "medium",
+          "view": "eye_level",
+          "side": "back_3_4",
+          "lensMm": 50,
+          "motion": "FOLLOW",
+          "stabilize": 0.9
+        }
+      ],
+      "cameraMoves": [],
+      "cameraJunctions": [],
+      "actions": [
+        { "id": "ACT_R1", "object": "ROW_1", "timeStart": 0, "timeEnd": 12, "kind": "walk", "intensity": 1 },
+        { "id": "ACT_R2", "object": "ROW_2", "timeStart": 0, "timeEnd": 12, "kind": "walk", "intensity": 1 },
+        { "id": "ACT_R3", "object": "ROW_3", "timeStart": 0, "timeEnd": 12, "kind": "walk", "intensity": 1 },
+        { "id": "ACT_R4", "object": "ROW_4", "timeStart": 0, "timeEnd": 12, "kind": "walk", "intensity": 1 },
+        { "id": "ACT_R5", "object": "ROW_5", "timeStart": 0, "timeEnd": 12, "kind": "walk", "intensity": 1 },
+        { "id": "ACT_R6", "object": "ROW_6", "timeStart": 0, "timeEnd": 12, "kind": "walk", "intensity": 1 }
+      ],
+      "groups": [
+        {
+          "id": "TEAM_ROW",
+          "name": "ROW 横队",
+          "color": "#7bd88f",
+          "members": ["ROW_1", "ROW_2", "ROW_3", "ROW_4", "ROW_5", "ROW_6"],
+          "dynamics": true,
+          "formation": "row",
+          "spacing": 1.1,
+          "noise": 0.25
+        }
+      ]
+    }
+  }
+}

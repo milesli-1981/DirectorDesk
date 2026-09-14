@@ -3,6 +3,10 @@
     "name": "示例片场",
     "order": [
       {
+        "id": "SCN_PATH",
+        "name": "相机PATH独立轨迹"
+      },
+      {
         "id": "SCN_SPLIT",
         "name": "编队分流绕障"
       },
@@ -13,13 +17,179 @@
       {
         "id": "SCN_COMMUTE",
         "name": "通勤偶遇"
+      },
+      {
+        "id": "SCN_STAB",
+        "name": "防抖对比 · 跟拍绕障"
       }
     ],
-    "activeSceneId": "SCN_COMMUTE"
+    "activeSceneId": "SCN_PATH"
   },
   "scenes": {
+    "SCN_PATH": {
+      "revision": 1030,
+      "duration": 8,
+      "aspectRatio": "16:9",
+      "objects": [
+        {
+          "id": "HERO",
+          "type": "actor",
+          "category": "human",
+          "role": "agent",
+          "x": 2.5203508074090823,
+          "z": -0.6871760278210002,
+          "rotation": 0,
+          "footprint": {
+            "w": 0.6,
+            "d": 0.6,
+            "h": 1.8
+          },
+          "color": "#67a7ff",
+          "name": "主角（沿水平直线行走）"
+        },
+        {
+          "id": "BLD_BACK",
+          "type": "landmark",
+          "category": "building",
+          "role": "set",
+          "x": -14.37819960661703,
+          "z": 11.926192559939258,
+          "rotation": 0,
+          "footprint": {
+            "w": 14,
+            "d": 4,
+            "h": 5
+          },
+          "color": "#9aa7b5",
+          "locked": false,
+          "name": "背景楼"
+        }
+      ],
+      "segments": [
+        {
+          "id": "SEG_HERO",
+          "type": "MOVE",
+          "object": "HERO",
+          "startX": 4.090786299693286,
+          "startZ": 0.3271719136610367,
+          "endX": -7.855392743601718,
+          "endZ": 0.1500571465205307,
+          "points": [],
+          "timeStart": 0,
+          "timeEnd": 8,
+          "ease": [
+            0,
+            0,
+            1,
+            1
+          ]
+        }
+      ],
+      "handoffs": [],
+      "constraints": [],
+      "cameras": [
+        {
+          "id": "CAM_PATH",
+          "name": "PATH 运镜机位（固定朝向，沿轨道平移不转向）",
+          "color": "#7ad7ff",
+          "framing": "medium",
+          "view": "eye_level",
+          "side": "front",
+          "lensMm": 35,
+          "motion": "PATH"
+        }
+      ],
+      "cameraMoves": [
+        {
+          "id": "MOVE_CAM_PATH_01",
+          "camera": "CAM_PATH",
+          "type": "PATH",
+          "timeStart": 0,
+          "timeEnd": 8,
+          "fixedYawDeg": 355,
+          "fixedPitchDeg": 360,
+          "orbitDeg": 0,
+          "dollyScale": 1,
+          "craneHeight": 0,
+          "ease": [
+            0,
+            0,
+            1,
+            1
+          ],
+          "pathPoints": [
+            {
+              "id": "P2",
+              "x": 3.5300984096305017,
+              "y": 1.3,
+              "z": 1.9532687496757286
+            },
+            {
+              "id": "P3",
+              "x": 0.9671319821989905,
+              "y": 1.5,
+              "z": -2.0742776655460737
+            },
+            {
+              "id": "P4",
+              "x": -7.479216268065471,
+              "y": 1.5,
+              "z": -2.205382969261442
+            }
+          ],
+          "speedKeys": [
+            {
+              "id": "K1",
+              "t": 0,
+              "v": 0,
+              "ease": [
+                0,
+                0,
+                1,
+                1
+              ]
+            },
+            {
+              "id": "K3-25",
+              "t": 0.218,
+              "v": 0.304,
+              "ease": [
+                0,
+                0,
+                1,
+                1
+              ]
+            },
+            {
+              "id": "K2",
+              "t": 1,
+              "v": 1,
+              "ease": [
+                0,
+                0,
+                1,
+                1
+              ]
+            }
+          ]
+        }
+      ],
+      "cameraJunctions": [],
+      "actions": [
+        {
+          "id": "ACT_HERO",
+          "object": "HERO",
+          "timeStart": 0,
+          "timeEnd": 8,
+          "kind": "walk",
+          "intensity": 1
+        }
+      ],
+      "groups": [],
+      "customActions": []
+    },
     "SCN_SPLIT": {
-      "revision": 6,
+      "revision": 1,
       "duration": 12,
       "aspectRatio": "16:9",
       "objects": [
@@ -170,40 +340,9 @@
           "side": "front",
           "lensMm": 24,
           "motion": "STATIC"
-        },
-        {
-          "id": "CAM_B",
-          "name": "CAM_B",
-          "color": "#67a7ff",
-          "targetId": "ROW_1",
-          "framing": "medium",
-          "view": "eye_level",
-          "side": "back_3_4",
-          "lensMm": 50,
-          "motion": "FOLLOW",
-          "kind": "ground"
         }
       ],
-      "cameraMoves": [
-        {
-          "id": "MOVE_CAM_B_01",
-          "camera": "CAM_B",
-          "type": "STATIC",
-          "timeStart": 0,
-          "timeEnd": 6,
-          "targetId": "ROW_1",
-          "orbitDeg": 90,
-          "dollyScale": 1,
-          "craneHeight": 0,
-          "ease": [
-            0.42,
-            0,
-            0.58,
-            1
-          ],
-          "shoulderId": "ROW_2"
-        }
-      ],
+      "cameraMoves": [],
       "cameraJunctions": [],
       "actions": [
         {
@@ -1160,6 +1299,264 @@
         }
       ],
       "groups": [],
+      "customActions": []
+    },
+    "SCN_STAB": {
+      "revision": 1,
+      "duration": 12,
+      "aspectRatio": "16:9",
+      "objects": [
+        {
+          "id": "ROW_1",
+          "type": "actor",
+          "category": "human",
+          "role": "agent",
+          "x": -9,
+          "z": 0,
+          "rotation": 0,
+          "footprint": {
+            "w": 0.6,
+            "d": 0.6,
+            "h": 1.8
+          },
+          "color": "#7bd88f",
+          "name": "队首"
+        },
+        {
+          "id": "ROW_2",
+          "type": "actor",
+          "category": "human",
+          "role": "agent",
+          "x": -9,
+          "z": 1.65,
+          "rotation": 0,
+          "footprint": {
+            "w": 0.6,
+            "d": 0.6,
+            "h": 1.8
+          },
+          "color": "#7bd88f",
+          "name": "队员2"
+        },
+        {
+          "id": "ROW_3",
+          "type": "actor",
+          "category": "human",
+          "role": "agent",
+          "x": -9,
+          "z": 0.55,
+          "rotation": 0,
+          "footprint": {
+            "w": 0.6,
+            "d": 0.6,
+            "h": 1.8
+          },
+          "color": "#7bd88f",
+          "name": "队员3"
+        },
+        {
+          "id": "ROW_4",
+          "type": "actor",
+          "category": "human",
+          "role": "agent",
+          "x": -9,
+          "z": -0.55,
+          "rotation": 0,
+          "footprint": {
+            "w": 0.6,
+            "d": 0.6,
+            "h": 1.8
+          },
+          "color": "#7bd88f",
+          "name": "队员4"
+        },
+        {
+          "id": "ROW_5",
+          "type": "actor",
+          "category": "human",
+          "role": "agent",
+          "x": -9,
+          "z": -1.65,
+          "rotation": 0,
+          "footprint": {
+            "w": 0.6,
+            "d": 0.6,
+            "h": 1.8
+          },
+          "color": "#7bd88f",
+          "name": "队员5"
+        },
+        {
+          "id": "ROW_6",
+          "type": "actor",
+          "category": "human",
+          "role": "agent",
+          "x": -9,
+          "z": -2.75,
+          "rotation": 0,
+          "footprint": {
+            "w": 0.6,
+            "d": 0.6,
+            "h": 1.8
+          },
+          "color": "#7bd88f",
+          "name": "队员6"
+        },
+        {
+          "id": "ROCK",
+          "type": "prop",
+          "category": "prop",
+          "role": "set",
+          "x": 0,
+          "z": 0,
+          "rotation": 0,
+          "footprint": {
+            "w": 2,
+            "d": 2,
+            "h": 1.6
+          },
+          "color": "#9aa7b5",
+          "name": "路中石墩",
+          "locked": true
+        }
+      ],
+      "segments": [
+        {
+          "id": "SEG_ROW_1",
+          "type": "MOVE",
+          "object": "ROW_1",
+          "startX": -9,
+          "startZ": 0,
+          "endX": 9,
+          "endZ": 0,
+          "points": [],
+          "timeStart": 0,
+          "timeEnd": 12,
+          "ease": [
+            0.33,
+            0,
+            0.67,
+            1
+          ]
+        }
+      ],
+      "handoffs": [],
+      "constraints": [],
+      "cameras": [
+        {
+          "id": "CAM_RAW",
+          "name": "跟拍 0% 无防抖",
+          "color": "#ff7b72",
+          "targetId": "TEAM_ROW",
+          "targetType": "GROUP",
+          "groupId": "TEAM_ROW",
+          "framing": "medium",
+          "view": "eye_level",
+          "side": "back_3_4",
+          "lensMm": 50,
+          "motion": "FOLLOW",
+          "stabilize": 0
+        },
+        {
+          "id": "CAM_MID",
+          "name": "跟拍 50% 中防抖",
+          "color": "#ffd866",
+          "targetId": "TEAM_ROW",
+          "targetType": "GROUP",
+          "groupId": "TEAM_ROW",
+          "framing": "medium",
+          "view": "eye_level",
+          "side": "back_3_4",
+          "lensMm": 50,
+          "motion": "FOLLOW",
+          "stabilize": 0.5
+        },
+        {
+          "id": "CAM_STAB",
+          "name": "跟拍 90% 强防抖",
+          "color": "#7bd88f",
+          "targetId": "TEAM_ROW",
+          "targetType": "GROUP",
+          "groupId": "TEAM_ROW",
+          "framing": "medium",
+          "view": "eye_level",
+          "side": "back_3_4",
+          "lensMm": 50,
+          "motion": "FOLLOW",
+          "stabilize": 0.9
+        }
+      ],
+      "cameraMoves": [],
+      "cameraJunctions": [],
+      "actions": [
+        {
+          "id": "ACT_R1",
+          "object": "ROW_1",
+          "timeStart": 0,
+          "timeEnd": 12,
+          "kind": "walk",
+          "intensity": 1
+        },
+        {
+          "id": "ACT_R2",
+          "object": "ROW_2",
+          "timeStart": 0,
+          "timeEnd": 12,
+          "kind": "walk",
+          "intensity": 1
+        },
+        {
+          "id": "ACT_R3",
+          "object": "ROW_3",
+          "timeStart": 0,
+          "timeEnd": 12,
+          "kind": "walk",
+          "intensity": 1
+        },
+        {
+          "id": "ACT_R4",
+          "object": "ROW_4",
+          "timeStart": 0,
+          "timeEnd": 12,
+          "kind": "walk",
+          "intensity": 1
+        },
+        {
+          "id": "ACT_R5",
+          "object": "ROW_5",
+          "timeStart": 0,
+          "timeEnd": 12,
+          "kind": "walk",
+          "intensity": 1
+        },
+        {
+          "id": "ACT_R6",
+          "object": "ROW_6",
+          "timeStart": 0,
+          "timeEnd": 12,
+          "kind": "walk",
+          "intensity": 1
+        }
+      ],
+      "groups": [
+        {
+          "id": "TEAM_ROW",
+          "name": "ROW 横队",
+          "color": "#7bd88f",
+          "members": [
+            "ROW_1",
+            "ROW_2",
+            "ROW_3",
+            "ROW_4",
+            "ROW_5",
+            "ROW_6"
+          ],
+          "dynamics": true,
+          "formation": "row",
+          "spacing": 1.1,
+          "noise": 0.25
+        }
+      ],
       "customActions": []
     }
   }

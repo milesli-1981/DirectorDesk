@@ -1,6 +1,7 @@
 import {
   aspectValue,
   CameraFraming,
+  CameraKey,
   CameraMove,
   CameraObject,
   CameraSide,
@@ -9,12 +10,21 @@ import {
   DirectorState,
   CameraStyle,
   OtsSide,
+  CameraTargetType,
   STYLE_PRESETS,
   StyleParams,
   Vec3,
 } from "../domain/schema";
-import { easeVal, normalizeEase } from "./ease";
+import {
+  CAMERA_CHANNELS,
+  CameraChannel,
+  ChannelPoint,
+  channelVal,
+  curveVal,
+  normalizeEase,
+} from "./ease";
 import { baseHeading, objectFacing, objectPosition, travelHeading } from "./solver";
+import { sampleCamPath } from "./cameraPath";
 
 export interface ResolvedCamera {
   position: Vec3;
@@ -123,8 +133,8 @@ interface Placement {
   otsSide?: OtsSide;
   /** OTS：错位量（主体偏离画面中心的比例）。 */
   otsOffset?: number;
-  /** 是否按过肩求解（为空时沿用相机默认运镜是否为 OTS）。 */
-  ots?: boolean;
+  /** 取景关系（为空则沿用相机级 targetType）；为 OTS 时启用过肩。 */
+  targetType?: CameraTargetType;
   orbitDeg?: number;
   distanceScale?: number;
   craneHeight?: number;
@@ -182,7 +192,8 @@ function placeCamera(
   const framing = options.framing ?? camera.framing;
   const view = options.view ?? camera.view;
   const side = options.side ?? camera.side;
-  const targetType = camera.targetType ?? "OBJECT";
+  // 段级 targetType 覆盖必须参与分支判定，否则「某段单独设成 GROUP / POV」会被相机级类型盖掉。
+  const targetType = options.targetType ?? camera.targetType ?? "OBJECT";
   const droneLift = camera.kind === "drone" ? DRONE_BASE_ALTITUDE : 0;
   const altitude = camera.altitude ?? 0;
 
@@ -225,7 +236,8 @@ function placeCamera(
           ? baseHeading(state, anchorId, time)
           : objectFacing(state, targetId, time);
       // facing 是弧度、SIDE_ANGLE 是角度，必须各自换算后再相加（不可整体当角度换算）。
-      const yaw = facing + (SIDE_ANGLE[side] * Math.PI) / 180;
+      // orbitDeg 与 OBJECT 分支一致地叠加到 yaw 上，否则整队目标无法环绕（关键帧「环绕」/原生 ORBIT 都会失效）。
+      const yaw = facing + ((SIDE_ANGLE[side] + (options.orbitDeg ?? 0)) * Math.PI) / 180;
       const groupTarget: Vec3 = [cx, 1.3, cz];
       if (view === "overhead") {
         const h = framingDistance(framing) + 4 + droneLift + altitude + (options.craneHeight ?? 0);
@@ -255,8 +267,10 @@ function placeCamera(
 
     // 过肩镜头（OTS）：机位置于前景演员 A 的斜后方，越过其肩膀拍主体 B。
     // 两人各自移动时机位自动跟随，始终保持过肩关系（肩在前景一侧、不挡住主体）。
-    const isOts = options.ots ?? (camera.targetType === "OTS" || camera.motion === "OTS");
     const shoulderId = options.shoulderId ?? camera.shoulderId;
+    const effTargetType = options.targetType ?? camera.targetType;
+    const isOts =
+      effTargetType === "OTS" && !!shoulderId && !!targetId && shoulderId !== targetId;
     if (isOts && shoulderId && targetId && shoulderId !== targetId) {
       const a = objectPosition(state, shoulderId, time);
       const b = objectPosition(state, targetId, time);
@@ -270,7 +284,10 @@ function placeCamera(
         const rz = fx;
         const sign: number = (options.otsSide ?? camera.otsSide ?? "R") === "R" ? 1 : -1;
         const back = Math.min(2.4, Math.max(0.95, distAB * 0.38));
-        const lateral = Math.min(1.6, Math.max(0.8, distAB * 0.4)) * sign;
+        // 横向偏移决定肩在画面里的左右位置；过大会把肩推出画框（50mm 水平半视场约 23°，
+        // 旧值 distAB*0.4 让肩偏轴 ~46° 而完全出框）。这里压到 ~0.16 倍间距，
+        // 使肩稳定落在画框边缘（约 16° 偏轴），既可见又不挡主体。
+        const lateral = Math.min(0.9, Math.max(0.4, distAB * 0.16)) * sign;
         const eye = 1.55;
         const cx = a.x - fx * back + rx * lateral;
         const cz = a.z - fz * back + rz * lateral;
@@ -325,15 +342,25 @@ function placeCamera(
       dz = nz;
     }
     if (tiltDeg) {
+      // 绕相机「右轴」做真正的俯仰：右轴 = normalize(d × up)，与 d 正交且单位化，
+      // 旋转用 Rodrigues（k⊥d 时 d' = d·cos + (k×d)·sin），保证视线长度不变、只改俯仰。
+      // 旧实现直接用未归一化的右向量做仿射：水平视线时会退化成偏航（与 pan 混淆），
+      // 且会压缩视线长度（顺带改了距离）。
       const a = (tiltDeg * Math.PI) / 180;
       const c = Math.cos(a);
       const s = Math.sin(a);
-      const rx = -dz;
-      const ry = 0;
-      const rz = dx;
-      dx = dx * c + rx * s;
-      dy = dy * c + ry * s;
-      dz = dz * c + rz * s;
+      const h = Math.hypot(dx, dz);
+      if (h > 1e-4) {
+        const crossX = (-dx * dy) / h; // (k × d).x
+        const crossY = h; // (k × d).y
+        const crossZ = (-dz * dy) / h; // (k × d).z
+        const nx = dx * c + crossX * s;
+        const ny = dy * c + crossY * s;
+        const nz = dz * c + crossZ * s;
+        dx = nx;
+        dy = ny;
+        dz = nz;
+      }
     }
     target = [ox + dx * dist, oy + dy * dist, oz + dz * dist];
   }
@@ -367,6 +394,112 @@ function placeCamera(
   return { position, target };
 }
 
+/* ---------------------------------------------------- 运镜通道 / 关键帧求值 */
+
+/** 一条运镜在某时刻的九个可定制通道（关键帧缺省的通道由运镜基元给出）。 */
+export interface MoveChannels {
+  orbitDeg: number;
+  craneHeight: number;
+  dollyScale: number;
+  panDeg: number;
+  tiltDeg: number;
+  truckDist: number;
+  lensMm: number;
+  roll: number;
+  otsOffset: number;
+}
+
+/** 运镜基元在归一化进度 progress 上的默认通道值（= 没有关键帧时的行为）。 */
+function primitiveChannels(move: CameraMove, camera: CameraObject, progress: number): MoveChannels {
+  const baseLens = move.lensMm ?? camera.lensMm;
+  // 滑动变焦：机位推近的同时焦距等比变化，使主体成像大小不变、只有背景透视发生畸变。
+  const isZoom = move.type === "DOLLY_ZOOM";
+  const dollyNow =
+    move.type === "DOLLY" || isZoom || move.type === "DRONE" ? 1 + (move.dollyScale - 1) * progress : 1;
+  return {
+    orbitDeg: move.type === "ORBIT" || move.type === "DRONE" ? move.orbitDeg * progress : 0,
+    craneHeight: move.type === "CRANE" || move.type === "DRONE" ? move.craneHeight * progress : 0,
+    dollyScale: dollyNow,
+    panDeg: move.type === "PAN" ? (move.panDeg ?? 0) * progress : 0,
+    tiltDeg: move.type === "TILT" ? (move.tiltDeg ?? 0) * progress : 0,
+    truckDist: move.type === "TRUCK" ? (move.truckDist ?? 0) * progress : 0,
+    lensMm: isZoom ? baseLens * dollyNow : baseLens,
+    roll: move.roll ?? camera.roll ?? 0,
+    otsOffset: move.otsOffset ?? camera.otsOffset ?? 0.35,
+  };
+}
+
+/**
+ * 把关键帧按通道摊平成「每通道一条曲线」。未定义该通道的帧被跳过。
+ *
+ * 关键：若某通道的第一个关键帧不在段首，会自动在 t=0 **锚定该通道的基元原值**。
+ * 于是「只在中间加一帧」不会把整段（含帧之前）都变成新值，
+ * 而是从段首的原值线性过渡到该帧的新值，之后再保持（末帧之后可再加帧打断）。
+ */
+function buildChannelTracks(move: CameraMove, camera: CameraObject): Map<CameraChannel, ChannelPoint[]> {
+  const tracks = new Map<CameraChannel, ChannelPoint[]>();
+  const keys = move.keys;
+  if (!keys || !keys.length) return tracks;
+  const sorted = [...keys].sort((a, b) => a.t - b.t);
+  const startPrimitive = primitiveChannels(move, camera, 0);
+  for (const channel of CAMERA_CHANNELS) {
+    const points: ChannelPoint[] = [];
+    for (const key of sorted) {
+      const value = key[channel];
+      if (typeof value === "number" && Number.isFinite(value)) {
+        points.push({ t: key.t, v: value, ease: normalizeEase(key.ease) });
+      }
+    }
+    if (!points.length) continue;
+    if (points[0].t > 1e-4) {
+      points.unshift({ t: 0, v: startPrimitive[channel], ease: normalizeEase(move.ease) });
+    }
+    tracks.set(channel, points);
+  }
+  return tracks;
+}
+
+/** 取某通道在归一化时刻 u 的关键帧值；该通道无关键帧则返回 undefined（回落到基元）。 */
+function keyedChannel(
+  tracks: Map<CameraChannel, ChannelPoint[]>,
+  channel: CameraChannel,
+  u: number,
+): number | undefined {
+  const points = tracks.get(channel);
+  return points ? channelVal(points, u) : undefined;
+}
+
+/**
+ * 求某条运镜在某一时刻**实际生效**的通道值（关键帧 > 基元）。
+ * 供「插入关键帧时快照当前轨迹」使用，保证插帧不改变画面。
+ */
+export function moveChannelsAt(
+  state: DirectorState,
+  cameraId: string,
+  move: CameraMove,
+  time: number,
+): MoveChannels | null {
+  const camera = state.cameras.find((item) => item.id === cameraId);
+  if (!camera) return null;
+  const span = move.timeEnd - move.timeStart || 1;
+  const u = clamp((time - move.timeStart) / span, 0, 1);
+  const progress = curveVal(normalizeEase(move.ease), move.speedKeys, u);
+  const base = primitiveChannels(move, camera, progress);
+  const tracks = buildChannelTracks(move, camera);
+  const pick = (channel: CameraChannel) => keyedChannel(tracks, channel, u) ?? base[channel];
+  return {
+    orbitDeg: pick("orbitDeg"),
+    craneHeight: pick("craneHeight"),
+    dollyScale: pick("dollyScale"),
+    panDeg: pick("panDeg"),
+    tiltDeg: pick("tiltDeg"),
+    truckDist: pick("truckDist"),
+    lensMm: pick("lensMm"),
+    roll: pick("roll"),
+    otsOffset: pick("otsOffset"),
+  };
+}
+
 /** 解析单条 CameraMove 在某时刻的机位（不含边界插值）。 */
 function resolveMove(
   state: DirectorState,
@@ -374,71 +507,148 @@ function resolveMove(
   move: CameraMove,
   time: number,
 ): ResolvedCamera {
-  const baseLens = move.lensMm ?? camera.lensMm;
-  const roll = move.roll ?? camera.roll ?? 0;
-  // OTS 更像「人物关系」而非单纯运动：本段显式越肩（类型为 OTS 或指定了前景演员）时启用，
-  // 否则沿用相机默认是否为过肩——避免给过肩相机加一条 FOLLOW 段就丢掉过肩关系。
-  const otsWanted = move.type === "OTS" || !!move.shoulderId ? true : undefined;
-
   const style = move.style ?? camera.style ?? (camera.motion === "HANDHELD" ? "handheld" : "locked");
   const sp = shakePreset(camera, style);
+  const hasKeys = !!move.keys && move.keys.length > 0;
 
-  if (move.type === "STATIC") {
-    // 锁死机位：用片段开始时刻的构图，之后不再改变。
+  // PATH：相机沿可编辑 3D 折线运动（不经 placeCamera 反推）。无路径点时退回基础机位，避免崩溃。
+  if (move.type === "PATH") {
+    const pts = move.pathPoints;
+    if (pts && pts.length >= 2) {
+      const span = move.timeEnd - move.timeStart || 1;
+      const u = clamp((time - move.timeStart) / span, 0, 1);
+      const progress = curveVal(normalizeEase(move.ease), move.speedKeys, u);
+      const position = sampleCamPath(pts, progress);
+      let target: Vec3;
+      const tid = move.targetId ?? camera.targetId;
+      const yawDeg = move.fixedYawDeg ?? camera.fixedYawDeg;
+      const pitchDeg = move.fixedPitchDeg ?? camera.fixedPitchDeg;
+      if (tid) {
+        target = focusPoint(state, tid, time);
+      } else if (yawDeg !== undefined || pitchDeg !== undefined) {
+        // 固定朝向（旋转系统）：由「平面方位角 + 立面俯仰角」换算出单位方向向量，机位平移时朝向恒定不变。
+        // 约定与全站一致：yaw=0 → +Z，yaw=90 → +X；pitch=0 水平、90 正上、270 正下。
+        const yaw = ((yawDeg ?? 0) * Math.PI) / 180;
+        const pitch = ((pitchDeg ?? 0) * Math.PI) / 180;
+        const cp = Math.cos(pitch);
+        const dx = Math.sin(yaw) * cp;
+        const dy = Math.sin(pitch);
+        const dz = Math.cos(yaw) * cp;
+        target = [position[0] + dx, position[1] + dy, position[2] + dz];
+      } else {
+        // 无目标：朝自身行进方向看，使「自由飞行掠过」时画面朝前、不锁定任何人/物。
+        // 用一小段前后采样求切线方向（首尾钳到端点），避免端点退化成零向量导致朝向崩掉。
+        const eps = 0.02;
+        const pa = sampleCamPath(pts, clamp(progress - eps, 0, 1));
+        const pb = sampleCamPath(pts, clamp(progress + eps, 0, 1));
+        let tx = pb[0] - pa[0];
+        let ty = pb[1] - pa[1];
+        let tz = pb[2] - pa[2];
+        const tl = Math.hypot(tx, ty, tz) || 1;
+        target = [position[0] + tx / tl, position[1] + ty / tl, position[2] + tz / tl];
+      }
+      const style = move.style ?? camera.style ?? (camera.motion === "HANDHELD" ? "handheld" : "locked");
+      const sp = shakePreset(camera, style);
+      // PATH 不走 placeCamera 的通道体系；这里补上「焦距 / 荷兰角」两个与轨迹无关的关键帧通道，
+      // 让关键帧面板里的它们对 PATH 也生效（orbit/crane/dolly 等与路径语义冲突，不参与）。
+      const tracks = buildChannelTracks(move, camera);
+      const keyedLens = keyedChannel(tracks, "lensMm", u);
+      const keyedRoll = keyedChannel(tracks, "roll", u);
+      const outLens = keyedLens ?? move.lensMm ?? camera.lensMm;
+      let pos = position;
+      if (sp.shakeAmp > 0 || sp.bobAmp > 0) {
+        const a = sp.shakeAmp;
+        const jx = Math.sin(time * (sp.shakeFreq + 1.3)) * a + Math.sin(time * (sp.shakeFreq * 0.42 + 3.1)) * a * 0.6;
+        const jy = Math.sin(time * (sp.bobFreq + 1.3)) * sp.bobAmp + Math.sin(time * (sp.bobFreq * 0.4)) * sp.bobAmp * 0.4;
+        const jz = Math.cos(time * (sp.shakeFreq + 1.4)) * a + Math.sin(time * (sp.shakeFreq * 0.4 + 2.7)) * a * 0.5;
+        pos = [position[0] + jx, position[1] + jy, position[2] + jz];
+      }
+      return {
+        position: pos,
+        target,
+        lensMm: outLens,
+        fovDeg: lensFovDeg(outLens),
+        roll: (keyedRoll ?? move.roll ?? camera.roll ?? 0) + styleRollDrift(sp, time),
+        move,
+      };
+    }
+  }
+
+  if (move.type === "STATIC" && !hasKeys) {
+    // 锁死机位：用片段开始时刻的构图，之后不再改变。（打了关键帧则按关键帧动。）
+    const base = primitiveChannels(move, camera, 0);
     const { position, target } = placeCamera(state, camera, move.timeStart, {
       targetId: move.targetId,
+      targetType: move.targetType,
       shoulderId: move.shoulderId,
       otsSide: move.otsSide,
-      otsOffset: move.otsOffset,
-      ots: otsWanted,
+      otsOffset: base.otsOffset,
       framing: move.framing,
       view: move.view,
       side: move.side,
       lensMm: move.lensMm,
       style,
     });
-    return { position, target, lensMm: baseLens, fovDeg: lensFovDeg(baseLens), roll: roll + styleRollDrift(sp, move.timeStart), move };
+    return {
+      position,
+      target,
+      lensMm: base.lensMm,
+      fovDeg: lensFovDeg(base.lensMm),
+      roll: base.roll + styleRollDrift(sp, move.timeStart),
+      move,
+    };
   }
 
   const span = move.timeEnd - move.timeStart || 1;
-  const progress = easeVal(normalizeEase(move.ease), clamp((time - move.timeStart) / span, 0, 1));
+  const u = clamp((time - move.timeStart) / span, 0, 1);
+  const progress = curveVal(normalizeEase(move.ease), move.speedKeys, u);
 
-  // 滑动变焦：机位推近的同时焦距等比变化，使主体成像大小不变、只有背景透视发生畸变。
-  const isZoom = move.type === "DOLLY_ZOOM";
-  const dollyNow =
-    move.type === "DOLLY" || isZoom || move.type === "DRONE"
-      ? 1 + (move.dollyScale - 1) * progress
-      : 1;
-  const lensMm = isZoom ? baseLens * dollyNow : baseLens;
+  // 通道 = 关键帧覆盖 ?? 运镜基元：未打帧的通道完全保持原行为，打帧的通道走关键帧曲线。
+  const base = primitiveChannels(move, camera, progress);
+  const tracks = buildChannelTracks(move, camera);
+  const pick = (channel: CameraChannel) => keyedChannel(tracks, channel, u) ?? base[channel];
+  const keyedLens = keyedChannel(tracks, "lensMm", u);
+  const outLens = keyedLens ?? base.lensMm;
 
   const { position, target } = placeCamera(state, camera, time, {
     targetId: move.targetId,
+    targetType: move.targetType,
     shoulderId: move.shoulderId,
     otsSide: move.otsSide,
-    otsOffset: move.otsOffset,
-    ots: otsWanted,
+    otsOffset: pick("otsOffset"),
     framing: move.framing,
     view: move.view,
     side: move.side,
-    lensMm: move.lensMm,
-    orbitDeg: move.type === "ORBIT" || move.type === "DRONE" ? move.orbitDeg * progress : 0,
-    distanceScale: dollyNow,
-    craneHeight: move.type === "CRANE" || move.type === "DRONE" ? move.craneHeight * progress : 0,
-    panDeg: move.type === "PAN" ? (move.panDeg ?? 0) * progress : 0,
-    tiltDeg: move.type === "TILT" ? (move.tiltDeg ?? 0) * progress : 0,
-    truckDist: move.type === "TRUCK" ? (move.truckDist ?? 0) * progress : 0,
+    // 打帧的焦距同时作用于取景几何；未打帧时沿用原值（保持 DOLLY_ZOOM 的距离补偿不被改写）。
+    lensMm: keyedLens ?? move.lensMm,
+    orbitDeg: pick("orbitDeg"),
+    distanceScale: pick("dollyScale"),
+    craneHeight: pick("craneHeight"),
+    panDeg: pick("panDeg"),
+    tiltDeg: pick("tiltDeg"),
+    truckDist: pick("truckDist"),
     style,
   });
 
-  return { position, target, lensMm, fovDeg: lensFovDeg(lensMm), roll: roll + styleRollDrift(sp, time), move };
+  return {
+    position,
+    target,
+    lensMm: outLens,
+    fovDeg: lensFovDeg(outLens),
+    roll: pick("roll") + styleRollDrift(sp, time),
+    move,
+  };
 }
 
 function lerp3(a: Vec3, b: Vec3, t: number): Vec3 {
   return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
 }
 
-/** 解析某台相机在某一时刻的实际机位。 */
-export function solveCamera(
+/**
+ * 解析某台相机在某一时刻的原始机位（不含防抖低通）。
+ * 保留为纯函数、可随机访问，供 solveCamera 的防抖采样在任意历史时刻复用。
+ */
+function solveCameraRaw(
   state: DirectorState,
   cameraId: string,
   time: number,
@@ -491,6 +701,79 @@ export function solveCamera(
   }
 
   return base;
+}
+
+/* -------------------------------------------------------------- 防抖 Stabilization */
+
+/** 防抖最强档对应的滞后时间窗（秒）。0 档 = 关闭，越大越「拖」。 */
+const STABILIZE_MAX_WINDOW = 0.5;
+/** 时间窗内采样步长（秒）与采样数上限：步长越细越平滑，但每帧要多次求解原始机位。 */
+const STABILIZE_SAMPLE_STEP = 0.05;
+const STABILIZE_MAX_SAMPLES = 14;
+
+/**
+ * 解析某台相机在某一时刻的实际机位（含防抖）。
+ *
+ * 防抖 = 对「过去一小段时间窗」内的原始机位 / 注视点做滑动平均（按需重算、可确定性复算，无逐帧状态）：
+ * - 相机响应因此滞后一点点，目标快速扭动 / 绕障让位带来的瞬变被平滑掉；
+ * - 瞬变若在窗口内自行消失，其扰动会被平均抵消，相机基本不跟着动 —— 类似软件电子防抖；
+ * - 窗口下界钳到当前运镜段起点，绝不把上一镜的姿态混进来，避免破坏刻意的硬切。
+ *
+ * 强度取「段级覆盖 > 相机默认」，两者都为 0（或未设）时等价于原始机位。
+ */
+export function solveCamera(
+  state: DirectorState,
+  cameraId: string,
+  time: number,
+): ResolvedCamera | null {
+  const raw = solveCameraRaw(state, cameraId, time);
+  if (!raw) return null;
+
+  const camera = state.cameras.find((item) => item.id === cameraId);
+  if (!camera) return raw;
+  const move = activeCameraMove(state, cameraId, time);
+  const strength = clamp(move?.stabilize ?? camera.stabilize ?? 0, 0, 1);
+  if (strength <= 0) return raw;
+
+  const window = strength * STABILIZE_MAX_WINDOW;
+  // 不跨越运镜 / 切镜边界采样：下界钳到当前段起点（无段则为 0）。
+  const lo = Math.max(move ? move.timeStart : 0, time - window);
+  const span = time - lo;
+  if (span < 1e-3) return raw;
+
+  const samples = Math.max(
+    2,
+    Math.min(STABILIZE_MAX_SAMPLES, Math.round(span / STABILIZE_SAMPLE_STEP) + 1),
+  );
+  let px = 0;
+  let py = 0;
+  let pz = 0;
+  let tx = 0;
+  let ty = 0;
+  let tz = 0;
+  let count = 0;
+  for (let i = 0; i < samples; i += 1) {
+    const tk = lo + (span * i) / (samples - 1);
+    const r = solveCameraRaw(state, cameraId, tk);
+    if (!r) continue;
+    px += r.position[0];
+    py += r.position[1];
+    pz += r.position[2];
+    tx += r.target[0];
+    ty += r.target[1];
+    tz += r.target[2];
+    count += 1;
+  }
+  if (!count) return raw;
+  return {
+    position: [px / count, py / count, pz / count],
+    target: [tx / count, ty / count, tz / count],
+    // 镜头 / 滚转沿用当前时刻：变焦与荷兰角是刻意的运镜表达，不该被防抖拖慢。
+    lensMm: raw.lensMm,
+    fovDeg: raw.fovDeg,
+    roll: raw.roll,
+    move: raw.move,
+  };
 }
 
 /** 采样一台相机整段时间的机位轨迹，用于 Director View 可视化运镜。 */

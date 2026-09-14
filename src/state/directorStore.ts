@@ -3,9 +3,11 @@ import {
   AspectRatio,
   CameraFraming,
   CameraJunction,
+  CameraKey,
   CameraMove,
   CameraMotionType,
   CameraObject,
+  CameraPathPoint,
   CameraSide,
   CameraView,
   Constraint,
@@ -19,6 +21,7 @@ import {
   MoveSegment,
   OtsSide,
   PathPoint,
+  SpeedKey,
   StageManifest,
   ActionClip,
   ActionKind,
@@ -28,10 +31,14 @@ import {
 } from "../domain/schema";
 import { createBlankState } from "../engine/demoShot";
 import { normalizePathPointModes, pathInsertIndex, simplifyPath } from "../engine/path";
+import { normalizeCamPathShapes } from "../engine/cameraPath";
 import { contentEndTime } from "../engine/timeline";
+import { normalizeCameraKeys, normalizeEase, normalizeSpeedKeys } from "../engine/ease";
 import { ASSET_PRESETS } from "../engine/assetPresets";
 import { separateSetAsset } from "../engine/collision";
+import { ANIMAL_MODELS, DEFAULT_ANIMAL_SPECIES } from "../engine/animalModels";
 import {
+  AnimalSpecies,
   AssetCategory,
   DirectorObject,
   FORMATION_MORPH_SECONDS,
@@ -259,6 +266,16 @@ function initStage(): { manifest: StageManifest; activeState: DirectorState } {
 
 export type SelectionKind = "object" | "camera";
 
+/** 环形菜单（RadialRing）的宿主：可以是场景对象，也可以是某条路径上的一个转折点。
+ *  两者共用同一套甜甜圈 UI，只是可用动作不同，故用一个联合类型承载，避免两套字段各自残留。 */
+export type RadialTarget = { kind: "object" | "point" | "cameraPoint"; id: string };
+
+/** 光标当前悬停的路径标记（转折点 / 起终点把手）。
+ *  纯视觉反馈：让「这个把手现在能不能点中」先看得见，命中判定仍由 WorldView 决定。 */
+export type MarkerHover =
+  | { kind: "point"; segmentId: string; id: string }
+  | { kind: "endpoint"; segmentId: string; id: "start" | "end" };
+
 interface DirectorStore {
   state: DirectorState;
   /** 片场 manifest：场景页索引 + 片场名（数据各自独立存储）。 */
@@ -270,7 +287,11 @@ interface DirectorStore {
   selectedId: string;
   selectedItem: string | null;
   selectedPoint: string | null;
-  radialObjectId: string | null;
+  /** 当前选中的相机关键帧 id（时间轴 / Inspector 共享；纯 UI 状态，不进历史）。 */
+  selectedKeyId: string | null;
+  /** 光标悬停的路径标记：只驱动高亮，不代表选中，也不进 undo 历史。 */
+  hoverMarker: MarkerHover | null;
+  radialTarget: RadialTarget | null;
   viewMode: ViewMode;
   activeCameraId: string | null;
   /** 锁视角：开启后拖拽不再改变 Director View 的机位。 */
@@ -294,7 +315,13 @@ interface DirectorStore {
   selectCamera: (cameraId: string) => void;
   selectItem: (itemId: string | null) => void;
   selectPoint: (pointId: string | null) => void;
+  selectCameraKey: (keyId: string | null) => void;
+  setHoverMarker: (marker: MarkerHover | null) => void;
   openRing: (objectId: string) => void;
+  /** 轻点路径转折点打开环形菜单（Line/Curve 切换 + 删除），与对象环形菜单共用同一套 UI。 */
+  openPointRing: (pointId: string) => void;
+  /** 轻点相机 PATH 路径点打开环形菜单（删除），与人物路径点一致。 */
+  openCameraPointRing: (pointId: string) => void;
   closeRing: () => void;
 
   moveObject: (objectId: string, x: number, z: number) => void;
@@ -302,7 +329,7 @@ interface DirectorStore {
   reorderObject: (dragId: string, targetId: string) => void;
   /** 锁定 / 解锁资产：锁定后不可通过拖拽移动位置（防误触），仍可点选以便解锁。 */
   toggleLock: (id: string) => void;
-  addAsset: (category: AssetCategory, at?: { x: number; z: number }) => void;
+  addAsset: (category: AssetCategory, at?: { x: number; z: number }, species?: AnimalSpecies) => void;
   /**
    * 拖入一个「团队 Group」：一次生成 count 个同类资产并建组，整队共用一条路线
    * （锚点 = members[0]），队员按 formation 跟随。
@@ -312,6 +339,7 @@ interface DirectorStore {
     count: number,
     formation: FormationKind,
     at?: { x: number; z: number },
+    species?: AnimalSpecies,
   ) => void;
   updateAsset: (id: string, patch: Partial<DirectorObject>) => void;
   removeAsset: (id: string) => void;
@@ -360,6 +388,12 @@ interface DirectorStore {
   // —— 动作片段（ActionClip）管理 ——
   addAction: (objectId: string, time?: number) => void;
   setActionTime: (actionId: string, start: number, end: number) => void;
+  /**
+   * 整队动作：一次写入多条动作片段的时间（时间轴上「整队动作带」拖动时使用）。
+   * 逐条按 setActionTime 同样的规则夹到 [0, duration]，但只压一条历史，
+   * 避免拖动过程中每帧 N 条各压一次栈。
+   */
+  setActionTimes: (entries: { id: string; timeStart: number; timeEnd: number }[]) => void;
   updateAction: (actionId: string, patch: Partial<ActionClip>) => void;
   deleteAction: (actionId: string) => void;
   // —— 自定义动作库（命名的关节姿势，随场景持久化、可被多片段复用）——
@@ -370,6 +404,8 @@ interface DirectorStore {
   setSegmentTime: (segmentId: string, start: number, end: number) => void;
   setConstraintTime: (constraintId: string, start: number, end: number) => void;
   setSegmentEase: (segmentId: string, ease: EaseCurve) => void;
+  /** 写入多段速度曲线关键点（null / 少于 2 个点 = 退回单段 cubic-bezier）。 */
+  setSegmentSpeedKeys: (segmentId: string, keys: SpeedKey[] | null) => void;
 
   addCamera: () => void;
   addDroneCamera: () => void;
@@ -401,14 +437,38 @@ interface DirectorStore {
         | "tiltDeg"
         | "truckDist"
         | "style"
+        | "stabilize"
       >
     >,
   ) => void;
   addCameraMove: (cameraId: string, type: CameraMotionType) => void;
+  addOtsMove: (cameraId: string) => void;
   setCameraMoveTime: (moveId: string, start: number, end: number) => void;
   setCameraMoveEase: (moveId: string, ease: EaseCurve) => void;
+  /** 写入多段速度曲线关键点（null / 少于 2 个点 = 退回单段 cubic-bezier）。 */
+  setCameraMoveSpeedKeys: (moveId: string, keys: SpeedKey[] | null) => void;
   patchCameraMove: (moveId: string, patch: Partial<CameraMove>) => void;
+  addCameraPathPoint: (moveId: string, x: number, y: number, z: number) => void;
+  /** 在指定位置插入一个相机路径点（按住路径拖动加点），返回新点 id。 */
+  insertCameraPathPoint: (
+    moveId: string,
+    x: number,
+    y: number,
+    z: number,
+    insertAt: number,
+  ) => string | null;
+  moveCameraPathPoint: (moveId: string, pointId: string, x: number, y: number, z: number) => void;
+  deleteCameraPathPoint: (moveId: string, pointId: string) => void;
+  /** 切换相机路径中间点的折线 / 曲线（首尾端点不可）。 */
+  toggleCameraPathCurve: (moveId: string, pointId: string) => void;
   deleteCameraMove: (moveId: string) => void;
+  /** 在归一化时刻 t（0..1）插入一个空关键帧：不含通道覆盖，插入本身不改变画面。 */
+  addCameraKey: (moveId: string, t: number) => void;
+  /** 修改关键帧：patch 中值为 undefined 的通道会被清除（该通道回落到运镜基元）。 */
+  updateCameraKey: (moveId: string, keyId: string, patch: Partial<CameraKey>) => void;
+  deleteCameraKey: (moveId: string, keyId: string) => void;
+  /** 清空该段所有关键帧，回到纯运镜基元。 */
+  clearCameraKeys: (moveId: string) => void;
   /** 基于某条过肩 move 生成正反打：互换前景 / 主体、翻转肩侧，并保持同一侧轴线。 */
   addReverseShot: (moveId: string) => void;
   setAspectRatio: (ratio: AspectRatio) => void;
@@ -502,6 +562,17 @@ function nextCameraMoveId(state: DirectorState, cameraId: string): string {
   return id;
 }
 
+/** PATH 段的初始折线：横跨相机目标前方的一条 2 点直线（无目标时以原点为锚）。 */
+function seedCameraPathPoints(moveId: string, cameraId: string, state: DirectorState): CameraPathPoint[] {
+  const target = state.objects.find((o) => o.id === state.cameras.find((c) => c.id === cameraId)?.targetId);
+  const bx = target?.x ?? 0;
+  const bz = target?.z ?? 0;
+  return [
+    { id: `${moveId}_P1`, x: bx + 4, y: 1.6, z: bz + 3 },
+    { id: `${moveId}_P2`, x: bx - 4, y: 1.6, z: bz + 3 },
+  ];
+}
+
 /**
  * 由相邻 leg（同对象、时间相接）推导 Handoff 列表。
  * 用确定性的 id（H_<prev>_<next>）保证 mode 在重算后得以保留。
@@ -539,10 +610,21 @@ function reconcileHandoffs(segments: MoveSegment[], prevHandoffs: Handoff[]): Ha
  */
 function sanitizeState(s: DirectorState): DirectorState {
   const ids = new Set(s.objects.map((o) => o.id));
-  const segments = s.segments.filter((seg) => ids.has(seg.object));
+  // 速度曲线关键点在这里统一规范化：历史上允许把末点进度拖到 1 以下（会跑不完 path），
+  // 读盘 / 导入时一并修正，下游求解就能假定数据永远合法。
+  const segments = s.segments
+    .filter((seg) => ids.has(seg.object))
+    .map((seg) =>
+      seg.speedKeys ? { ...seg, speedKeys: normalizeSpeedKeys(seg.speedKeys) ?? undefined } : seg,
+    );
   return {
     ...s,
     segments,
+    cameraMoves: s.cameraMoves.map((move) =>
+      move.speedKeys
+        ? { ...move, speedKeys: normalizeSpeedKeys(move.speedKeys) ?? undefined }
+        : move,
+    ),
     constraints: s.constraints.filter((c) => ids.has(c.subject) && ids.has(c.target)),
     handoffs: reconcileHandoffs(segments, s.handoffs),
     // 引力场恒开：该开关不再对用户开放，任何来源的存档 / 导入都统一强制为 true。
@@ -644,9 +726,16 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
 
   const patchCameraMove = (moveId: string, patch: Partial<CameraMove>) =>
     set((store) => {
-      const cameraMoves = store.state.cameraMoves.map((move) =>
-        move.id === moveId ? { ...move, ...patch } : move,
-      );
+      const cameraMoves = store.state.cameraMoves.map((move) => {
+        if (move.id !== moveId) return move;
+        const next = { ...move, ...patch };
+        // 切到 PATH 但还没有路径点 → 种一条可用折线，避免出现「空 PATH」无从下手（旧实现只改 type）。
+        // 反方向（PATH → 其它）保留 pathPoints，切回来即可复原。
+        if (patch.type === "PATH" && (next.pathPoints?.length ?? 0) < 2) {
+          return { ...next, pathPoints: seedCameraPathPoints(next.id, next.camera, store.state) };
+        }
+        return next;
+      });
       return {
         state: {
           ...store.state,
@@ -656,6 +745,44 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         },
       };
     });
+
+  /** 规范化后的关键帧集合写回某条 move（null = 清空）。 */
+  const setMoveKeys = (moveId: string, keys: CameraKey[] | null) =>
+    set((store) => ({
+      state: {
+        ...store.state,
+        revision: store.state.revision + 1,
+        cameraMoves: store.state.cameraMoves.map((move) =>
+          move.id === moveId ? { ...move, keys: keys ?? undefined } : move,
+        ),
+      },
+    }));
+
+  const addCameraKey = (moveId: string, t: number) => {
+    const move = get().state.cameraMoves.find((m) => m.id === moveId);
+    if (!move) return;
+    const at = clamp(t, 0, 1);
+    const existing = move.keys ?? [];
+    const id = `${moveId}_K${existing.length + 1}_${Math.round(at * 100)}`;
+    setMoveKeys(moveId, normalizeCameraKeys([...existing, { id, t: at, ease: normalizeEase(move.ease) }]));
+  };
+
+  const updateCameraKey = (moveId: string, keyId: string, patch: Partial<CameraKey>) => {
+    const move = get().state.cameraMoves.find((m) => m.id === moveId);
+    if (!move) return;
+    setMoveKeys(
+      moveId,
+      normalizeCameraKeys(
+        (move.keys ?? []).map((key) => (key.id === keyId ? { ...key, ...patch } : key)),
+      ),
+    );
+  };
+
+  const deleteCameraKey = (moveId: string, keyId: string) => {
+    const move = get().state.cameraMoves.find((m) => m.id === moveId);
+    if (!move) return;
+    setMoveKeys(moveId, normalizeCameraKeys((move.keys ?? []).filter((key) => key.id !== keyId)));
+  };
 
   const init = initStage();
   return {
@@ -670,7 +797,9 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
     selectedId: "M17",
     selectedItem: null,
     selectedPoint: null,
-    radialObjectId: null,
+    selectedKeyId: null,
+    hoverMarker: null,
+    radialTarget: null,
     viewMode: "director",
     activeCameraId: "CAM_A",
     viewLocked: false,
@@ -728,13 +857,29 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         selectedPoint: null,
       }),
 
-    selectItem: (itemId) => set({ selectedItem: itemId }),
+    selectItem: (itemId) =>
+      set((store) => {
+        const move = itemId ? store.state.cameraMoves.find((m) => m.id === itemId) : undefined;
+        // 选中一段相机运镜时，把「镜头视图」同步到它的相机：
+        // 否则会出现「director view 里机位在动、camera view 仍是另一台相机」的脱节。
+        return move
+          ? { selectedItem: itemId, activeCameraId: move.camera }
+          : { selectedItem: itemId };
+      }),
 
     selectPoint: (pointId) => set({ selectedPoint: pointId }),
 
-    openRing: (objectId) => set({ radialObjectId: objectId }),
+    selectCameraKey: (keyId) => set({ selectedKeyId: keyId }),
 
-    closeRing: () => set({ radialObjectId: null }),
+    setHoverMarker: (marker) => set({ hoverMarker: marker }),
+
+    openRing: (objectId) => set({ radialTarget: { kind: "object", id: objectId } }),
+
+    openPointRing: (pointId) => set({ radialTarget: { kind: "point", id: pointId } }),
+
+    openCameraPointRing: (pointId) => set({ radialTarget: { kind: "cameraPoint", id: pointId } }),
+
+    closeRing: () => set({ radialTarget: null }),
 
     moveObject: (objectId, x, z) =>
       set((store) => {
@@ -805,10 +950,12 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         };
       }),
 
-    addAsset: (category, at) => {
+    addAsset: (category, at, species) => {
       const store = get();
       const { state } = store;
       const preset = ASSET_PRESETS[category];
+      // 动物：用物种定义覆盖默认体块 / 颜色（缺省物种走注册表默认）。
+      const animal = category === "animal" ? ANIMAL_MODELS[species ?? DEFAULT_ANIMAL_SPECIES] : undefined;
       let count = state.objects.filter((o) => o.category === category).length + 1;
       let id = `AST_${category.toUpperCase()}_${String(count).padStart(2, "0")}`;
       while (state.objects.some((o) => o.id === id)) {
@@ -834,8 +981,9 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         x: spawnX,
         z: spawnZ,
         rotation: 0,
-        footprint: { ...preset.footprint },
-        color: preset.color,
+        footprint: animal ? { ...animal.footprint } : { ...preset.footprint },
+        color: animal ? animal.color : preset.color,
+        ...(animal ? { species: animal.species } : {}),
       };
       // set 资产落点需与已有环境资产分离，避免穿模（agent 可自由摆放）。
       const { x: placedX, z: placedZ } =
@@ -857,11 +1005,13 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
      * 只给「组」设定一条路线——锚点（members[0]）承载它，其余队员由求解器按
      * formation 实时跟随（匀速保持编队、变速/变线弹簧回弹）。
      */
-    addGroupAt: (category, count, formation, at) => {
+    addGroupAt: (category, count, formation, at, species) => {
       const store = get();
       const { state } = store;
       const preset = ASSET_PRESETS[category];
       if (!preset) return;
+      // 动物团队：用物种定义覆盖默认体块 / 颜色（缺省物种走注册表默认）。
+      const animal = category === "animal" ? ANIMAL_MODELS[species ?? DEFAULT_ANIMAL_SPECIES] : undefined;
       const total = Math.max(1, Math.min(24, Math.round(count) || 1));
       const spacing = 1.3;
       const baseX = at ? Math.round(at.x * 10) / 10 : 0;
@@ -886,8 +1036,9 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           x: Math.round((baseX + slot.right) * 10) / 10,
           z: Math.round((baseZ + slot.fwd) * 10) / 10,
           rotation: 0,
-          footprint: { ...preset.footprint },
-          color: preset.color,
+          footprint: animal ? { ...animal.footprint } : { ...preset.footprint },
+          color: animal ? animal.color : preset.color,
+          ...(animal ? { species: animal.species } : {}),
         });
         members.push(id);
       }
@@ -978,7 +1129,11 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           // 删掉的正是当前选中资产时，清空选择，避免后续 DRAW PATH 把轨迹写进不存在的 id（孤儿路径）。
           selectedId: store.selectedId === id ? "" : store.selectedId,
           selectedKind: store.selectedKind === "object" && store.selectedId === id ? undefined : store.selectedKind,
-          radialObjectId: store.radialObjectId === id ? null : store.radialObjectId,
+          // 删掉资产时若正开着它的环形菜单，务必一并关掉，避免菜单指向已不存在的对象。
+          radialTarget:
+            store.radialTarget?.kind === "object" && store.radialTarget.id === id
+              ? null
+              : store.radialTarget,
         };
       }),
 
@@ -1227,7 +1382,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           selectedId: parsed.objects[0]?.id ?? "",
           selectedItem: null,
           selectedPoint: null,
-          radialObjectId: null,
+          radialTarget: null,
           activeCameraId: parsed.cameras[0]?.id ?? null,
         });
       } catch (error) {
@@ -1270,7 +1425,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
             selectedId: active.objects[0]?.id ?? "",
             selectedItem: null,
             selectedPoint: null,
-            radialObjectId: null,
+            radialTarget: null,
             activeCameraId: active.cameras[0]?.id ?? null,
           });
           return;
@@ -1290,7 +1445,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           selectedId: single.objects[0]?.id ?? "",
           selectedItem: null,
           selectedPoint: null,
-          radialObjectId: null,
+          radialTarget: null,
           activeCameraId: single.cameras[0]?.id ?? null,
         });
       } catch (error) {
@@ -1324,7 +1479,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         selectedId: "",
         selectedItem: null,
         selectedPoint: null,
-        radialObjectId: null,
+        radialTarget: null,
         viewMode: "director",
         activeCameraId: null,
       });
@@ -1346,7 +1501,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         selectedId: state.objects[0]?.id ?? "",
         selectedItem: null,
         selectedPoint: null,
-        radialObjectId: null,
+        radialTarget: null,
         activeCameraId: state.cameras[0]?.id ?? null,
       });
     },
@@ -1389,7 +1544,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           selectedId: state.objects[0]?.id ?? "",
           selectedItem: null,
           selectedPoint: null,
-          radialObjectId: null,
+          radialTarget: null,
           activeCameraId: state.cameras[0]?.id ?? null,
         });
       } else {
@@ -1418,7 +1573,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         selectedId: copy.objects[0]?.id ?? "",
         selectedItem: null,
         selectedPoint: null,
-        radialObjectId: null,
+        radialTarget: null,
         activeCameraId: copy.cameras[0]?.id ?? null,
       });
     },
@@ -1461,7 +1616,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         selectedId: state.objects[0]?.id ?? "",
         selectedItem: null,
         selectedPoint: null,
-        radialObjectId: null,
+        radialTarget: null,
         activeCameraId: state.cameras[0]?.id ?? null,
       });
     },
@@ -1665,7 +1820,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
       const state = store.state;
       const handoff = state.handoffs.find((item) => item.id === handoffId);
       if (!handoff) return;
-      // mode 本质是 Speed Curve 边界的便捷配置：不另写物理。
+      // mode 本质是缓动曲线边界的便捷配置：不另写物理。
       const EASE_OUT: EaseCurve = [0, 0, 0.58, 1];
       const EASE_IN: EaseCurve = [0.42, 0, 1, 1];
       const LINEAR: EaseCurve = [0, 0, 1, 1];
@@ -1730,6 +1885,9 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
 
     setSegmentEase: (segmentId, ease) => patchSegment(segmentId, { ease }),
 
+    setSegmentSpeedKeys: (segmentId, keys) =>
+      patchSegment(segmentId, { speedKeys: normalizeSpeedKeys(keys) ?? undefined }),
+
     addCamera: () => {
       const store = get();
       const { state } = store;
@@ -1746,14 +1904,34 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         motion: "FOLLOW",
         kind: "ground",
       };
+      // 新相机自带一条初始运镜段，否则它默认是 FOLLOW 却没有任何 cameraMove，
+      // timebar 的相机行里看不到 segment（drone / 模板相机都这么做了，这里保持一致）。
+      const start = 0;
+      const end = round1(Math.min(state.duration, start + Math.max(2, state.duration * 0.5)));
+      const move: CameraMove = {
+        id: nextCameraMoveId(state, id),
+        camera: id,
+        type: camera.motion,
+        timeStart: start,
+        timeEnd: end,
+        targetId: camera.targetId,
+        orbitDeg: 90,
+        dollyScale: 1,
+        craneHeight: 0,
+        ease: [0.42, 0, 0.58, 1],
+      };
+      const cameraMoves = [...state.cameraMoves, move];
       set({
         state: {
           ...state,
           revision: state.revision + 1,
           cameras: [...state.cameras, camera],
+          cameraMoves,
+          cameraJunctions: reconcileCameraJunctions(cameraMoves, state.cameraJunctions),
         },
         selectedKind: "camera",
         selectedId: id,
+        selectedItem: move.id,
         activeCameraId: store.activeCameraId ?? id,
       });
     },
@@ -1900,22 +2078,189 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
       const store = get();
       const { state } = store;
       const duration = state.duration;
-      // 每段独立、互不重叠：新段插在播放头处，被夹在相邻两段之间。
+      // 新段从播放头接管，一直铺到下一条更晚的片段起点（没有则铺到片尾）。
+      // 关键：不留空档——空档会让相机掉回「默认机位」（placeCamera 反推的构图位，不在路径上），
+      // 那正是「相机默认位置不在路径点上 / 播放到后面会跳到奇怪位置」的来源。
       const atTime = clamp(round1(store.currentTime), 0, Math.max(0, duration - 0.5));
       const camera = state.cameras.find((c) => c.id === cameraId);
       const siblings = state.cameraMoves
         .filter((m) => m.camera === cameraId)
         .sort((a, b) => a.timeStart - b.timeStart);
-      // 落在某条已有段内部 → 把它从播放头截断，本段接管后续时间。
+      const later = siblings.find((m) => m.timeStart > atTime);
+      const newStart = atTime;
+      const newEnd = round1(later ? later.timeStart : duration);
+
+      // 与新段重叠的旧段：裁掉被覆盖的一侧；整段落在新段内则丢弃（新段接管这段时间）。
+      const cameraMoves: CameraMove[] = [];
+      for (const m of state.cameraMoves) {
+        if (m.camera !== cameraId || m.timeEnd <= newStart || m.timeStart >= newEnd) {
+          cameraMoves.push(m);
+          continue;
+        }
+        if (m.timeStart < newStart) cameraMoves.push({ ...m, timeEnd: newStart });
+        else if (m.timeEnd > newEnd) cameraMoves.push({ ...m, timeStart: newEnd });
+      }
+
+      const moveId = nextCameraMoveId(state, cameraId);
+      // PATH：种子一条横跨主体前方的 2 点折线，用户可在 Director View 拖拽塑形。
+      const pathPoints: CameraPathPoint[] | undefined =
+        type === "PATH" ? seedCameraPathPoints(moveId, cameraId, state) : undefined;
+      const move: CameraMove = {
+        id: moveId,
+        camera: cameraId,
+        type,
+        targetId: camera?.targetId,
+        timeStart: newStart,
+        timeEnd: newEnd,
+        orbitDeg: 90,
+        dollyScale: type === "DOLLY" ? 0.55 : 1,
+        craneHeight: type === "CRANE" ? 3 : 0,
+        ease: [0.42, 0, 0.58, 1],
+        ...(pathPoints ? { pathPoints } : {}),
+      };
+      cameraMoves.push(move);
+      set({
+        state: {
+          ...state,
+          revision: state.revision + 1,
+          // 新段可能被顺延到片尾之后：同步抬高片长，避免片段被时间轴截掉。
+          duration: Math.max(state.duration, newEnd),
+          cameraMoves,
+          cameraJunctions: reconcileCameraJunctions(cameraMoves, state.cameraJunctions),
+        },
+        selectedKind: "camera",
+        selectedId: cameraId,
+        selectedItem: move.id,
+        // 新增运镜即进入导演视图：PATH 的路径线与可拖拽把手只在导演视图可见，否则会像「没反应」。
+        viewMode: "director",
+      });
+    },
+
+    addCameraPathPoint: (moveId, x, y, z) => {
+      const move = get().state.cameraMoves.find((m) => m.id === moveId);
+      if (!move) return;
+      const pts = move.pathPoints ?? [];
+      const node: CameraPathPoint = {
+        id: `${moveId}_P_${Date.now().toString(36)}_${Math.floor(Math.random() * 1000)}`,
+        x,
+        y,
+        z,
+        shape: "LINE",
+      };
+      const pathPoints = normalizeCamPathShapes([...pts, node]);
+      set((s) => ({
+        state: {
+          ...s.state,
+          revision: s.state.revision + 1,
+          cameraMoves: s.state.cameraMoves.map((m) =>
+            m.id === moveId ? { ...m, pathPoints } : m,
+          ),
+        },
+      }));
+    },
+
+    insertCameraPathPoint: (moveId, x, y, z, insertAt) => {
+      const move = get().state.cameraMoves.find((m) => m.id === moveId);
+      if (!move) return null;
+      const pts = [...(move.pathPoints ?? [])];
+      const node: CameraPathPoint = {
+        id: `${moveId}_P_${Date.now().toString(36)}_${Math.floor(Math.random() * 1000)}`,
+        x,
+        y,
+        z,
+        shape: "LINE",
+      };
+      // 只插在中间：不能跑到 START 之前或 END 之后。
+      const at = Math.max(1, Math.min(pts.length - 1, insertAt));
+      pts.splice(at, 0, node);
+      const pathPoints = normalizeCamPathShapes(pts);
+      set((s) => ({
+        state: {
+          ...s.state,
+          revision: s.state.revision + 1,
+          cameraMoves: s.state.cameraMoves.map((m) =>
+            m.id === moveId ? { ...m, pathPoints } : m,
+          ),
+        },
+      }));
+      return node.id;
+    },
+
+    moveCameraPathPoint: (moveId, pointId, x, y, z) => {
+      const move = get().state.cameraMoves.find((m) => m.id === moveId);
+      if (!move) return;
+      set((s) => ({
+        state: {
+          ...s.state,
+          revision: s.state.revision + 1,
+          cameraMoves: s.state.cameraMoves.map((m) =>
+            m.id === moveId
+              ? {
+                  ...m,
+                  pathPoints: (m.pathPoints ?? []).map((p) =>
+                    p.id === pointId ? { ...p, x, y, z } : p,
+                  ),
+                }
+              : m,
+          ),
+        },
+      }));
+    },
+
+    deleteCameraPathPoint: (moveId, pointId) => {
+      const move = get().state.cameraMoves.find((m) => m.id === moveId);
+      if (!move) return;
+      const pathPoints = normalizeCamPathShapes(
+        (move.pathPoints ?? []).filter((p) => p.id !== pointId),
+      );
+      set((s) => ({
+        state: {
+          ...s.state,
+          revision: s.state.revision + 1,
+          cameraMoves: s.state.cameraMoves.map((m) =>
+            m.id === moveId ? { ...m, pathPoints } : m,
+          ),
+        },
+      }));
+    },
+
+    toggleCameraPathCurve: (moveId, pointId) => {
+      const move = get().state.cameraMoves.find((m) => m.id === moveId);
+      if (!move) return;
+      const points = move.pathPoints ?? [];
+      const index = points.findIndex((p) => p.id === pointId);
+      if (index <= 0 || index >= points.length - 1) return; // 只中间点可转
+      const next = points.map((p, i) =>
+        i === index ? { ...p, shape: p.shape === "ARC" ? "LINE" : "ARC" } : p,
+      ) as CameraPathPoint[];
+      const pathPoints = normalizeCamPathShapes(next);
+      set((s) => ({
+        state: {
+          ...s.state,
+          revision: s.state.revision + 1,
+          cameraMoves: s.state.cameraMoves.map((m) =>
+            m.id === moveId ? { ...m, pathPoints } : m,
+          ),
+        },
+      }));
+    },
+
+    addOtsMove: (cameraId) => {
+      const store = get();
+      const { state } = store;
+      const duration = state.duration;
+      const atTime = clamp(round1(store.currentTime), 0, Math.max(0, duration - 0.5));
+      const camera = state.cameras.find((c) => c.id === cameraId);
+      const siblings = state.cameraMoves
+        .filter((m) => m.camera === cameraId)
+        .sort((a, b) => a.timeStart - b.timeStart);
       const host = siblings.find((m) => atTime > m.timeStart && atTime < m.timeEnd);
-      // 播放头之后的第一条段，新段右端不能超过它的起点。
       const next = siblings.filter((m) => m.timeStart >= atTime).sort((a, b) => a.timeStart - b.timeStart)[0];
 
       let newStart = atTime;
       let newEnd = round1(Math.min(atTime + 2, duration));
       if (next) newEnd = round1(Math.min(newEnd, next.timeStart));
       if (newEnd - newStart < 0.5) {
-        // 旁边没有空间，改放到该段之后，仍不与其重叠。
         newStart = next ? next.timeEnd : round1(duration - 0.5);
         newEnd = round1(Math.min(newStart + 2, duration));
         if (next) newEnd = Math.min(newEnd, next.timeEnd);
@@ -1926,7 +2271,6 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         const hi = cameraMoves.findIndex((m) => m.id === host.id);
         if (hi >= 0) {
           if (atTime - host.timeStart < 0.05) {
-            // 几乎压在起点：直接删除原段，新段从其起点接管。
             cameraMoves.splice(hi, 1);
             newStart = host.timeStart;
           } else {
@@ -1935,22 +2279,23 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         }
       }
 
+      // 过肩：前景自动挑一个非主体的演员；不足 2 名演员时不应调用（UI 已禁用）。
+      const shoulderId =
+        camera?.shoulderId ??
+        state.objects.find((o) => o.type === "actor" && o.id !== camera?.targetId)?.id;
       const move: CameraMove = {
         id: nextCameraMoveId(state, cameraId),
         camera: cameraId,
-        type,
+        type: "FOLLOW",
+        targetType: "OTS",
         targetId: camera?.targetId,
-        // OTS 默认取一个非主体的演员作前景，让过肩开箱即用；其余类型留空以继承相机级设置。
-        shoulderId:
-          type === "OTS"
-            ? camera?.shoulderId ?? state.objects.find((o) => o.id !== camera?.targetId)?.id
-            : undefined,
-        otsSide: type === "OTS" ? camera?.otsSide ?? "R" : undefined,
+        shoulderId,
+        otsSide: camera?.otsSide ?? "R",
         timeStart: newStart,
         timeEnd: newEnd,
         orbitDeg: 90,
-        dollyScale: type === "DOLLY" ? 0.55 : 1,
-        craneHeight: type === "CRANE" ? 3 : 0,
+        dollyScale: 1,
+        craneHeight: 0,
         ease: [0.42, 0, 0.58, 1],
       };
       cameraMoves.push(move);
@@ -1997,7 +2342,8 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
       const move: CameraMove = {
         id: nextCameraMoveId(state, src.camera),
         camera: src.camera,
-        type: "OTS",
+        type: "FOLLOW",
+        targetType: "OTS",
         targetId: newTarget,
         shoulderId: newShoulder,
         otsSide: newSide,
@@ -2043,6 +2389,9 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
 
     setCameraMoveEase: (moveId, ease) => patchCameraMove(moveId, { ease }),
 
+    setCameraMoveSpeedKeys: (moveId, keys) =>
+      patchCameraMove(moveId, { speedKeys: normalizeSpeedKeys(keys) ?? undefined }),
+
     patchCameraMove: (moveId, patch) => patchCameraMove(moveId, patch),
 
     deleteCameraMove: (moveId) =>
@@ -2058,6 +2407,14 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           selectedItem: store.selectedItem === moveId ? null : store.selectedItem,
         };
       }),
+
+    addCameraKey: (moveId, t) => addCameraKey(moveId, t),
+
+    updateCameraKey: (moveId, keyId, patch) => updateCameraKey(moveId, keyId, patch),
+
+    deleteCameraKey: (moveId, keyId) => deleteCameraKey(moveId, keyId),
+
+    clearCameraKeys: (moveId) => setMoveKeys(moveId, null),
 
     removeCamera: (cameraId) =>
       set((store) => {
@@ -2123,7 +2480,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         selectedKind: "object",
         selectedId: objectId,
         selectedItem: clip.id,
-        radialObjectId: null,
+        radialTarget: null,
       });
     },
 
@@ -2138,6 +2495,30 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           actions: (store.state.actions ?? []).map((a) =>
             a.id === actionId ? { ...a, timeStart: nextStart, timeEnd: nextEnd } : a,
           ),
+        },
+      }));
+    },
+
+    setActionTimes: (entries) => {
+      const duration = get().state.duration;
+      if (entries.length === 0) return;
+      // 先算好每条的目标区间（逐条夹取，规则与 setActionTime 一致），再一次性写回。
+      const targets = new Map<string, { timeStart: number; timeEnd: number }>();
+      entries.forEach((entry) => {
+        const timeStart = clamp(round1(entry.timeStart), 0, duration - 0.1);
+        targets.set(entry.id, {
+          timeStart,
+          timeEnd: clamp(round1(entry.timeEnd), timeStart + 0.1, duration),
+        });
+      });
+      set((store) => ({
+        state: {
+          ...store.state,
+          revision: store.state.revision + 1,
+          actions: (store.state.actions ?? []).map((action) => {
+            const target = targets.get(action.id);
+            return target ? { ...action, ...target } : action;
+          }),
         },
       }));
     },
@@ -2226,7 +2607,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           selectedKind: "object",
           selectedId: objectId,
           selectedItem: constraint.id,
-          radialObjectId: null,
+          radialTarget: null,
         });
         return;
       }
@@ -2277,7 +2658,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           selectedKind: "object",
           selectedId: routeId,
           selectedItem: segment.id,
-          radialObjectId: null,
+          radialTarget: null,
         });
         return;
       }
@@ -2289,7 +2670,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         if (active) {
           patchConstraint(active.id, { timeEnd: Math.max(active.timeStart + 0.1, round1(time)) });
         }
-        set({ radialObjectId: null, selectedItem: active?.id ?? null });
+        set({ radialTarget: null, selectedItem: active?.id ?? null });
         return;
       }
 
@@ -2298,7 +2679,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           state.segments.find(
             (s) => s.object === objectId && time >= s.timeStart && time <= s.timeEnd,
           ) ?? state.segments.find((s) => s.object === objectId);
-        set({ radialObjectId: null, selectedItem: segment?.id ?? "CHANGE PATH" });
+        set({ radialTarget: null, selectedItem: segment?.id ?? "CHANGE PATH" });
         return;
       }
 
@@ -2323,12 +2704,12 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           selectedItem: clip.id,
           selectedKind: undefined,
           selectedId: "",
-          radialObjectId: null,
+          radialTarget: null,
         });
         return;
       }
 
-      set({ radialObjectId: null, selectedItem: action });
+      set({ radialTarget: null, selectedItem: action });
     },
 
     undo: () => {
@@ -2370,7 +2751,10 @@ useDirectorStore.subscribe((state, prev) => {
     if (state.selectedItem) useDirectorStore.setState({ selectedItem: null, selectedPoint: null });
   } else if (itemChanged && state.selectedItem) {
     // 时间轴片段被新选中 → 清对象 / 相机选中。
-    if (state.selectedId || state.selectedKind) {
+    // 但「路径段」(MoveSegment) 是对象路径编辑的一部分（点路径点会 selectItem(segment.id)），
+    // 必须保留对象选中，否则 selectedObjectId 变 null、PathHandles 不渲染、CURVE 按钮出不来。
+    const isSegment = (state.state?.segments ?? []).some((s) => s.id === state.selectedItem);
+    if ((state.selectedId || state.selectedKind) && !isSegment) {
       useDirectorStore.setState({ selectedKind: undefined, selectedId: "" });
     }
   }

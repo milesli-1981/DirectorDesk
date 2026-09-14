@@ -14,6 +14,14 @@ export type AssetCategory =
   | "nature"
   | "prop";
 
+/** 动物物种：决定使用哪个 GLB 模型。来源见 `engine/animalModels.ts`。 */
+export type AnimalSpecies =
+  | "parrot" | "flamingo" | "stork" | "pigeon" // 鸟
+  | "horse" // 马
+  | "dog" | "wolf" // 犬科（狗 / 狼）
+  | "cat" // 猫
+  | "fish"; // 鱼
+
 /** agent = 可运动、可作目标；set = 静态环境（遮挡 + 障碍）。 */
 export type AssetRole = "agent" | "set";
 
@@ -24,6 +32,24 @@ export type PathPointShape = "LINE" | "ARC";
 
 /** cubic-bezier(x1, y1, x2, y2) — 与 CSS 缓动一致。 */
 export type EaseCurve = [number, number, number, number];
+
+/**
+ * 速度曲线关键点 = 一条「何时走到哪儿」的控制点。
+ * t = 归一化时刻 0..1（落在片段 [timeStart, timeEnd] 内的比例）
+ * v = 该时刻已完成的路径进度 0..1。首点恒为 0、末点恒为 1 —— 进度曲线必须走完全程，
+ *     想表达「延迟出发 / 提前到位」只能改这两点的 t，不能改 v。
+ * ease = 从上一关键点走到本点所用的缓动
+ *
+ * 相邻两点之间的斜率就是这段的速度：把首点 t 往后拖 = 起步前先等一会（延迟），
+ * 末点 t 往前拖 = 提前到位后停住；中间插点 = 中途加速 / 减速（多段变速）。
+ * 数组长度 ≥ 2 时整体接管该片段的运动时序，`ease` 字段退为兜底。
+ */
+export interface SpeedKey {
+  id: string;
+  t: number;
+  v: number;
+  ease: EaseCurve;
+}
 
 export interface Vec2 {
   x: number;
@@ -77,8 +103,12 @@ export interface DirectorObject {
   /** 默认体块尺寸。 */
   footprint: Footprint;
   color: string;
+  /** animal 类资产的物种（决定 GLB 模型）；非 animal 留空。 */
+  species?: AnimalSpecies;
   /** 锁定后不可通过拖拽改变位置（防误触）；仍可点选以便解锁。 */
   locked?: boolean;
+  /** 隐藏：画布上不渲染、不可拾取（仅视图层，不影响求解 / 导出）。用于减少画布杂乱。 */
+  hidden?: boolean;
   /** human 类资产的静态姿势基线（本地欧拉角）；缺省 = 标准站姿。 */
   pose?: Pose;
 }
@@ -97,6 +127,16 @@ export interface PathPoint {
   z: number;
 }
 
+/** 相机自定义路径点（3D）：x/z 平面位置 + y 高度（米），用于 PATH 运镜沿折线运动。 */
+export interface CameraPathPoint {
+  id: string;
+  x: number;
+  y: number;
+  z: number;
+  /** 折线 LINE / 曲线 ARC（仅中间点可切换；首尾是端点，恒为 LINE）。 */
+  shape?: PathPointShape;
+}
+
 /**
  * MOVE Segment = When + How to travel。
  * Segment 是唯一的时间/空间运动来源（Single Source）。
@@ -113,6 +153,8 @@ export interface MoveSegment {
   timeStart: number;
   timeEnd: number;
   ease: EaseCurve;
+  /** 多段速度曲线关键点（≥2 时接管时序）。为空 = 单段 cubic-bezier。 */
+  speedKeys?: SpeedKey[];
 }
 
 /** 相邻两条 leg 的交接点模式。 */
@@ -185,12 +227,12 @@ export type CameraMotionType =
   | "DOLLY_ZOOM"
   | "CRANE"
   | "DRONE"
-  | "OTS"
   | "PAN"
   | "TILT"
   | "TRUCK"
   | "STEADICAM"
-  | "HANDHELD";
+  | "HANDHELD"
+  | "PATH";
 
 /** 目标类型：单对象 / 过肩 / 群组 / 主观 / 环境。决定 cameraSolver 如何取景。 */
 export type CameraTargetType = "OBJECT" | "OTS" | "GROUP" | "POV" | "LOCATION";
@@ -258,6 +300,12 @@ export interface CameraObject {
   motion: CameraMotionType;
   /** 稳定方式 / 风格轴（默认 locked）：与 motion 正交。旧场景 motion:"HANDHELD" 仍按 handheld 兼容。 */
   style?: CameraStyle;
+  /**
+   * 防抖强度 0..1（默认 0 = 关闭）。对机位 / 注视点在过去一小段时间做滑动平均，
+   * 使相机对目标的瞬变（转向、绕障让位、扭动）响应滞后一点；瞬变若在窗口内自行消失即被忽略，
+   * 类似软件的电子防抖。与 style 正交：style 是「主动晃动质感」，stabilize 是「被动跟随阻尼」。
+   */
+  stabilize?: number;
   /** 过肩镜头：镜头所越过的演员（前景）；为空则不是过肩。 */
   shoulderId?: string;
   /** 过肩：越过前景演员的哪一侧肩膀（默认 R 右肩）。 */
@@ -287,6 +335,43 @@ export interface CameraObject {
   tiltDeg?: number;
   /** 相机级默认：TRUCK 横向平移距离（米，正负=左右）。 */
   truckDist?: number;
+  /** PATH 默认固定朝向 · 平面方位角（度，0–360）：含义同 CameraMove.fixedYawDeg，段未单独设时沿用。 */
+  fixedYawDeg?: number;
+  /** PATH 默认固定朝向 · 立面俯仰角（度，0–360）：含义同 CameraMove.fixedPitchDeg。 */
+  fixedPitchDeg?: number;
+}
+
+/**
+ * 相机关键帧：在 CameraMove 运镜基元之上，对「通道」做曲线定制。
+ *
+ * 只有被显式赋值的通道才被关键帧接管；未赋值的通道继续走该段运镜基元
+ * （例如 ORBIT 段只给 craneHeight 打帧 = 一边环绕一边升降）。
+ * 于是可以在不新增运镜类型的前提下组合出复杂运镜。
+ */
+export interface CameraKey {
+  id: string;
+  /** 归一化时刻 0..1（相对所在 CameraMove 的 [timeStart, timeEnd]），按真实时间线性分布。 */
+  t: number;
+  /** 从上一关键帧插到本帧所用的缓动（首帧忽略）。 */
+  ease: EaseCurve;
+  /** 环绕角（度）：叠加在基元方位角之上。 */
+  orbitDeg?: number;
+  /** 升降（米）：相对基准机位的高度偏移。 */
+  craneHeight?: number;
+  /** 推拉：距离系数（1 = 基准取景距离）。 */
+  dollyScale?: number;
+  /** 原地水平摇摄（度）。 */
+  panDeg?: number;
+  /** 原地俯仰（度）。 */
+  tiltDeg?: number;
+  /** 横向平移（米，垂直视线方向）。 */
+  truckDist?: number;
+  /** 焦距（mm）。 */
+  lensMm?: number;
+  /** 荷兰角 / 画面滚转（度）。 */
+  roll?: number;
+  /** 过肩错位量（0..1，主体偏离画面中心的比例）。 */
+  otsOffset?: number;
 }
 
 /**
@@ -301,6 +386,8 @@ export interface CameraMove {
   timeEnd: number;
   /** 覆盖该段的目标（为空则沿用相机自身 Target）。 */
   targetId?: string;
+  /** 取景关系（为空则沿用相机级 targetType）：OBJECT 单对象 / OTS 过肩 / GROUP 群组 / POV 主观 / LOCATION 环境。 */
+  targetType?: CameraTargetType;
   /** OTS：本段所越过的前景演员（为空则沿用相机自身 Shoulder）。 */
   shoulderId?: string;
   /** OTS：越过前景演员的哪一侧肩膀（为空则沿用相机设置）。 */
@@ -321,6 +408,12 @@ export interface CameraMove {
   tiltDeg?: number;
   /** TRUCK：纯横向平移距离（米，正负=左右），垂直视线方向。 */
   truckDist?: number;
+  /** PATH：相机沿可编辑 3D 折线运动（不依赖 placeCamera 反推），点的顺序即行进顺序。 */
+  pathPoints?: CameraPathPoint[];
+  /** PATH 固定朝向 · 平面方位角（度，0–360，绕竖直轴）。与 fixedPitchDeg 构成旋转系统；设置后机位沿轨道平移、朝向不变（不跟人、不随路径弯曲）。 */
+  fixedYawDeg?: number;
+  /** PATH 固定朝向 · 立面俯仰角（度，0–360）。0 = 水平，90 = 正上，270 = 正下。 */
+  fixedPitchDeg?: number;
   /** 段级覆盖：景别 / 视角 / 方位 / 镜头。为空则沿用 CameraObject 默认值。 */
   framing?: CameraFraming;
   view?: CameraView;
@@ -328,7 +421,13 @@ export interface CameraMove {
   lensMm?: number;
   /** 风格轴：本段稳定方式覆盖（为空沿用相机默认）。 */
   style?: CameraStyle;
+  /** 段级覆盖：防抖强度 0..1（为空沿用相机设置，0 = 关闭）。 */
+  stabilize?: number;
   ease: EaseCurve;
+  /** 多段速度曲线关键点（≥2 时接管时序）。为空 = 单段 cubic-bezier。 */
+  speedKeys?: SpeedKey[];
+  /** 通道关键帧（≥1 即生效）：在运镜基元之上定制 / 组合通道曲线。 */
+  keys?: CameraKey[];
 }
 
 export type AspectRatio = "16:9" | "2.39:1" | "1.85:1" | "4:3" | "9:16";
@@ -483,12 +582,12 @@ export const MOTION_LABELS: Record<CameraMotionType, string> = {
   DOLLY_ZOOM: "DOLLY ZOOM",
   CRANE: "CRANE",
   DRONE: "DRONE",
-  OTS: "OTS 过肩",
   PAN: "PAN 平摇",
   TILT: "TILT 俯仰",
   TRUCK: "TRUCK 横移",
   STEADICAM: "STEADICAM 斯坦尼康",
   HANDHELD: "HANDHELD 手持",
+  PATH: "PATH 自定义轨迹",
 };
 
 export const TARGET_TYPE_LABELS: Record<CameraTargetType, string> = {
@@ -512,13 +611,13 @@ export const MOTION_HINTS: Record<CameraMotionType, string> = {
   DOLLY_ZOOM:
     "滑动变焦（希区柯克）：推近的同时同步变焦，主体大小不变、背景透视发生畸变，用于眩晕 / 顿悟。",
   CRANE: "升降：改变机位高度。",
-  OTS: "过肩：机位置于前景演员身后，越过其肩膀拍主体，两人移动时自动保持过肩关系。",
   DRONE: "无人机自由飞行：同时绕圈 + 升降 + 推拉。",
   PAN: "原地水平摇（yaw）：机位不动，只旋转注视方向扫过场景，用于甩镜 / 横扫。",
   TILT: "原地俯仰（pitch）：机位不动，只上下旋转注视方向。",
   TRUCK: "横向平移（垂直视线方向的轨道横移）：保持距离与透视，平行掠过主体。",
   STEADICAM: "斯坦尼康式平滑跟随：三维连续跟随目标，比普通 FOLLOW 更顺滑稳定。",
   HANDHELD: "手持微晃：机位叠加细微正弦抖动，模拟手持摄影的不稳定质感。",
+  PATH: "自定义空间路径：相机沿可编辑折线（任意曲线）运动，不锁定任何目标关系，用于精确复刻手绘运镜。",
 };
 
 /** 风格轴 → 底层参数（模板映射，UI 不暴露原始数值）。 */

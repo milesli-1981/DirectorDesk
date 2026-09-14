@@ -23,7 +23,7 @@
   --ap-sep: rgba(255, 255, 255, 0.09);
   --ap-text: #f5f5f7;
   --ap-text-2: #a1a1a6;
-  --ap-text-3: #6e6e73;
+  --ap-text-3: #8e8e93;
 
   /* 系统色（暗色模式取值） */
   --ap-blue: #0a84ff;
@@ -41,6 +41,8 @@
   /* 阴影与聚焦环 */
   --ap-shadow: 0 10px 34px rgba(0, 0, 0, 0.6);
   --ap-ring: 0 0 0 3px rgba(10, 132, 255, 0.35);
+  /* 选中态底色：列表项 / 分段控件激活格统一复用，避免各处分散写同一份蓝 */
+  --ap-sel: rgba(10, 132, 255, 0.22);
 }
 
 html,
@@ -302,10 +304,10 @@ header {
   border-right: 1px solid #27313b;
   display: flex;
   flex-direction: column;
-  /* 抓手胶囊要向右探出 15px（更好抓、也更贴近画布），默认的 hidden 会把它切掉；
-     clip + clip-margin 依旧裁掉列表内容，只是给边界外留出 18px 的绘制 / 命中区。 */
+  /* 抓手胶囊要向右探出 10px（更好抓、也更贴近画布），默认的 hidden 会把它切掉；
+     clip + clip-margin 依旧裁掉列表内容，只是给边界外留出 13px 的绘制 / 命中区。 */
   overflow: clip;
-  overflow-clip-margin: 18px;
+  overflow-clip-margin: 13px;
   position: relative;
 }
 
@@ -339,8 +341,8 @@ header {
 .left-grip {
   position: absolute;
   top: 50%;
-  /* 往右探出面板 15px：胶囊明显跨到画布一侧，视觉与抓取都更明显 */
-  right: -15px;
+  /* 往右探出面板 10px：胶囊跨在分界线上，视觉与抓取都更明显 */
+  right: -10px;
   transform: translateY(-50%);
   width: 16px;
   height: 46px;
@@ -490,7 +492,7 @@ header {
 }
 .obj-row .obj-name {
   flex: 0 1 auto;
-  max-width: 60%;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -789,6 +791,9 @@ header {
 }
 .tree-children {
   flex-basis: 100%;
+  /* min-width:0 是关键：默认 auto 会让这一项被内部 nowrap 文本的 min-content 撑宽、
+     无法收缩，导致 .tree-label 拿不到受限宽度而永不触发 ellipsis（改为溢出换行 / 横向溢出）。 */
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 1px;
@@ -801,6 +806,8 @@ header {
   align-items: center;
   gap: 6px;
   width: 100%;
+  /* 同上：允许这一行收缩到父级宽度，子级 .tree-label 才会真正省略。 */
+  min-width: 0;
   text-align: left;
   padding: 1px 5px;
   font-size: 9.5px;
@@ -927,53 +934,11 @@ canvas {
   color: #55d88a;
 }
 
-.point-tools {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.point-delete {
-  background: #2a1a1e;
-  color: #e8a2aa;
-  border: 1px solid #b4565f;
-  border-radius: 6px;
-  padding: 3px 7px;
-  font-size: 10px;
-  line-height: 1.4;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.point-delete:hover {
-  background: #3a2026;
-  border-color: #ff7b91;
-}
-
-.curve-toggle {
-  background: #111b24;
-  color: #dfffea;
-  border: 1px solid #55d88a;
-  border-radius: 6px;
-  padding: 3px 7px;
-  font-size: 10px;
-  line-height: 1.4;
-  cursor: pointer;
-  white-space: nowrap;
-  transform: translate(20px, -32px);
-}
-
-.curve-toggle:hover {
-  background: #16342a;
-}
-
 /* ------------------------------------------------------- Radial ring */
 
 .radialRing {
   display: none;
   position: relative;
-  width: 170px;
-  height: 170px;
   pointer-events: auto;
 }
 
@@ -981,27 +946,31 @@ canvas {
   display: block;
 }
 
+/* 尺寸由 RadialRing.tsx 的 RING_SIZE 以内联宽高给出，这里只负责铺满该方框。 */
 .radialSvg {
   position: absolute;
   inset: 0;
-  width: 170px;
-  height: 170px;
+  width: 100%;
+  height: 100%;
   overflow: visible;
   pointer-events: none;
 }
 
 .radialSector {
   stroke: #080c11;
-  stroke-width: 2;
+  stroke-width: 1.5;
+  /* 半透明填充：环浮在三维画面上，实心会挡住资产与路径，透明后仍能看清底下的物体。 */
+  fill-opacity: 0.5;
   cursor: pointer;
   pointer-events: auto;
-  transition: filter 0.12s;
+  transition: fill-opacity 0.12s, filter 0.12s;
 }
 
 .radialSector:hover {
-  filter: brightness(1.35);
+  fill-opacity: 0.92;
+  filter: brightness(1.3);
   stroke: #fff;
-  stroke-width: 3;
+  stroke-width: 2;
 }
 
 .radialCenter {
@@ -1009,17 +978,19 @@ canvas {
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
-  width: 30px;
-  height: 30px;
+  width: 22px;
+  height: 22px;
   border-radius: 50%;
-  background: #101820;
-  border: 1px solid #607486;
+  /* 同样半透明，环心的标签不至于盖住资产本身。 */
+  background: rgba(16, 24, 32, 0.55);
+  border: 1px solid rgba(96, 116, 134, 0.9);
   color: #dce9f6;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 8px;
+  font-size: 7px;
   font-weight: 700;
+  text-shadow: 0 1px 2px #000;
   pointer-events: none;
 }
 
@@ -1050,6 +1021,24 @@ canvas {
   pointer-events: none;
   text-anchor: middle;
   dominant-baseline: middle;
+}
+
+/* 不合法的扇区（如相邻已是大曲线、不能再转的点）：仍然占位保持布局稳定，
+   但不响应 hover / 点击，靠 tooltip 说明原因。 */
+.radialDisabled .radialSector {
+  fill-opacity: 0.26;
+  cursor: not-allowed;
+}
+
+.radialDisabled .radialSector:hover {
+  fill-opacity: 0.26;
+  filter: none;
+  stroke: #080c11;
+  stroke-width: 1.5;
+}
+
+.radialDisabled .radialSectorText {
+  fill: #8b98a5;
 }
 
 /* ----------------------------------------------------------- Timeline */
@@ -1118,17 +1107,26 @@ canvas {
   border-color: var(--ap-blue);
   box-shadow: var(--ap-ring);
 }
-/* 片长短于内容：输入框描橙边 + 一行说明，说明「超出部分不出片」而不是「设置没生效」。 */
+/* 片长短于内容：输入框描橙边 + 一枚可点击的提示，点一下就把片长对齐到内容末尾。 */
 .dur-field.is-overflow input[type="number"] {
   border-color: rgba(255, 159, 10, 0.6);
 }
 .dur-warn {
-  padding: 2px 6px;
+  padding: 3px 7px;
   font-size: 10px;
+  font-family: inherit;
   line-height: 1;
+  white-space: nowrap;
   color: #ffcf8a;
   background: rgba(255, 159, 10, 0.16);
+  border: 1px solid rgba(255, 159, 10, 0.35);
   border-radius: var(--ap-r-xs);
+  cursor: pointer;
+}
+.dur-warn:hover {
+  color: #ffe4b8;
+  background: rgba(255, 159, 10, 0.3);
+  border-color: rgba(255, 159, 10, 0.6);
 }
 
 .timecode {
@@ -1170,6 +1168,12 @@ canvas {
   padding: 4px 0 0 4px;
   color: #667789;
   font-size: 10px;
+}
+
+/* 片长之外的刻度（内容排到了片长后面）：淡橙，提示这段是「不出片」的溢出区。 */
+.tick.over {
+  border-left-color: rgba(255, 159, 10, 0.25);
+  color: #8a6b46;
 }
 
 .row {
@@ -1249,6 +1253,19 @@ canvas {
 .clip.action {
   background: #3a2a18;
   border-color: #c79247;
+}
+
+/* 整队动作带：一条带子代表整队全体成员的动作。
+   团队成员不单独成行，队员的动作靠它才在时间轴上可见、可拖。 */
+.clip.team-band {
+  background: #40301a;
+  border-color: #e0b063;
+  box-shadow: inset 0 0 0 1px rgba(224, 176, 99, 0.28);
+}
+/* 带子右端越过片长：描橙边，与顶栏「内容到 Xs」提示呼应。 */
+.clip.team-band.over {
+  background: #4c3010;
+  border-color: #ff9f0a;
 }
 
 .action-row .label {
@@ -1372,6 +1389,16 @@ canvas {
   margin-top: 6px;
 }
 
+/* 相机 PATH 编辑器：与 .inspector-row 同一栅格，垂直节奏统一为 8。 */
+.path-editor {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--ap-sep);
+}
+.path-editor .hint {
+  margin: 0 0 8px;
+}
+
 .ghost-button.on {
   border-color: #67a7ff;
   background: #18283a;
@@ -1406,6 +1433,197 @@ canvas {
 
 .handle.r {
   right: 0;
+}
+
+/* 路径转折点在 MOVE 片段上的关键帧刻度：
+   竖向细线 + 中点圆点，坐标由 waypointKeyframes 算出的抵达时刻决定。
+   宽度 9px 而不是 1px，是为了留出可点击区域（点与点很近时不至于点不到）。 */
+.clip .wp-key {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 9px;
+  transform: translateX(-50%);
+  cursor: pointer;
+  z-index: 3;
+}
+
+.clip .wp-key::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 1px;
+  bottom: 1px;
+  width: 1px;
+  background: #55d88a;
+}
+
+.clip .wp-key::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 5px;
+  height: 5px;
+  margin: -2.5px 0 0 -2.5px;
+  border-radius: 50%;
+  background: #55d88a;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
+}
+
+/* 曲线转折点：虚线 + 菱形，区别于折线转折点 */
+.clip .wp-key.is-arc::before {
+  width: 0;
+  border-left: 1px dashed #55d88a;
+  background: none;
+}
+
+.clip .wp-key.is-arc::after {
+  border-radius: 0;
+  transform: rotate(45deg);
+}
+
+.clip .wp-key:hover::after,
+.clip .wp-key:hover::before {
+  background: #ffffff;
+}
+
+.clip .wp-key:hover::before {
+  border-left-color: #ffffff;
+}
+
+.clip .wp-key.sel::after {
+  background: #ffffff;
+  box-shadow: 0 0 0 2px #67a7ff;
+}
+
+.clip .wp-key.sel::before {
+  background: #ffffff;
+  border-left-color: #ffffff;
+}
+
+/* 相机运镜关键帧在 CameraMove 片段上的刻度：琥珀色方块 + 竖线，
+   与路径转折点（绿色圆点 / 菱形）区分。实心 = 已接管通道，空心 = 空帧。 */
+.clip .kf-key {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 11px;
+  transform: translateX(-50%);
+  cursor: grab;
+  z-index: 4;
+}
+
+.clip .kf-key::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: #f0a35a;
+  opacity: 0.9;
+}
+
+.clip .kf-key::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 3px;
+  width: 7px;
+  height: 7px;
+  margin-left: -3.5px;
+  transform: rotate(45deg);
+  background: transparent;
+  border: 1.5px solid #f0a35a;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
+}
+
+.clip .kf-key.has::after {
+  background: #f0a35a;
+}
+
+.clip .kf-key:hover::before,
+.clip .kf-key:hover::after {
+  background: #ffffff;
+  border-color: #ffffff;
+}
+
+.clip .kf-key.sel::before {
+  background: #ffffff;
+  width: 2px;
+}
+
+.clip .kf-key.sel::after {
+  background: #ffffff;
+  border-color: #67a7ff;
+  box-shadow: 0 0 0 2px #67a7ff;
+}
+
+/* 关键帧通道编辑：分组标题 + 「标签 / 滑块 / 数值 / 清除」行 */
+.kf-group {
+  margin: 9px 0 3px;
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: #55646f;
+}
+
+.kf-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 3px;
+  margin: 2px 0;
+  border-radius: 5px;
+}
+
+.kf-row.set {
+  background: #16283d;
+  box-shadow: inset 0 0 0 1px #2f4f77;
+}
+
+.kf-name {
+  flex: 0 0 64px;
+  font-size: 11px;
+  color: #7b8d9c;
+}
+
+.kf-row.set .kf-name {
+  color: #cfe0f0;
+}
+
+.kf-slider {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.kf-num {
+  flex: 0 0 62px;
+  width: 62px;
+}
+
+.kf-clear {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  line-height: 1;
+  border-radius: 5px;
+  border: 1px solid #2b3d4d;
+  background: transparent;
+  color: #7b8d9c;
+  cursor: pointer;
+}
+
+.kf-clear:disabled {
+  opacity: 0.25;
+  cursor: default;
+}
+
+.kf-clear:not(:disabled):hover {
+  border-color: #ff7b91;
+  color: #ff7b91;
 }
 
 .ph {
@@ -1677,7 +1895,7 @@ pre {
 }
 .grp-ids .chip.on {
   border-color: var(--ap-blue);
-  background: rgba(10, 132, 255, 0.22);
+  background: var(--ap-sel);
   color: #fff;
 }
 
@@ -2097,6 +2315,23 @@ pre {
   white-space: pre-line;
 }
 
+/* 关键点编辑按钮行：插点 / 删点 / 重置，放在曲线下方 */
+.ease-tools {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.ease-tools button {
+  padding: 3px 7px;
+  font-size: 10px;
+}
+
+.ease-tools button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 /* Timeline: append-leg button per object track */
 .add-leg {
   width: 22px;
@@ -2501,7 +2736,7 @@ header {
   background: var(--ap-surface-2);
 }
 .obj.sel {
-  background: rgba(10, 132, 255, 0.22);
+  background: var(--ap-sel);
   border-color: transparent;
   color: #ffffff;
 }
@@ -3124,8 +3359,8 @@ header {
   border-color: transparent;
 }
 .tree-child.sel {
-  color: #ffffff;
-  background: rgba(10, 132, 255, 0.22);
+  color: var(--ap-text);
+  background: var(--ap-sel);
   border-color: transparent;
 }
 /* 类型标签：7.5px 在 11px 的行里过小，放大到 9px 并留出内边距 */
@@ -3167,6 +3402,19 @@ header {
 }
 .view-floatbar .vf-camera {
   max-width: 100%;
+}
+
+/* ---- 悬停到路径标记（转折点 / 起终点把手）：光标变抓握 ----
+   这类标记是最容易「看着却点不中」的东西：光标停在上面就换成抓握手型，
+   先说明「这里能抓住拖」，配合画布内的放大高亮与实际命中半径一起工作。
+   只用抓握态，不用 pointer：它表达的是「能抓住搬走」，而不是「点一下触发」。 */
+.canvasWrap.is-handle canvas {
+  cursor: grab;
+}
+
+/* 已经抓住、正在搬：换成抓握的按下态。 */
+.canvasWrap.is-handle-drag canvas {
+  cursor: grabbing;
 }
 
 /* ---- 手绘路径模式：画布联动反馈 ----

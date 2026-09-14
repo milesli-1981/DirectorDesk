@@ -9,3 +9,6 @@ vite.config.d.ts
 .DS_Store
 Thumbs.db
 *.log
+
+# IDE 项目数据（非源码）
+.codebuddy/

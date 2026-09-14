@@ -209,7 +209,7 @@ export const SHOT_TEMPLATES: ShotTemplate[] = [
     id: "ots_dialogue",
     label: "过肩对话",
     category: "multi_character",
-    motion: "OTS",
+    motion: "FOLLOW",
     framing: "medium",
     view: "eye_level",
     side: "front_3_4",

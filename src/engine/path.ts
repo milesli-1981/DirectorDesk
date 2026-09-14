@@ -5,7 +5,7 @@ import {
   PathPointShape,
   Vec2,
 } from "../domain/schema";
-import { easeVal, normalizeEase } from "./ease";
+import { curveTimeForValue, curveVal, normalizeEase } from "./ease";
 import { Rect } from "./occlusion";
 import { avoidObstacles } from "./pathfinding";
 
@@ -149,7 +149,7 @@ export function segmentPosition(s: MoveSegment, time: number, rects: Rect[] = []
   const total = lens[lens.length - 1] || 1;
   const span = s.timeEnd - s.timeStart || 1;
   const u = (time - s.timeStart) / span;
-  const target = easeVal(normalizeEase(s.ease), u) * total;
+  const target = curveVal(normalizeEase(s.ease), s.speedKeys, u) * total;
 
   let i = 1;
   while (i < lens.length && lens[i] < target) i += 1;
@@ -310,4 +310,91 @@ export function nearestOnPath(
 
 export function segmentEase(s: MoveSegment): EaseCurve {
   return normalizeEase(s.ease);
+}
+
+function quadBezierPoint(a: Vec2, c: Vec2, b: Vec2, u: number): Vec2 {
+  const v = 1 - u;
+  return {
+    x: v * v * a.x + 2 * v * u * c.x + u * u * b.x,
+    z: v * v * a.z + 2 * v * u * c.z + u * u * b.z,
+  };
+}
+
+/** 二次贝塞尔在参数区间 [from,to] 上的弧长（折线采样求和）。 */
+function quadBezierArcLength(a: Vec2, c: Vec2, b: Vec2, from = 0, to = 1, steps = 24): number {
+  let sum = 0;
+  let prev = quadBezierPoint(a, c, b, from);
+  for (let i = 1; i <= steps; i += 1) {
+    const cur = quadBezierPoint(a, c, b, from + ((to - from) * i) / steps);
+    sum += Math.hypot(cur.x - prev.x, cur.z - prev.z);
+    prev = cur;
+  }
+  return sum;
+}
+
+/** 转折点（PathPoint）在 segment 上的关键帧信息。 */
+export interface WaypointKeyframe {
+  id: string;
+  /** 在 points 数组中的序号，用于 UI 上显示 #index + 1。 */
+  index: number;
+  shape: PathPointShape;
+  /** 该点在整条路径上的归一化里程 0..1。 */
+  fraction: number;
+  /** 抵达该点的时刻（已反解缓动），夹在 [timeStart, timeEnd] 内。 */
+  time: number;
+}
+
+/**
+ * 路径转折点 → 时间轴关键帧。
+ *
+ * 里程按「相邻节点之间怎么走」累计：LINE 走直线，ARC 走二次贝塞尔（samplePath 里
+ * ARC 节点是**控制点**、轨迹并不穿过它，故取其 u=0.5 的顶点——曲线上离该标记最近的位置）。
+ * 里程比例还要再用 easeTimeForValue 反解回时间：运动求解是 已走里程 = ease(u) × 总里程，
+ * 若直接按里程比例线性取时间，ease-in / ease-out 段落的标记会明显偏离实际到达时刻。
+ */
+export function waypointKeyframes(s: MoveSegment): WaypointKeyframe[] {
+  const chain = pathChain(s);
+  if (chain.filter((node) => node.type === "path").length === 0) return [];
+
+  // 逐节点累计里程，与 samplePath 的推进方式保持一致。
+  const cumulative = new Array<number>(chain.length).fill(0);
+  let acc = 0;
+  let i = 0;
+  while (i < chain.length - 1) {
+    const mid = chain[i + 1];
+    const isArc = mid.type === "path" && mid.shape === "ARC" && i + 2 < chain.length;
+    const end = isArc ? i + 2 : i + 1;
+    const a = chain[i];
+    const b = chain[end];
+
+    if (isArc) {
+      const full = quadBezierArcLength(a, mid, b);
+      cumulative[i + 1] = acc + quadBezierArcLength(a, mid, b, 0, 0.5);
+      acc += full;
+      cumulative[end] = acc;
+    } else {
+      acc += Math.hypot(b.x - a.x, b.z - a.z);
+      cumulative[end] = acc;
+    }
+    i = end;
+  }
+
+  const total = acc || 1;
+  const ease = normalizeEase(s.ease);
+  const span = s.timeEnd - s.timeStart;
+
+  const out: WaypointKeyframe[] = [];
+  chain.forEach((node, index) => {
+    if (node.type !== "path" || !node.id) return;
+    const fraction = Math.min(1, Math.max(0, cumulative[index] / total));
+    const raw = s.timeStart + curveTimeForValue(ease, s.speedKeys, fraction) * span;
+    out.push({
+      id: node.id,
+      index: out.length,
+      shape: node.shape,
+      fraction,
+      time: Math.min(s.timeEnd, Math.max(s.timeStart, raw)),
+    });
+  });
+  return out;
 }

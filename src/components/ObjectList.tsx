@@ -14,6 +14,39 @@ export const LEFT_MAX_W = 520;
 export const LEFT_COLLAPSED_AT = 100;
 export const LEFT_DEFAULT_W = 200;
 
+/** 显示 / 隐藏角标：复用锁角标的视觉，睁眼 = 显示，闭眼 = 隐藏。 */
+function VisBadge({
+  hidden,
+  title,
+  onClick,
+}: {
+  hidden: boolean;
+  title: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={`lock-icon-btn ${hidden ? "on" : ""}`}
+      title={title}
+      aria-label={title}
+      aria-pressed={hidden}
+      onClick={onClick}
+    >
+      <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+        <path
+          d="M1.5 8s2.6-4.2 6.5-4.2S14.5 8 14.5 8s-2.6 4.2-6.5 4.2S1.5 8 1.5 8Z"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.4"
+        />
+        <circle cx="8" cy="8" r="1.9" fill="currentColor" />
+        {hidden ? <path d="M3 13 13 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" /> : null}
+      </svg>
+    </button>
+  );
+}
+
 export function ObjectList({
   width,
   collapsed,
@@ -38,6 +71,7 @@ export function ObjectList({
   const updateCamera = useDirectorStore((s) => s.updateCamera);
   const removeAsset = useDirectorStore((s) => s.removeAsset);
   const removeCamera = useDirectorStore((s) => s.removeCamera);
+  const addCamera = useDirectorStore((s) => s.addCamera);
   const updateGroup = useDirectorStore((s) => s.updateGroup);
 
   // 双击改名：只改显示名（name），id 作为稳定标识保持不变。
@@ -167,6 +201,9 @@ export function ObjectList({
           const childCount = segs.length + cons.length + acts.length;
           const open = isOpen(ownerId);
           if (team) {
+            const teamHidden = team.members.every(
+              (mid) => objects.find((o) => o.id === mid)?.hidden,
+            );
             return (
               <div key={object.id} className="obj-row">
                 {/* obj-head：只包「第一行」，右上角角标相对它定位；
@@ -195,6 +232,14 @@ export function ObjectList({
                   </span>
                 </button>
                 <div className="obj-actions">
+                  <VisBadge
+                    hidden={teamHidden}
+                    title={teamHidden ? "已隐藏整队：画布上不显示（点此显示）" : "隐藏整队：画布上不显示全部队员"}
+                    onClick={() => {
+                      const next = !teamHidden;
+                      for (const mid of team.members) updateAsset(mid, { hidden: next });
+                    }}
+                  />
                   <LockBadge
                     locked={!!team.locked}
                     title={
@@ -279,6 +324,11 @@ export function ObjectList({
             )}
             {/* 右上角控制区：锁角标 + 删除浮在这一角，不再占用行内宽度，名字因此能吃满整行 */}
             <div className="obj-actions">
+              <VisBadge
+                hidden={!!object.hidden}
+                title={object.hidden ? "已隐藏：画布上不显示（点此显示）" : "隐藏：画布上不显示该对象"}
+                onClick={() => updateAsset(object.id, { hidden: !object.hidden })}
+              />
               <LockBadge
                 locked={!!object.locked}
                 title={
@@ -318,7 +368,20 @@ export function ObjectList({
       </div>
 
       <div className="sub-group">
-      <div className="sub-title">CAMERAS</div>
+      <div
+        className="sub-title"
+        style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}
+      >
+        <span>CAMERAS</span>
+        <button
+          type="button"
+          className="ghost-button"
+          title="新增一台相机（自动取景当前目标）"
+          onClick={() => addCamera()}
+        >
+          ＋ 相机
+        </button>
+      </div>
       <div id="cameraList">
         {cameras.length === 0 ? <div className="tree-empty">暂无相机</div> : null}
         {cameras.map((camera) => {
@@ -358,7 +421,9 @@ export function ObjectList({
                   title={`${camera.name} · 双击改名`}
                 >
                   <span className="dot" style={{ background: camera.color }} />
-                  {camera.name}
+                  {/* 名字必须包一层可选中的容器：裸文本节点在 flex 里是匿名 flex item，
+                      CSS 选不中、无法应用 text-overflow，长相机名会换行而非省略。 */}
+                  <span className="obj-name">{camera.name}</span>
                   {activeCameraId === camera.id ? " ●" : ""}
                 </button>
               )}
