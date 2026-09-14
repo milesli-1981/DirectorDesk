@@ -2312,6 +2312,20 @@ pre {
   height: auto;
 }
 
+/* 跳跃包络图（Phase 4）：与 ease-wrap 同构的内联 SVG，无需图表库。 */
+.jump-envelope {
+  margin-top: 8px;
+  background: #0a1016;
+  border: 1px solid #26313b;
+  border-radius: 4px;
+}
+
+.jump-envelope svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
 .eread {
   font-family: Consolas, Menlo, monospace;
   color: #8ca1b4;

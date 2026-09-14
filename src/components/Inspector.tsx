@@ -30,6 +30,7 @@ import {
 } from "../domain/schema";
 import { ANIMAL_MODELS, ANIMAL_SPECIES } from "../engine/animalModels";
 import { EaseEditor } from "./EaseEditor";
+import { JumpEnvelope } from "./JumpEnvelope";
 import { PoseCustomizeModal } from "./PoseCustomizeModal";
 import { clonePose, POSE_PRESETS, POSE_PRESET_NAMES } from "../engine/poses";
 import { moveChannelsAt, solveCamera } from "../engine/cameraSolver";
@@ -1018,6 +1019,7 @@ export function Inspector() {
               ⚠ 起跳前没有助跑 —— 站着跳只能跳到一半远。建议在跳跃前留一段助跑。
             </p>
           ) : null}
+          <JumpEnvelope loco={arcInfo.loco} dh={arcInfo.dh} dx={arcInfo.dx} />
         </div>
       ) : null}
 
