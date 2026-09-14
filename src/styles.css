@@ -3426,6 +3426,59 @@ header {
   background: var(--ap-sel);
   border-color: transparent;
 }
+/* ── 列表折叠（Phase 8）：堆叠链作为一个可展开的子树 ──────────────────
+   视觉上刻意区别于「时间轴片段」子树：片段是**时间**维度（引导线用分隔色 + 蓝色），
+   堆叠是**空间**维度（虚线引导 + 琥珀），两根轴在列表里不该长得一样。 */
+.stack-toggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  align-self: stretch;
+  padding: 0 4px;
+  margin-right: 2px;
+  font: 9px/1 var(--ap-font);
+  color: var(--ap-orange);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--ap-r-xs);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.stack-toggle:hover {
+  background: var(--ap-surface-2);
+  border-color: var(--ap-orange);
+}
+.stack-children {
+  flex-basis: 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 2px 0 3px 4px;
+  padding-left: 8px;
+  /* 虚线：与时间轴片段那根实线区分开 —— 一根是空间、一根是时间 */
+  border-left: 1px dashed var(--ap-sep);
+}
+.stack-row {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.stack-obj {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 2px 6px;
+  font-size: 10.5px;
+}
+.stack-y {
+  flex: 0 0 auto;
+  font-size: 9px;
+  color: var(--ap-text-3);
+  font-variant-numeric: tabular-nums;
+}
 /* 类型标签：7.5px 在 11px 的行里过小，放大到 9px 并留出内边距 */
 .tree-kind {
   font-size: 9px;

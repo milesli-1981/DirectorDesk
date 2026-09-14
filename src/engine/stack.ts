@@ -59,6 +59,49 @@ export function objectsOnTop(state: DirectorState, id: string): DirectorObject[]
 }
 
 /**
+ * 每个对象「压在谁身上」—— 供 UI 把堆叠链折叠成一棵树。
+ *
+ * 返回 `upper.id → lower.id`。同一个对象可能同时压在两个并排的箱子上
+ * （横跨两块板），此时取**顶面最高**的那个作为父节点 —— 视觉上它主要是
+ * "踩"在最高的那块上，树也就贴着这条主要关系展开。
+ *
+ * 不在任何堆叠关系里的对象**不出现在 map 里**（既不是 key 也不是 value 的父）。
+ *
+ * **这只给编辑器 UI 看**：为了列表能折叠成一个层次结构。求解器永远不读它。
+ *
+ * （签名收 `objects` 数组而非整个 `DirectorState`：这两个函数只需要列表本身，
+ * UI 侧手上往往只有 `objects`，不必为了调用去拼一个假 state。）
+ */
+export function stackParentMap(objects: readonly DirectorObject[]): Map<string, string> {
+  const out = new Map<string, string>();
+  const sets = objects.filter((o) => o.role === "set");
+  for (const upper of sets) {
+    let bestId: string | null = null;
+    let bestTop = -Infinity;
+    for (const lower of sets) {
+      if (!restsOn(upper, lower)) continue;
+      const top = objectTop(lower);
+      if (top > bestTop) {
+        bestTop = top;
+        bestId = lower.id;
+      }
+    }
+    if (bestId) out.set(upper.id, bestId);
+  }
+  return out;
+}
+
+/**
+ * 移动传播时用得上：`id` 是不是某条堆叠链的**底**（不压在任何东西上）。
+ * 拖一根柱子的中段时，它上面的部分才跟着走 —— 判定入口是这里。
+ */
+export function isStackBottom(objects: readonly DirectorObject[], id: string): boolean {
+  const self = objects.find((o) => o.id === id);
+  if (!self || self.role !== "set") return false;
+  return !objects.some((other) => restsOn(self, other));
+}
+
+/**
  * 从 `id` 出发，自顶向下（其实是自下而上）收集整条堆叠链 —— **含 `id` 自身**。
  *
  * 返回顺序：`id` 在最前，然后依次是压在它上面的各层（BFS 逐层展开）。

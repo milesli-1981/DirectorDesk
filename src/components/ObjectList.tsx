@@ -1,7 +1,15 @@
-import { useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { useDirectorStore } from "../state/directorStore";
-import { ASPECT_OPTIONS, AspectRatio, DirectorGroup, ActionClip, objectDisplayName } from "../domain/schema";
+import {
+  ASPECT_OPTIONS,
+  AspectRatio,
+  ActionClip,
+  DirectorGroup,
+  DirectorObject,
+  objectDisplayName,
+} from "../domain/schema";
 import { LockBadge } from "./LockBadge";
+import { stackParentMap } from "../engine/stack";
 
 // 稳定引用：避免 zustand v5 选择器在 `state.groups` 缺失时每帧返回新 `[]` 触发无限重渲染。
 const EMPTY_GROUPS: DirectorGroup[] = [];
@@ -110,6 +118,64 @@ export function ObjectList({
   );
   const removeGroup = useDirectorStore((s) => s.removeGroup);
 
+  // ── 列表折叠（Phase 8）：堆叠链在对象列表里合并成一行 ─────────────────
+  // 与上面的「团队行」是同一个模式：一堆东西在导演眼里是一个 unit，就该只占一行。
+  // 「谁压在谁身上」由几何现推（见 engine/stack.ts），不存关系记录。
+  const stackParent = useMemo(() => stackParentMap(objects), [objects]);
+  // 每个对象的直接下层们（父 → 子列表）。用 Map<string, string[]> 支持一棵 infra
+  // 一个盒子横跨两块板时，两块板各自展出它 —— 但 stackParentMap 只给它指派了
+  // 一个父（最高的那块），所以这里建的是**树**而不是 DAG，不会重复分行。
+  const stackChildren = useMemo(() => {
+    const map = new Map<string, string[]>();
+    for (const [upper, lower] of stackParent) {
+      const list = map.get(lower);
+      if (list) list.push(upper);
+      else map.set(lower, [upper]);
+    }
+    return map;
+  }, [stackParent]);
+  // 顶层只渲染"不压在任何东西上"的对象；其余的作为子树挂在父行下（见 hiddenUnder）。
+  // 整塔成员（含根）：父行的批量操作（隐藏 / 锁定 / 删除）要作用于整条链。
+  // visited 防环 —— 相切判定理论上不可能成环，但这里的 map 是从几何推出来的，
+  // 手工 JSON 数据里若真出现不一致，宁可早停，也不要让 while 死循环。
+  const chainOf = (id: string): string[] => {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    const stack = [id];
+    while (stack.length > 0) {
+      const cur = stack.pop() as string;
+      if (seen.has(cur)) continue;
+      seen.add(cur);
+      out.push(cur);
+      for (const child of stackChildren.get(cur) ?? []) stack.push(child);
+    }
+    return out;
+  };
+
+  // 会真正渲染成行的对象（团队已合并成一行，队员不单独出现）。
+  const rowIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const o of objects) {
+      const g = teamGroups.find((t) => t.members[0] === o.id);
+      if (g) {
+        ids.add(o.id); // 队首代表整队
+        continue;
+      }
+      if (teamMemberIds.has(o.id)) continue; // 队员被团队行合并掉
+      ids.add(o.id);
+    }
+    return ids;
+  }, [objects, teamGroups, teamMemberIds]);
+
+  // **只有当父行真的在列表里时**，这一层才并进父行的子树。
+  // 反过来的话（无条件按几何关系隐藏子层）：一座塔压在被团队行合并掉的队员身上时，
+  // 它的父行根本不存在，子层却被隐藏 ⇒ 整座塔从列表里彻底消失。
+  // 几何关系不能越过"谁被渲染"这个前提。
+  const hiddenUnder = (id: string) => {
+    const parent = stackParent.get(id);
+    return parent !== undefined && rowIds.has(parent);
+  };
+
   // 时间轴片段（左侧对象 / 相机树下挂用）：segment→对象、constraint→对象(subject)、
   // action→对象、cameraMove→相机。它们都是 selectedItem 的候选，点选后由 store 互斥订阅清掉对象选中。
   const segments = useDirectorStore((s) => s.state.segments);
@@ -162,6 +228,13 @@ export function ObjectList({
   const toggle = (id: string) =>
     setExpanded((prev) => ({ ...prev, [id]: !(prev[id] ?? id === selectedOwnerId) }));
 
+  // 堆叠行单独一套展开状态（键加前缀避免与时间轴片段的展开状态撞key）。
+  // **默认收起**：一行 = 一整塔，这正是"折叠"的意义；展开才逐层编辑。
+  const stackKey = (id: string) => `stack:${id}`;
+  const isStackOpen = (id: string) => expanded[stackKey(id)] ?? false;
+  const toggleStack = (id: string) =>
+    setExpanded((prev) => ({ ...prev, [stackKey(id)]: !(prev[stackKey(id)] ?? false) }));
+
   // 顶层项目设置：Master 画幅（交付格式），始终显示，不依赖是否选中对象。
   const aspectRatio = useDirectorStore((s) => s.state.aspectRatio);
   const setAspectRatio = useDirectorStore((s) => s.setAspectRatio);
@@ -192,6 +265,9 @@ export function ObjectList({
           // 团队（Group）在对象列表里合并为一行：整队是一个 unit，不再逐个列出队员。
           const team = teamGroups.find((g) => g.members[0] === object.id);
           if (teamMemberIds.has(object.id) && !team) return null;
+          // 堆叠：往上还有东西压着它、且那个父行真的在列表里 → 由父行递归渲染出来。
+          // 父行不存在的情况见 `hiddenUnder` 的注释（团队行会把父行合并掉）。
+          if (!team && hiddenUnder(object.id)) return null;
 
           // 归属该对象（或团队锚点）的时间轴片段：segment / constraint / action 都挂在对象下。
           const ownerId = team ? team.members[0] : object.id;
@@ -200,6 +276,17 @@ export function ObjectList({
           const acts = actions.filter((a) => a.object === ownerId);
           const childCount = segs.length + cons.length + acts.length;
           const open = isOpen(ownerId);
+          // 堆叠：压在这一层的**直接**上层们（多层塔由 StackChildRow 递归下去）。
+          const layerIds = team ? [] : (stackChildren.get(object.id) ?? []);
+          const layersOpen = isStackOpen(object.id);
+          // 整条链（含自身）。这三个标记只在"确实有上层"时才被子层用到；
+          // 没有上层时它们退化成对这个对象自身的判断，行为与折叠前完全一致。
+          const chain = layerIds.length > 0 ? chainOf(object.id) : [object.id];
+          const chainMembers = chain
+            .map((cid) => objects.find((o) => o.id === cid))
+            .filter((o): o is DirectorObject => !!o);
+          const wholeHidden = chainMembers.length > 0 && chainMembers.every((o) => o.hidden);
+          const wholeLocked = chainMembers.length > 0 && chainMembers.every((o) => o.locked);
           if (team) {
             const teamHidden = team.members.every(
               (mid) => objects.find((o) => o.id === mid)?.hidden,
@@ -298,6 +385,18 @@ export function ObjectList({
                 {open ? "▾" : "▸"}
               </button>
             )}
+            {/* 堆叠折叠：有东西压在它上面时给出展开箭头，展开后逐层显示。
+                收起态在这一同一行上标出层数，导演一眼知道"这不是一个孤盒子"。 */}
+            {layerIds.length > 0 && (
+              <button
+                type="button"
+                className="stack-toggle"
+                onClick={() => toggleStack(object.id)}
+                title={`展开 / 收起压在上面的 ${layerIds.length} 个对象`}
+              >
+                {layersOpen ? "▾" : "▸"} {layerIds.length}
+              </button>
+            )}
           {editingId === object.id ? (
               <input
                 className="obj-rename"
@@ -324,25 +423,64 @@ export function ObjectList({
             )}
             {/* 右上角控制区：锁角标 + 删除浮在这一角，不再占用行内宽度，名字因此能吃满整行 */}
             <div className="obj-actions">
+              {/* 有东西压在上面时，隐藏 / 锁定 / 删除都作用于整条堆叠链 ——
+                  这是"折叠成一行"的意义：导演眼里这一行就是那一座塔。
+                  没上层时行为与原来完全一致（只动自己）。 */}
               <VisBadge
-                hidden={!!object.hidden}
-                title={object.hidden ? "已隐藏：画布上不显示（点此显示）" : "隐藏：画布上不显示该对象"}
-                onClick={() => updateAsset(object.id, { hidden: !object.hidden })}
+                hidden={layerIds.length > 0 ? wholeHidden : !!object.hidden}
+                title={
+                  layerIds.length > 0
+                    ? wholeHidden
+                      ? `已隐藏整座塔（${chain.length} 个）：点此显示全部`
+                      : `隐藏整座塔（含压在上面的 ${layerIds.length} 个）`
+                    : object.hidden
+                      ? "已隐藏：画布上不显示（点此显示）"
+                      : "隐藏：画布上不显示该对象"
+                }
+                onClick={() => {
+                  if (layerIds.length === 0) {
+                    updateAsset(object.id, { hidden: !object.hidden });
+                    return;
+                  }
+                  for (const cid of chain) updateAsset(cid, { hidden: !wholeHidden });
+                }}
               />
               <LockBadge
-                locked={!!object.locked}
+                locked={layerIds.length > 0 ? wholeLocked : !!object.locked}
                 title={
-                  object.locked
-                    ? "已锁定初始位置：编辑时不可拖拽（点此解锁）；播放时仍按轨迹移动"
-                    : "锁定初始位置：编辑时不可拖拽，播放时仍按轨迹移动"
+                  layerIds.length > 0
+                    ? wholeLocked
+                      ? `已锁定整座塔（${chain.length} 个）：点此解锁`
+                      : `锁定整座塔（含压在上面的 ${layerIds.length} 个）：编辑时不可拖拽`
+                    : object.locked
+                      ? "已锁定初始位置：编辑时不可拖拽（点此解锁）；播放时仍按轨迹移动"
+                      : "锁定初始位置：编辑时不可拖拽，播放时仍按轨迹移动"
                 }
-                onClick={() => updateAsset(object.id, { locked: !object.locked })}
+                onClick={() => {
+                  if (layerIds.length === 0) {
+                    updateAsset(object.id, { locked: !object.locked });
+                    return;
+                  }
+                  for (const cid of chain) updateAsset(cid, { locked: !wholeLocked });
+                }}
               />
               <button
                 type="button"
                 className="obj-del"
-                title="删除资产"
-                onClick={() => removeAsset(object.id)}
+                title={layerIds.length > 0 ? `删除整座塔（${chain.length} 个）` : "删除资产"}
+                onClick={() => {
+                  if (layerIds.length === 0) {
+                    removeAsset(object.id);
+                    return;
+                  }
+                  if (!window.confirm(`删除这座塔的 ${chain.length} 个对象（含它上面的层）？`)) {
+                    return;
+                  }
+                  // **自顶向下删**：先删上面的，最后删根。
+                  // 反过来会让上面的层先失去支撑 —— removeAsset 里已加了"上层落位"，
+                  // 但那是为了"删底座"的语义，这里要的是"整个删掉"，不该触发下落。
+                  for (const cid of [...chain].reverse()) removeAsset(cid);
+                }}
               >
                 ✕
               </button>
@@ -359,6 +497,26 @@ export function ObjectList({
                 {acts.map((a) => (
                   <TreeChild key={a.id} kind="action" tag="ACT" label={a.kind} selected={selectedItem === a.id} onClick={() => selectItem(a.id)} />
                 ))}
+              </div>
+            )}
+            {layersOpen && layerIds.length > 0 && (
+              <div className="stack-children">
+                {layerIds.map((lid) => {
+                  const child = objects.find((o) => o.id === lid);
+                  if (!child) return null;
+                  return (
+                    <StackChildRow
+                      key={lid}
+                      child={child}
+                      depth={1}
+                      objects={objects}
+                      stackChildren={stackChildren}
+                      selectedId={selectedId}
+                      selectedKind={selectedKind}
+                      onSelect={selectObject}
+                    />
+                  );
+                })}
               </div>
             )}
           </div>
@@ -478,6 +636,62 @@ export function ObjectList({
         </span>
       </div>
     </aside>
+  );
+}
+
+/**
+ * 列表折叠的子行：堆叠链里压在上面的某一层。
+ *
+ * **递归**：它还可能有自己的上层（多层塔），于是逐层缩进。
+ * 只负责"这一层的存在被看见"（点选即可在 Inspector 里编辑它的标高），
+ * 批量操作（隐藏 / 删除整塔）在父行的角标上做，避免每层都堆一排按钮。
+ */
+function StackChildRow({
+  child,
+  depth,
+  objects,
+  stackChildren,
+  selectedId,
+  selectedKind,
+  onSelect,
+}: {
+  child: DirectorObject;
+  depth: number;
+  objects: DirectorObject[];
+  stackChildren: Map<string, string[]>;
+  selectedId: string;
+  selectedKind: string | undefined;
+  onSelect: (id: string) => void;
+}) {
+  const grandchildren = stackChildren.get(child.id) ?? [];
+  return (
+    <div className="stack-row" style={{ paddingLeft: depth * 12 }}>
+      <button
+        type="button"
+        className={`obj stack-obj ${selectedKind === "object" && selectedId === child.id ? "sel" : ""}`}
+        onClick={() => onSelect(child.id)}
+        title={`${objectDisplayName(child)} · 标高 ${(child.baseY ?? 0).toFixed(2)}m`}
+      >
+        <span className="obj-name">{objectDisplayName(child)}</span>
+        <span className="stack-y">{(child.baseY ?? 0).toFixed(2)}m</span>
+      </button>
+      {grandchildren.map((gid) => {
+        const grand = objects.find((o) => o.id === gid);
+        if (!grand) return null;
+        return (
+          <StackChildRow
+            key={gid}
+            child={grand}
+            depth={depth + 1}
+            objects={objects}
+            stackChildren={stackChildren}
+            selectedId={selectedId}
+            selectedKind={selectedKind}
+            onSelect={onSelect}
+          />
+        );
+      })}
+    </div>
   );
 }
 

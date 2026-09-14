@@ -39,6 +39,7 @@ import { normalizeCameraKeys, normalizeEase, normalizeSpeedKeys } from "../engin
 import { ASSET_PRESETS } from "../engine/assetPresets";
 import { placeObject } from "../engine/place";
 import { settleStack, stackChain } from "../engine/stack";
+import { arraySlots, ArraySpec } from "../engine/array";
 import { JUMP_EASE } from "../engine/arc";
 import { ANIMAL_MODELS, DEFAULT_ANIMAL_SPECIES } from "../engine/animalModels";
 import {
@@ -373,6 +374,17 @@ interface DirectorStore {
     at?: { x: number; z: number; y?: number; terrain?: boolean },
     species?: AnimalSpecies,
   ) => void;
+  /**
+   * 阵列：把指定对象批量复制成一排 / 一片 / 一圈 / 一段台阶。
+   *
+   * `spec.count` 是**总数（含源对象自身）** —— 与 Blender 数组修改器同义：
+   * count=3 会产出"源 + 2 个副本"共 3 个。每个副本独立走 `placeObject` 落位，
+   * 所以它们在地形世界里会自动各自贴到脚下的台面上，不会悬空也不会陷进地里。
+   *
+   * @param sourceId 源对象。它自己不动，副本从 lineup 的第 2 个槽位开始。
+   * @param spec 阵列规格，见 `engine/array.ts`。
+   */
+  arrayAsset: (sourceId: string, spec: ArraySpec) => void;
   updateAsset: (id: string, patch: Partial<DirectorObject>) => void;
   removeAsset: (id: string) => void;
   /** 组（Group Dynamics） */
@@ -1185,6 +1197,77 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         selectedKind: "object",
         // 选中锚点：之后画路径 / 加 MOVE 都是给整队设定那唯一一条路线。
         selectedId: members[0],
+        selectedItem: null,
+        selectedPoint: null,
+      });
+    },
+
+    arrayAsset: (sourceId, spec) => {
+      const store = get();
+      const { state } = store;
+      const source = state.objects.find((o) => o.id === sourceId);
+      if (!source) return;
+      // 第 0 个槽位与源对象当前位置重合 → 丢掉，源留在原处，副本从偏移 1 开始。
+      const slots = arraySlots(source, spec).slice(1);
+      if (slots.length === 0) return;
+
+      const created: DirectorObject[] = [];
+      // id 沿用 addAsset / addGroupAt 的同类计数规则，并保持全局唯一。
+      let n = state.objects.filter((o) => o.category === source.category).length + 1;
+      const nextId = () => {
+        let id = `AST_${source.category.toUpperCase()}_${String(n).padStart(2, "0")}`;
+        while ([...state.objects, ...created].some((o) => o.id === id)) {
+          n += 1;
+          id = `AST_${source.category.toUpperCase()}_${String(n).padStart(2, "0")}`;
+        }
+        n += 1;
+        return id;
+      };
+
+      // 逐个"先并进 staged 再 placeObject" —— 与 addGroupAt 同一模式：
+      // 后面的副本要能看见前面的，否则它们会在同一个 x/z 上互相重叠。
+      // 每个副本都由 placeObject 反查自己脚下的支撑面（terrain），planar 下不写 baseY。
+      let staged: DirectorState = { ...state };
+      for (const slot of slots) {
+        const cid = nextId();
+        // 拱洞：`bottom` 是绝对高度，落位前先按"下探量"给个初值（可能还要被 placeObject 改），
+        // 落位后用真实 baseY 重算一次。普通对象没有 bottom，走展开路径自然不带。
+        const sink = (source.baseY ?? 0) - (source.bottom ?? source.baseY ?? 0);
+        const seedY = slot.baseY ?? source.baseY ?? 0;
+        const draft: DirectorObject = {
+          ...source,
+          id: cid,
+          x: slot.x,
+          z: slot.z,
+          ...(source.bottom !== undefined ? { bottom: seedY - sink } : {}),
+        };
+        staged = { ...staged, objects: [...staged.objects, draft] };
+        // stair 的 slot.baseY 是作者的显式意图 → 作为 layerY 传进去，它是权威。
+        const placed = placeObject(staged, cid, slot.x, slot.z, slot.baseY);
+        const copy: DirectorObject = {
+          ...draft,
+          x: placed.x,
+          z: placed.z,
+          ...(placed.baseY !== undefined ? { baseY: placed.baseY } : {}),
+        };
+        if (source.bottom !== undefined && placed.baseY !== undefined) {
+          // 与 settleStack 同一条不变量：保持"下探量"而非 bottom 的绝对值。
+          copy.bottom = placed.baseY - sink;
+        }
+        staged = { ...staged, objects: [...staged.objects.slice(0, -1), copy] };
+        created.push(copy);
+      }
+
+      // 源若是某个堆叠的根，它上面压着的塔**不会**被复制 —— 阵列复制的是那一个对象。
+      // 副本各自独立落位，源自己的堆叠链完全不受影响。
+      set({
+        state: {
+          ...state,
+          revision: state.revision + 1,
+          objects: [...state.objects, ...created],
+        },
+        selectedKind: "object",
+        selectedId: created[created.length - 1].id,
         selectedItem: null,
         selectedPoint: null,
       });

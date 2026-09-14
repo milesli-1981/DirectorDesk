@@ -39,7 +39,8 @@ import {
   JUMP_EASE,
 } from "../src/engine/arc";
 import { pathHeightAt, segmentProgressAt, arcActive } from "../src/engine/pathHeight";
-import { objectsOnTop, restsOn, settleStack, stackChain, translateStack } from "../src/engine/stack";
+import { objectsOnTop, restsOn, settleStack, stackChain, translateStack, stackParentMap, isStackBottom } from "../src/engine/stack";
+import { arraySlots, arrayCount, ArraySpec } from "../src/engine/array";
 import { DirectorObject, DirectorState, MoveSegment, Locomotion } from "../src/domain/schema";
 
 let pass = 0;
@@ -992,6 +993,142 @@ console.log("\n[22] 校验三条 + 落地 / 轨迹 / 助跑 + planar 退化");
   // ⑤ 空链 / 不存在的 id 是安全的 no-op（面板删对象时会走到）。
   check("§23 空链 settle → 原样", settleStack(tower, []), tower.objects);
   check("§23 不存在的 id → 空链", stackChain(tower, "GHOST"), []);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// §24 阵列落点（engine/array.ts）—— Phase 8 的"批量复制"
+// ────────────────────────────────────────────────────────────────────────────
+// engine/array.ts 只算落点，是纯函数；真正的落地由 store 逐个 placeObject 完成。
+// 本节钉死落点几何：直线 / 网格 / 台阶 / 环绕的量级关系、
+// alongRotation 的方向语义、以及"第 0 个槽位 = 源位置"这条契约。
+{
+  const src = box("S", 2, -1, 1, 1, 1); // 任意非零起点，顺带验"不是从原点起算"
+
+  // ① line：第 0 个槽位必须与源重合（store 靠 slice(1) 丢掉它）。
+  const line = arraySlots(src, { kind: "line", count: 4, spacing: 1.5 });
+  check("§24 line：份数 = count", line.length, 4);
+  check("§24 line：第 0 槽 = 源位置", [line[0].x, line[0].z], [2, -1]);
+  check("§24 line：沿世界 X 逐格推进", line.map((s) => s.x), [2, 3.5, 5, 6.5]);
+  check("§24 line：Z 不变", line.map((s) => s.z), [-1, -1, -1, -1]);
+  check("§24 line：不给 baseY（交给 placeObject 反查）", line.map((s) => s.baseY), [
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+  ]);
+
+  // ② alongRotation：旋转 90° 时"前进方向"应与 +Z 平行（不是继续沿 +X）。
+  const turned = { ...src, rotation: 90 };
+  const lineTurned = arraySlots(turned, { kind: "line", count: 3, spacing: 2, alongRotation: true });
+  const round = (n: number) => Math.round(n * 1e6) / 1e6;
+  check("§24 alongRotation：方向转到 +Z", lineTurned.map((s) => [round(s.x), round(s.z)]), [
+    [2, -1],
+    [2, 1],
+    [2, 3],
+  ]);
+  // 没开 alongRotation 时，即使对象有 rotation 也必须沿世界 X —— 两者互相独立。
+  const turnedOff = arraySlots(turned, { kind: "line", count: 2, spacing: 2 });
+  check("§24 未开 alongRotation：rotation 不影响排布", [turnedOff[1].x, turnedOff[1].z], [4, -1]);
+
+  // ③ grid：行沿法线（Y 轴旋转后的 -dir.z/+dir.x），列沿前进方向。
+  const grid = arraySlots(src, { kind: "grid", rows: 2, cols: 3, spacing: 2 });
+  check("§24 grid：总数 = rows×cols", grid.length, 6);
+  check("§24 grid：首格 = 源位置", [grid[0].x, grid[0].z], [2, -1]);
+  check("§24 grid：第二列在 +X", [grid[1].x, grid[1].z], [4, -1]);
+  check("§24 grid：换行到 +Z（法线方向）", [grid[3].x, grid[3].z], [2, 1]);
+
+  // ④ stair：标高按 i×rise 抬升，且水平只走 run。这是"作者的显式意图"，必须真给 baseY。
+  const stair = arraySlots(src, { kind: "stair", count: 4, rise: 0.15, run: 0.3 });
+  check("§24 stair：baseY 逐级抬高", stair.map((s) => round(s.baseY ?? 0)), [0, 0.15, 0.3, 0.45]);
+  check("§24 stair：水平每级进深 run", stair.map((s) => round(s.x)), [2, 2.3, 2.6, 2.9]);
+  check("§24 stair：Z 不动", stair.map((s) => s.z), [-1, -1, -1, -1]);
+  // 源本身已垫高到 1m 时，台阶从 1 起算（而不是从 0）。
+  const raised = arraySlots({ ...src, baseY: 1 }, { kind: "stair", count: 3, rise: 0.2, run: 0.3 });
+  check("§24 stair：从源标高起算", raised.map((s) => round(s.baseY ?? 0)), [1, 1.2, 1.4]);
+
+  // ⑤ ring：半径恒定、角度均匀，且第 0 个落在源的方位角上（不跳一下）。
+  const ring = arraySlots(src, { kind: "ring", count: 4, radius: 5 });
+  const radii = ring.map((s) => round(Math.hypot(s.x, s.z)));
+  check("§24 ring：份数 = count", ring.length, 4);
+  check("§24 ring：所有点等半径 5", radii, [5, 5, 5, 5]);
+  // 相邻夹角 = 90°（4 份绕一圈）。用点积转角度，避开 atan2 的象限噪声。
+  const a0 = Math.atan2(ring[0].z, ring[0].x);
+  const a1 = Math.atan2(ring[1].z, ring[1].x);
+  let turnDeg = ((a1 - a0) * 180) / Math.PI;
+  if (turnDeg < 0) turnDeg += 360;
+  check("§24 ring：相邻夹角 90°", round(turnDeg), 90);
+
+  // ⑥ arrayCount 与 arraySlots 必须同源 —— UI 预览不能跟实际生成不一致。
+  const specs: ArraySpec[] = [
+    { kind: "line", count: 5 },
+    { kind: "grid", rows: 3, cols: 4 },
+    { kind: "ring", count: 7 },
+    { kind: "stair", count: 6 },
+  ];
+  check(
+    "§24 arrayCount 与 arraySlots 同源",
+    specs.map((spec) => [arrayCount(spec), arraySlots(src, spec).length]),
+    [[5, 5], [12, 12], [7, 7], [6, 6]],
+  );
+  // 病态输入：0 / 负数也要稳（UI 滑杆下限是 2，但手工 JSON 可以更低）。
+  check("§24 count=1 → 只有源位置一份", arraySlots(src, { kind: "line", count: 1 }).length, 1);
+  check("§24 count=0 → 夹到 1 份（不返回空数组）", arraySlots(src, { kind: "line", count: 0 }).length, 1);
+
+  // ⑦ planar 守卫：非 stair 一律不给 baseY —— 有了 baseY 就会绕过 placeObject 的
+  //   "非 terrain 不写 baseY" 那条判据，planar 就不再逐像素不变了。
+  const allBaseYUndefined = [
+    ...arraySlots(src, { kind: "line", count: 3 }),
+    ...arraySlots(src, { kind: "grid", rows: 2, cols: 2 }),
+    ...arraySlots(src, { kind: "ring", count: 3 }),
+  ].every((s) => s.baseY === undefined);
+  check("§24 非 stair 一律不带 baseY（planar 逐像素不变的守卫）", allBaseYUndefined, true);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// §25 列表折叠的树结构（stackParentMap / isStackBottom）
+// ────────────────────────────────────────────────────────────────────────────
+// ObjectList 靠这套把堆叠链折叠成一行。它是**树**而不是 DAG：一个盒子横跨两块板时
+// 只认最高的那块当父节点，否则同一阶段会在列表里出现两次。
+{
+  const A = box("A", 0, 0, 2, 2, 1, 0); // [0,1]
+  const B = box("B", 0, 0, 2, 2, 1, 1); // [1,2]
+  const C = box("C", 0, 0, 2, 2, 1, 2); // [2,3]
+  const solo = box("SOLO", 20, 0, 1, 1, 1);
+  const tower = [A, B, C, solo];
+
+  // ① 三层塔 → B/A、C/B 两条父子关系；塔底与孤立对象不出现在 map 的 key 里。
+  const parents = stackParentMap(tower);
+  check("§25 父子关系：B 压在 A 上", parents.get("B"), "A");
+  check("§25 父子关系：C 压在 B 上", parents.get("C"), "B");
+  check("§25 塔底不出现在 map 的 key 里", parents.get("A"), undefined);
+  check("§25 孤立对象不进 map", parents.has("SOLO"), false);
+  check("§25 map 里只有堆叠着的那两条关系", parents.size, 2);
+
+  // ② agent 不是几何的一部分：站在同一位置的演员不参与堆叠树。
+  const withActor = [...tower, actor("H", 0, 0, 1)];
+  check("§25 agent 不参与堆叠树", stackParentMap(withActor).size, 2);
+
+  // ③ isStackBottom：只有塔底为真，这条决定"拖动时谁带着谁"。
+  check("§25 塔底 A：是底", isStackBottom(tower, "A"), true);
+  check("§25 中层 B：不为底", isStackBottom(tower, "B"), false);
+  check("§25 顶层 C：不为底", isStackBottom(tower, "C"), false);
+  check("§25 孤立对象：同样算底", isStackBottom(tower, "SOLO"), true);
+  check("§25 不在场景里的 id：false", isStackBottom(tower, "GHOST"), false);
+
+  // ④ 多条塔并存时互不干扰 —— 树必须能一次装下几棵。
+  const otherBase = box("X", 50, 0, 2, 2, 1, 0);
+  const otherTop = box("Y", 50, 0, 2, 2, 1, 1);
+  const twoTowers = stackParentMap([...tower, otherBase, otherTop]);
+  check("§25 两座塔：各自成链", [twoTowers.get("Y"), twoTowers.get("B")], ["X", "A"]);
+  check("§25 两座塔：互不粘连", twoTowers.get("X"), undefined);
+
+  // ⑤ 一个盒子横跨两块等高板：只认一个父（保持树的形状），不能出现在列表两处。
+  const slabL = box("L", -1, 0, 2, 2, 1, 0);
+  const slabR = box("R", 1, 0, 2, 2, 1, 0);
+  const spanning = box("TOP", 0, 0, 4, 2, 1, 1); // 底面 1 = 两块板的顶面
+  const crossSpan = stackParentMap([slabL, slabR, spanning]);
+  check("§25 横跨两块板：指派了父", crossSpan.get("TOP") !== undefined, true);
+  check("§25 横跨两块板：父是两者之一（Tree 而非 DAG）", ["L", "R"].includes(crossSpan.get("TOP") ?? ""), true);
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败\n`);

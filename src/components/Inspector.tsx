@@ -27,7 +27,9 @@ import {
   OTS_SIDE_LABELS,
   SIDE_LABELS,
   VIEW_LABELS,
+  DirectorObject,
 } from "../domain/schema";
+import { ArrayKind, ArraySpec, arrayCount } from "../engine/array";
 import { ANIMAL_MODELS, ANIMAL_SPECIES } from "../engine/animalModels";
 import { EaseEditor } from "./EaseEditor";
 import { JumpEnvelope } from "./JumpEnvelope";
@@ -309,6 +311,162 @@ function SubGroup({
     </div>
   );
 }
+
+/**
+ * 阵列（Phase 8 的"批量编辑"）：选中一个对象，按排布规格批量复制。
+ *
+ * **为什么 UI 只动几个数字**：排布本身是几何问题（`engine/array.ts` 的纯函数），
+ * UI 不该重复那段几何。这里只收集作者的意图参数，落点交给 engine 算、
+ * 落地交给 `placeObject` 逐个做。
+ *
+ * `sub` 预览直接问 `arrayCount()`，不自己乘 —— 预览和实际生成同源，
+ * 不会出现"写着 12 个、出来 6 个"。
+ */
+function ArrayPanel({ object }: { object: DirectorObject }) {
+  const arrayAsset = useDirectorStore((s) => s.arrayAsset);
+  // 台阶是高度语义，planar 世界里没有 —— 那里直接禁用，而不是"点了没反应"。
+  // 判定与 moveObject / placeObject 是同一条：`placeObject` 在非 terrain 不写 baseY。
+  const isTerrain = useDirectorStore((s) => (s.state.worldMode ?? "planar") === "terrain");
+  const [kind, setKind] = useState<ArrayKind>("line");
+  const [count, setCount] = useState(4);
+  const [spacing, setSpacing] = useState(1.5);
+  const [rows, setRows] = useState(2);
+  const [cols, setCols] = useState(3);
+  const [rise, setRise] = useState(0.15);
+  const [run, setRun] = useState(0.3);
+  const [radius, setRadius] = useState(3);
+  const [alongRotation, setAlongRotation] = useState(false);
+
+  // 只带"当前排布真正在用"的字段：多余的 key 会让默认兜底被覆盖成错值
+  // （例如从 grid 切到 line 时若带着 rows，engine 里 line 不看 rows 才没出问题，
+  //  但反过来 ui 显示与几何不一致就无从排查）。
+  const spec: ArraySpec = (() => {
+    switch (kind) {
+      case "grid":
+        return { kind, rows, cols, spacing, alongRotation };
+      case "stair":
+        return { kind, count, rise, run, alongRotation };
+      case "ring":
+        return { kind, count, radius };
+      case "line":
+      default:
+        return { kind, count, spacing, alongRotation };
+    }
+  })();
+  // count / rows×cols 都是**总数（含源对象自身）** → 实际新增 = total − 1。
+  const total = arrayCount(spec);
+  const added = Math.max(0, total - 1);
+
+  return (
+    <SubGroup
+      title="阵列 · 批量复制"
+      hint={`当前会新增 ${added} 个副本（共 ${total} 个，含它自己）。副本各自落到脚下的支撑面上。`}
+    >
+      <div className="mini-btns">
+        {(ARRAY_KINDS.map((item) => {
+          const disabled = item.k === "stair" && !isTerrain;
+          return (
+            <button
+              key={item.k}
+              type="button"
+              className={`ghost-button ${kind === item.k ? "on" : ""}`}
+              onClick={() => {
+                if (disabled) return;
+                setKind(item.k);
+              }}
+              disabled={disabled}
+              title={disabled ? "台阶需要 3D 场景：当前是平面模式，先把世界模式切到 terrain" : item.hint}
+            >
+              {item.label}
+            </button>
+          );
+        }))}
+      </div>
+
+      {kind === "line" ? (
+        <>
+          <Row label={`份数 ${count}`}>
+            <input type="range" min={2} max={24} step={1} value={count} onChange={(e) => setCount(Number(e.target.value))} />
+          </Row>
+          <Row label={`间距 ${spacing} m`}>
+            <input type="range" min={0.2} max={6} step={0.1} value={spacing} onChange={(e) => setSpacing(Number(e.target.value))} />
+          </Row>
+        </>
+      ) : null}
+
+      {kind === "grid" ? (
+        <>
+          <Row label={`行数 ${rows}`}>
+            <input type="range" min={1} max={12} step={1} value={rows} onChange={(e) => setRows(Number(e.target.value))} />
+          </Row>
+          <Row label={`列数 ${cols}`}>
+            <input type="range" min={1} max={12} step={1} value={cols} onChange={(e) => setCols(Number(e.target.value))} />
+          </Row>
+          <Row label={`间距 ${spacing} m`}>
+            <input type="range" min={0.2} max={6} step={0.1} value={spacing} onChange={(e) => setSpacing(Number(e.target.value))} />
+          </Row>
+        </>
+      ) : null}
+
+      {kind === "stair" ? (
+        <>
+          <Row label={`级数 ${count}`}>
+            <input type="range" min={2} max={24} step={1} value={count} onChange={(e) => setCount(Number(e.target.value))} />
+          </Row>
+          <Row label={`每级抬高 ${rise} m`}>
+            <input type="range" min={0.05} max={1} step={0.05} value={rise} onChange={(e) => setRise(Number(e.target.value))} />
+          </Row>
+          <Row label={`每级进深 ${run} m`}>
+            <input type="range" min={0.1} max={2} step={0.05} value={run} onChange={(e) => setRun(Number(e.target.value))} />
+          </Row>
+        </>
+      ) : null}
+
+      {kind === "ring" ? (
+        <>
+          <Row label={`份数 ${count}`}>
+            <input type="range" min={2} max={24} step={1} value={count} onChange={(e) => setCount(Number(e.target.value))} />
+          </Row>
+          <Row label={`半径 ${radius} m`}>
+            <input type="range" min={0.5} max={12} step={0.1} value={radius} onChange={(e) => setRadius(Number(e.target.value))} />
+          </Row>
+        </>
+      ) : null}
+
+      {kind !== "ring" ? (
+        <Row label="排布方向">
+          <button
+            type="button"
+            className={`ghost-button ${alongRotation ? "on" : ""}`}
+            onClick={() => setAlongRotation((v) => !v)}
+            title="开启后沿对象自身的 Rotation 方向排布；关闭则固定沿世界 X 轴"
+          >
+            {alongRotation ? "沿对象朝向" : "沿世界 X"}
+          </button>
+        </Row>
+      ) : null}
+
+      <div className="mini-btns">
+        <button
+          type="button"
+          className="ghost-button"
+          disabled={added === 0}
+          onClick={() => arrayAsset(object.id, spec)}
+          title={`新增 ${added} 个副本`}
+        >
+          ＋ 阵列 {added} 份
+        </button>
+      </div>
+    </SubGroup>
+  );
+}
+
+const ARRAY_KINDS: { k: ArrayKind; label: string; hint: string }[] = [
+  { k: "line", label: "直线", hint: "沿一条直线依次排开（立柱、树、椅子）" },
+  { k: "grid", label: "网格", hint: "矩形阵列 行×列（停车场、观众席）" },
+  { k: "stair", label: "台阶", hint: "逐级抬高的台阶（terrain 专属，抬高量是作者显式意图）" },
+  { k: "ring", label: "环绕", hint: "等角度绕一圈（围坐、环列）" },
+];
 
 export function Inspector() {
   const state = useDirectorStore((s) => s.state);
@@ -744,6 +902,9 @@ export function Inspector() {
               />
             ))}
           </SubGroup>
+          {/* 阵列（Phase 8）：按排布规格批量复制当前对象。落在 Block 尺寸之后 ——
+              先定单个盒子的尺寸，再决定复制多少份，是自然的编辑顺序。 */}
+          <ArrayPanel object={object} />
           {object.category === "human" ? (
             <SubGroup
               title="Pose（静态基线姿势）"
