@@ -39,6 +39,7 @@ import {
   JUMP_EASE,
 } from "../src/engine/arc";
 import { pathHeightAt, segmentProgressAt, arcActive } from "../src/engine/pathHeight";
+import { objectsOnTop, restsOn, settleStack, stackChain, translateStack } from "../src/engine/stack";
 import { DirectorObject, DirectorState, MoveSegment, Locomotion } from "../src/domain/schema";
 
 let pass = 0;
@@ -853,6 +854,144 @@ console.log("\n[22] 校验三条 + 落地 / 轨迹 / 助跑 + planar 退化");
   check("JUMP_EASE 首控制点 y 不为 0（起跳有水平速度）", JUMP_EASE[1] > 0, true);
   // segmentProgressAt：线性缓动 + 时间中点 → 0.5。
   check("segmentProgressAt：线性中点 = 0.5", Math.round(segmentProgressAt(plainSeg, 0.5) * 1e6) / 1e6, 0.5);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// §23 堆叠传播（拖动传播 / 失支撑即落）—— engine/stack.ts 的回归守卫
+// ────────────────────────────────────────────────────────────────────────────
+// 用户报的 bug：「堆叠后移动最下层，上层没跟着动，悬空也没落下」。
+// 根因：moveObject 只改被拖的那一个对象 → 上层 (x,z)/baseY 都留在原地，
+// 违反 INV-3D-04（baseY 必须等于下方支撑面顶面）。
+// 本节覆盖：① 链检测 ② 拖动传播（相对偏移不变）③ 失支撑即落 ④ planar 无堆叠。
+{
+  // 三层塔：A(底) B(中) C(顶)，逐层相切叠起来。
+  const A = box("A", 0, 0, 2, 2, 1, 0); // [0,1]
+  const B = box("B", 0, 0, 2, 2, 1, 1); // [1,2]
+  const C = box("C", 0, 0, 2, 2, 1, 2); // [2,3]
+  const tower = scene([A, B, C], "terrain");
+
+  // ① 链检测：相切 + 水平重叠 = 堆叠（INV-3D-05）。
+  check("§23 相切 → restsOn 成立", restsOn(B, A), true);
+  check("§23 相切 → restsOn 反向不成立", restsOn(A, B), false);
+  check("§23 悬空 0.5 → 不构成堆叠", restsOn(box("X", 0, 0, 2, 2, 1, 1.5), A), false);
+  check("§23 水平不重叠 → 不构成堆叠", restsOn(box("Y", 9, 0, 2, 2, 1, 1), A), false);
+  check("§23 agent 之间不构成堆叠", restsOn(actor("H1", 0, 0, 1), actor("H2", 0, 0, 2.8)), false);
+  check("§23 直接上层只有 B（不含 C）", objectsOnTop(tower, "A").map((o) => o.id), ["B"]);
+  check("§23 链：根在前，自下而上 A→B→C", stackChain(tower, "A").map((o) => o.id), ["A", "B", "C"]);
+  check("§23 从中间取链：B→C（不含 A）", stackChain(tower, "B").map((o) => o.id), ["B", "C"]);
+  check("§23 塔顶无上层", stackChain(tower, "C").map((o) => o.id), ["C"]);
+
+  // ② 拖动传播：平移整条链，层间相对偏移不变。
+  const shifted = translateStack(tower, "A", 5, -3);
+  const sA = shifted.find((o) => o.id === "A") as DirectorObject;
+  const sB = shifted.find((o) => o.id === "B") as DirectorObject;
+  const sC = shifted.find((o) => o.id === "C") as DirectorObject;
+  check("§23 平移：上层 B 跟随（同一偏移）", [sB.x, sB.z], [5, -3]);
+  check("§23 平移：上层 C 也跟随", [sC.x, sC.z], [5, -3]);
+  check("§23 平移：baseY 不动（相对高度不变）", [sB.baseY, sC.baseY], [1, 2]);
+  check("§23 平移：链仍在同一格 → 仍互相压着", restsOn(sB, sA), true);
+  // 刚性平移后塔是完整的 → settleStack 不该改动它（各层仍被下层接住）。
+  const settledAfterMove = settleStack({ ...tower, objects: shifted }, ["A", "B", "C"]);
+  check(
+    "§23 塔整体平移后保持完整（层间相对高度不变）",
+    settledAfterMove.map((o) => o.baseY ?? 0),
+    [0, 1, 2],
+  );
+  check(
+    "§23 刚性平移：settleStack 零改动（引用相等）",
+    settledAfterMove === shifted,
+    true,
+  );
+
+  // ③ 失支撑即落（本 bug 的核心）：底座被"抽走"，上面的层必须重新落。
+  //    模拟 removeAsset 的效果：删掉 A，再对 B/C 跑 settleStack。
+  const withoutA = { ...tower, objects: [B, C] };
+  const dropped = settleStack(withoutA, ["B", "C"]);
+  check("§23 删底座：中层 B 落到基准面 0", (dropped.find((o) => o.id === "B") as DirectorObject).baseY, 0);
+  check("§23 删底座：顶层 C 也随之落到 B 之上（=1）", (dropped.find((o) => o.id === "C") as DirectorObject).baseY, 1);
+  check("§23 删底座：落完后 B、C 仍相切", restsOn(
+    dropped.find((o) => o.id === "C") as DirectorObject,
+    dropped.find((o) => o.id === "B") as DirectorObject,
+  ), true);
+
+  // ③b 只抽走中层：顶层 C 应越过 B 落到 A 上（=1），而不是停在 2。
+  const skipB = { ...tower, objects: [A, C] };
+  const regrounded = settleStack(skipB, ["C"]);
+  check("§23 抽走中层：顶层 C 越过空洞落到 A 顶面", (regrounded.find((o) => o.id === "C") as DirectorObject).baseY, 1);
+
+  // ③c 整塔移到 1m 平台上 —— 这条走的是 moveObject 的真实语义：
+  //     ① 根部 placeObject 定新层高（这里 = 平台顶面 1）
+  //     ② 上层按同一 Δy 同步抬升（不只是水平平移！否则上层嵌进根部 = 塔被压扁）
+  //     ③ 最后 settleStack 兜底（只"掉"不"抬"）。
+  const plateau = box("PLT", 8, 0, 4, 4, 1, 0);
+  const withPlateau = [...tower.objects, plateau];
+  const rootPlaced = placeObject({ ...tower, objects: withPlateau }, "A", 8, 0);
+  check("§23 整塔搬到 1m 平台上：根部被抬到 1", rootPlaced.baseY, 1);
+  const rootDY = (rootPlaced.baseY ?? 0) - (A.baseY ?? 0); // 0 → 1
+  const lifted = translateStack({ ...tower, objects: withPlateau }, "A", 8, 0).map((o) => {
+    if (o.id === "A") return { ...o, baseY: rootPlaced.baseY as number };
+    if (o.id === "B" || o.id === "C") return { ...o, baseY: (o.baseY ?? 0) + rootDY };
+    return o;
+  });
+  const liftedSettled = settleStack({ ...tower, objects: lifted }, ["A", "B", "C"]);
+  check(
+    "§23 整塔搬到平台：三层 = 1/2/3（根部抬高、上层同步抬 Δy）",
+    ["A", "B", "C"].map((cid) => (liftedSettled.find((o) => o.id === cid) as DirectorObject).baseY),
+    [1, 2, 3],
+  );
+  check(
+    "§23 搬到平台后仍是完整塔（逐层相切）",
+    [
+      restsOn(
+        liftedSettled.find((o) => o.id === "B") as DirectorObject,
+        liftedSettled.find((o) => o.id === "A") as DirectorObject,
+      ),
+      restsOn(
+        liftedSettled.find((o) => o.id === "C") as DirectorObject,
+        liftedSettled.find((o) => o.id === "B") as DirectorObject,
+      ),
+    ],
+    [true, true],
+  );
+
+  // ③d 桥/拱的"下探量"必须保留：bottom 是绝对高度，改 baseY 时要同步平移 bottom，
+  //    否则净空被静默改写。落回地面后：baseY = 0.65、bottom = 0（下探量仍是 0.65）。
+  //    （box() 不带 bottom，用展开补上；baseY 2.4、bottom 1.75 → 下探 0.65。）
+  const arch: DirectorObject = { ...box("ARC", 0, 0, 2, 2, 1), baseY: 2.4, bottom: 1.75 };
+  const archScene = scene([arch], "terrain");
+  const archArc = archScene.objects[0];
+  check("§23 拱洞：初始下探量 0.65", [
+    Math.round(((archArc.baseY as number) - (archArc.bottom as number)) * 1e6) / 1e6,
+  ], [0.65]);
+  const archArc2 = settleStack(archScene, ["ARC"])[0];
+  check("§23 拱洞：落回地面后 baseY = 0.65", Math.round((archArc2.baseY as number) * 1e6) / 1e6, 0.65);
+  check("§23 拱洞：落回地面后 bottom = 0（实体贴地）", archArc2.bottom, 0);
+  check(
+    "§23 拱洞：下探量不变量保持（0.65）",
+    Math.round(((archArc2.baseY as number) - (archArc2.bottom as number)) * 1e6) / 1e6,
+    0.65,
+  );
+
+  // ③e 拱洞叠到 1m 平台上 → baseY = 1.65、bottom = 1（下探量仍 0.65）。
+  const platform = box("PLAT", 0, 0, 2, 2, 1, 0);
+  const archOnPlate = settleStack({ ...archScene, objects: [arch, platform] }, ["ARC"]);
+  const archUp = archOnPlate.find((o) => o.id === "ARC") as DirectorObject;
+  check("§23 拱洞在平台上：baseY = 1.65", archUp.baseY, 1.65);
+  check("§23 拱洞在平台上：bottom = 1", archUp.bottom, 1);
+
+  // ④ planar 无堆叠：几何上仍"相切"，但 planar 世界不该产生堆叠语义。
+  //    守卫方式与 moveObject 一致 —— 只有 terrain 下才跑 settle/传播。
+  //    （planar 下 baseY 恒 undefined，所以"有没有 baseY"就是开关。）
+  const planarTower = scene([box("A", 0, 0, 2, 2, 1), box("B", 0, 0, 2, 2, 1)], "planar");
+  check(
+    "§23 planar：对象不写 baseY（堆叠语义不生效）",
+    planarTower.objects.map((o) => o.baseY),
+    [undefined, undefined],
+  );
+
+  // ⑤ 空链 / 不存在的 id 是安全的 no-op（面板删对象时会走到）。
+  check("§23 空链 settle → 原样", settleStack(tower, []), tower.objects);
+  check("§23 不存在的 id → 空链", stackChain(tower, "GHOST"), []);
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败\n`);

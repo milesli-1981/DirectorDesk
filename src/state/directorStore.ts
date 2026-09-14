@@ -38,6 +38,7 @@ import { contentEndTime } from "../engine/timeline";
 import { normalizeCameraKeys, normalizeEase, normalizeSpeedKeys } from "../engine/ease";
 import { ASSET_PRESETS } from "../engine/assetPresets";
 import { placeObject } from "../engine/place";
+import { settleStack, stackChain } from "../engine/stack";
 import { JUMP_EASE } from "../engine/arc";
 import { ANIMAL_MODELS, DEFAULT_ANIMAL_SPECIES } from "../engine/animalModels";
 import {
@@ -957,6 +958,45 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         const nz = placed.z;
         const baseY = placed.baseY;
 
+        // ── 堆叠传播（见 engine/stack.ts）──────────────────────────────
+        // 拖的是 set 时，压在它上面的整条堆叠链跟着一起走：
+        //   水平：按根的水平位移 (Δx, Δz) 平移，相对位置不变；
+        //   垂直：按根的层高变化 Δy 同步抬高 / 降低 —— 否则根部被抬上平台后
+        //         上层还停在旧高度，会嵌进根部里（塔被压扁），
+        //         settleStack 只会"掉"不会"抬"，修不了。
+        // 平移完再自下而上复位各层 baseY（整体踩空就一起落）。
+        //
+        // 只在 terrain 生效：planar 世界没有堆叠（placeObject 也不写 baseY），
+        // 此时必须逐像素走老路径。`baseY === undefined` 正是"非 terrain"的判据。
+        const stackMode = target?.role === "set" && baseY !== undefined;
+        const chainIds = stackMode ? stackChain(state, objectId).map((o) => o.id) : [objectId];
+        const followers = new Set(chainIds.slice(1));
+        const rootDX = nx - (target?.x ?? nx);
+        const rootDZ = nz - (target?.z ?? nz);
+        const rootDY = baseY !== undefined ? baseY - (target?.baseY ?? 0) : 0;
+
+        let objects = state.objects.map((object) => {
+          if (object.id === objectId) {
+            return { ...object, x: nx, z: nz, ...(baseY !== undefined ? { baseY } : {}) };
+          }
+          // 上层：跟随平移与抬升。bottom（拱洞下探）也要同步位移，见 engine/stack.ts。
+          if (followers.has(object.id)) {
+            return {
+              ...object,
+              x: object.x + rootDX,
+              z: object.z + rootDZ,
+              ...(baseY !== undefined ? { baseY: (object.baseY ?? 0) + rootDY } : {}),
+              ...(object.bottom !== undefined ? { bottom: object.bottom + rootDY } : {}),
+            };
+          }
+          return object;
+        });
+        // 平移后自下而上复位各层 baseY：整体踩空就一起落，落在新平台上就一起抬。
+        // settleStack 用 { ...state, objects } 的临时 state，这样它看到的已是平移后的坐标。
+        if (stackMode) {
+          objects = settleStack({ ...state, objects }, chainIds);
+        }
+
         // 拖动对象时，其第一段路径的起点跟随 ORIGIN：
         // 否则播放到该段时，对象会从新的 ORIGIN 瞬移回老起点。
         const first = state.segments
@@ -972,11 +1012,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           state: {
             ...state,
             revision: state.revision + 1,
-            objects: state.objects.map((object) =>
-              object.id === objectId
-                ? { ...object, x: nx, z: nz, ...(baseY !== undefined ? { baseY } : {}) }
-                : object,
-            ),
+            objects,
             segments,
             handoffs: first ? reconcileHandoffs(segments, state.handoffs) : state.handoffs,
           },
@@ -1168,6 +1204,13 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
             ? { ...target, ...patch }
             : null;
         const effectivePatch: Partial<DirectorObject> = { ...patch };
+        // 改 footprint（尤其 h）会移动"支撑面"的高度 —— 压在上面的对象必须重新落一遍，
+        // 否则薄板变厚，上面的盒子就嵌进板里、薄板变薄就悬空（INV-3D-04）。
+        // 收集当前压在这个对象上的直接上层；改完几何后再 settle。
+        const touchedStack =
+          target && target.role === "set" && patch.footprint !== undefined
+            ? [...stackChain(state, id).map((o) => o.id)]
+            : [];
         if (merged) {
           // 落位统一走 placeObject（定层高 → 按层高分离，顺序见 engine/place）。
           // `patch.baseY` 作为 layerY 传进去：调用方显式给了标高时它就是权威，
@@ -1181,13 +1224,19 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
             effectivePatch.baseY = placed.baseY;
           }
         }
+        let objects = state.objects.map((o) =>
+          o.id === id ? { ...o, ...effectivePatch } : o,
+        );
+        // 几何变了 → 自下而上复位整条堆叠链的 baseY（见 engine/stack.ts 的 settleStack）。
+        // 传 `touchedStack` 而非 `[id]`：改的是支撑面本身，要重算的是压在它上面的层。
+        if (touchedStack.length > 0) {
+          objects = settleStack({ ...state, objects }, touchedStack);
+        }
         return {
           state: {
             ...state,
             revision: state.revision + 1,
-            objects: state.objects.map((o) =>
-              o.id === id ? { ...o, ...effectivePatch } : o,
-            ),
+            objects,
           },
         };
       }),
@@ -1198,11 +1247,20 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           m.targetId === id ? { ...m, targetId: undefined } : m,
         );
         const objects = store.state.objects.filter((o) => o.id !== id);
+        // 删掉的是"被压着的"底座时，压在上面的整条链失去支撑 → 必须向下重新落位，
+        // 否则它们会悬在原来那条链的高度上（INV-3D-04）。删前先取链，删后再 settle。
+        const orphanChain = stackChain(store.state, id)
+          .map((o) => o.id)
+          .filter((cid) => cid !== id);
+        const settled =
+          orphanChain.length > 0
+            ? settleStack({ ...store.state, objects }, orphanChain)
+            : objects;
         return {
           state: {
             ...store.state,
             revision: store.state.revision + 1,
-            objects,
+            objects: settled,
             segments: store.state.segments.filter((s) => s.object !== id),
             constraints: store.state.constraints.filter((c) => c.subject !== id && c.target !== id),
             cameraMoves,
