@@ -214,6 +214,15 @@ export function checkJumpArc(input: ArcCheckInput): ArcCheckResult {
  * @param dx 水平距离（到面的距离）
  * @param hasGrabFace 落点支撑体是否提供竖直抓手面（非 ramp/grid）
  */
+/**
+ * 攀爬时身体必须贴着竖直面的距离上限（米）。
+ *
+ * 因为一切都是盒、盒的侧面永远是竖直面，"有没有抓手"是免费的 ——
+ * 剩下的唯一约束是**够不够得着**，而它就是这个常数。分档（reach.ts）与
+ * 校验（checkClimb）共用，避免"线说攀得上去、校验说够不着"。
+ */
+export const GRAB_REACH = 0.5;
+
 export function checkClimb(
   dh: number,
   dx: number,
@@ -241,7 +250,6 @@ export function checkClimb(
     });
   }
   // 必须贴着面（一个身位内）。
-  const GRAB_REACH = 0.5;
   if (dx > GRAB_REACH + 1e-6) {
     issues.push({
       code: "span-too-far",

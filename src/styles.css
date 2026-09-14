@@ -2465,6 +2465,99 @@ pre {
   background: #0a1016;
 }
 
+/* 可达性徽标（Phase 5）：与 handoff 徽标同族，但更宽（要放「⌒ 需跳跃」四个字），
+   且颜色 / 边框色由档位内联给定 —— 颜色是"哪一档"，字形是"不靠颜色也能读"的冗余。 */
+.reach-badge {
+  height: 20px;
+  padding: 0 7px;
+  border: 1.5px solid #f0a35a;
+  border-radius: 10px;
+  background: #0a1016d9;
+  color: #f0a35a;
+  font-family: var(--ap-font, inherit);
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  cursor: pointer;
+  backdrop-filter: blur(2px);
+}
+.reach-badge:hover {
+  background: #0a1016;
+}
+
+/* 拖拽即时反馈的 tooltip（docs/3d/03 §6）。
+   与徽标同族但**不响应指针** —— 它跟着光标走，抢走事件会让拖拽自己中断。
+   刻意不加"禁止"语义（不用 not-allowed 光标）：落位是允许的，这里只是报告。 */
+.reach-tip {
+  display: inline-block;
+  padding: 4px 8px;
+  border: 1.5px solid #f0a35a;
+  border-radius: 4px;
+  background: #0a1016f2;
+  font-family: var(--ap-font, inherit);
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: nowrap;
+  backdrop-filter: blur(2px);
+}
+
+/* Inspector 可达性面板：一处问题一行，配色与画布上的线同档同色。 */
+.reach-row {
+  margin: 7px 0 9px;
+  padding: 7px 8px 8px;
+  border-left: 2px solid #26313b;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.015);
+}
+.reach-row .reach-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.reach-row .reach-glyph {
+  font-size: 13px;
+  line-height: 1;
+}
+.reach-row .mono {
+  margin-left: auto;
+  color: var(--ap-text-3);
+  font-size: 10px;
+}
+.reach-row p.hint {
+  margin: 4px 0 6px;
+}
+.health-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  margin: 5px 0;
+  padding: 6px 8px;
+  border: 1px solid #26313b;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.015);
+  color: var(--ap-text, #e6edf3);
+  font-family: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+.health-row:hover {
+  border-color: #3a4a5a;
+  background: rgba(255, 255, 255, 0.04);
+}
+.health-row .mono {
+  color: var(--ap-text-3);
+  font-size: 10px;
+}
+.health-row .hint {
+  margin: 0;
+  font-size: 10px;
+}
+
 /* Selected toggle button state (camera view / handoff mode) */
 .ghost-button.on {
   border-color: #67a7ff;
@@ -3544,4 +3637,22 @@ header {
 .canvasWrap.is-drawing {
   outline: 2px solid rgba(10, 132, 255, 0.55);
   outline-offset: -2px;
+}
+
+/* 拖到不可达位置 → 光标变红 + 画布压一圈红边（docs/3d/03 §6）。
+   CSS 的 cursor 没法着色，所以内联一张 SVG（红底感叹号）当自定义光标；
+   回退值仍是 grabbing —— 形状不变 = 还在搬、也放得下，只是有问题。 */
+.canvasWrap.is-blocked canvas {
+  cursor:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24'%3E%3Ccircle cx='12' cy='12' r='9' fill='%23ff453a' stroke='%230a1016' stroke-width='2'/%3E%3Crect x='10.6' y='5.6' width='2.8' height='8.2' rx='1.4' fill='%23ffffff'/%3E%3Ccircle cx='12' cy='17.4' r='1.6' fill='%23ffffff'/%3E%3C/svg%3E")
+      12 12,
+    grabbing;
+}
+.canvasWrap.is-blocked::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  box-shadow: inset 0 0 0 2px rgba(255, 69, 58, 0.5);
+  z-index: 3;
 }

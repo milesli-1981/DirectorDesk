@@ -41,6 +41,18 @@ import {
 import { pathHeightAt, segmentProgressAt, arcActive } from "../src/engine/pathHeight";
 import { objectsOnTop, restsOn, settleStack, stackChain, translateStack, stackParentMap, isStackBottom } from "../src/engine/stack";
 import { arraySlots, arrayCount, ArraySpec } from "../src/engine/array";
+import {
+  dragReachHint,
+  isRouteAnchor,
+  previewArc,
+  reachMessage,
+  scanReachability,
+  segmentFindings,
+  segmentSpans,
+  takeoffSpeedRatio,
+  tierOfGap,
+  worstTier,
+} from "../src/engine/reach";
 import { DirectorObject, DirectorState, MoveSegment, Locomotion } from "../src/domain/schema";
 
 let pass = 0;
@@ -1129,6 +1141,258 @@ console.log("\n[22] 校验三条 + 落地 / 轨迹 / 助跑 + planar 退化");
   const crossSpan = stackParentMap([slabL, slabR, spanning]);
   check("§25 横跨两块板：指派了父", crossSpan.get("TOP") !== undefined, true);
   check("§25 横跨两块板：父是两者之一（Tree 而非 DAG）", ["L", "R"].includes(crossSpan.get("TOP") ?? ""), true);
+}
+
+// §26 可达性分档（engine/reach.ts）—— Phase 5 的判定核心
+// ────────────────────────────────────────────────────────────────────────────
+// §27 之前先用探针把真实取值打出来，据此写断言（避免把"期望写错"当成代码 bug）。
+{
+  const flat = sceneWith([actor("H", -4, 0)], [seg("s1", "H", [-4, 0], [6, 0])], "terrain");
+  const crateScene = sceneWith(
+    [actor("H", -4, 0), box("C", 2, 0, 1, 1, 0.6)],
+    [seg("s1", "H", [-4, 0], [6, 0])],
+    "terrain",
+  );
+  const dropScene = sceneWith(
+    [actor("H", 0, 0, 1.5), box("P", 0, 0, 4, 4, 1.5)],
+    [seg("s1", "H", [0, 0], [10, 0])],
+    "terrain",
+  );
+  const tallScene = sceneWith(
+    [actor("H", 0, 0, 3), box("P", 0, 0, 4, 4, 3)],
+    [seg("s1", "H", [0, 0], [10, 0])],
+    "terrain",
+  );
+  const bridgeScene = sceneWith(
+    [actor("H", -4, 0), box("BR", 0, 0, 4, 4, 0.6, 2.4)],
+    [seg("s1", "H", [-4, 0], [6, 0])],
+    "terrain",
+  );
+  const planarScene = sceneWith(
+    [actor("H", 0, 0, 3), box("P", 0, 0, 4, 4, 3)],
+    [seg("s1", "H", [0, 0], [10, 0])],
+    "planar",
+  );
+  const round6 = (n: number) => Math.round(n * 1e6) / 1e6;
+  const tiers = (st: DirectorState) => segmentSpans(st, st.segments[0]).map((s) => s.tier);
+  const loco = locomotionOf(flat, actor("H", 0, 0));
+
+  // ① 平地：整条路线就是一段"可走"，不冒出任何新东西。
+  const flatSpans = segmentSpans(flat, flat.segments[0]);
+  check("§26 平地：只有一段", flatSpans.length, 1);
+  check("§26 平地：档 0", flatSpans[0].tier, 0);
+  check("§26 平地：折线点数 = 采样点数（没被重采样）", flatSpans[0].points.length, 17);
+
+  // ② planar / 非 agent：判定不参与，返回空 —— 画布上不会多出任何一条线。
+  check("§26 planar：不判定（空数组）", segmentSpans(planarScene, planarScene.segments[0]), []);
+  check(
+    "§26 非 agent 的段：不判定",
+    segmentSpans(
+      sceneWith([box("S", 0, 0, 2, 2, 3)], [seg("s1", "S", [0, 0], [10, 0])], "terrain"),
+      seg("s1", "S", [0, 0], [10, 0]),
+    ),
+    [],
+  );
+
+  // ③ 0.6m 箱子：跳上去（档 1）→ 站在顶上（档 0）→ 跳下来（档 6）。
+  check("§26 0.6m 箱：档位序列", tiers(crateScene), [0, 1, 0, 6, 0]);
+  const jumpSpan = segmentSpans(crateScene, crateScene.segments[0])[1];
+  check("§26 0.6m 箱：跳跃段 dh = 0.6", round6(jumpSpan.dh), 0.6);
+  // 弧顶 = min(Δh + 0.15, H) = 0.75，加抬升 0.13 → 0.88。两端是 0.13。
+  const jumpYs = jumpSpan.points.map((p) => round6(p[1]));
+  check("§26 跳跃段：中点最高（弓形可见）", Math.max(...jumpYs), 0.88);
+  check("§26 跳跃段：两端贴地", [jumpYs[0], jumpYs[jumpYs.length - 1]], [0.13, 0.13]);
+  check("§26 跳跃段：重采样成 17 点（否则弓形看不见）", jumpYs.length, 17);
+  const dropYs = segmentSpans(crateScene, crateScene.segments[0])[3].points.map((p) => round6(p[1]));
+  check(
+    "§26 落差段：单调下降（fall 是加速下坠，不反弹）",
+    dropYs.every((y, i) => i === 0 || y <= dropYs[i - 1] + 1e-9),
+    true,
+  );
+
+  // ④ 走下高台：1.5m 是"落差"，3m 是"不可达"（超过 dropLimit = H + 1.0 = 1.9）。
+  check("§26 走下 1.5m 台：档 6（落差）", tiers(dropScene), [0, 6, 0]);
+  check("§26 走下 3m 台：档 3（不可达）", tiers(tallScene), [0, 3, 0]);
+
+  // ⑤ 桥下穿行**不能**被误判成"要爬 3 米" —— 头顶上方的面不是脚下的面。
+  check("§26 桥下穿行：全段可走（不误报）", tiers(bridgeScene), [0]);
+
+  // ⑥ 跨度是第二个判据：跳得上去、但差 3 米一样过不去。
+  check("§26 跨度 1.0m ≤ 包络 → 档 1", tierOfGap(0.5, 1.0, loco).tier, 1);
+  check("§26 跨度 3.0m > 包络 → 档 3", tierOfGap(0.5, 3.0, loco).tier, 3);
+  check("§26 平地不给 reach（没有落差就谈不到跨度）", tierOfGap(0, 2.5, loco).reach, 0);
+  // reach(0.5) = R/2·(1+√(1−0.5/0.9)) = 1.25·(1+0.6667) ≈ 2.0833
+  check("§26 包络随高差收缩", round6(tierOfGap(0.5, 1.0, loco).reach), 2.083333);
+
+  // ⑦ 预览弧线 = 按下「生成弧线」后真正写进去的那条，所以形状必须对得上。
+  check("§26 预览：跳跃 → parabola，apex = Δh + 0.15", previewArc("jump", 0.6, loco), {
+    mode: "parabola",
+    apex: 0.75,
+  });
+  check("§26 预览：apex 被夹到跳跃上限 H（跳不上去也要画出来）", previewArc("jump", 1.2, loco), {
+    mode: "parabola",
+    apex: 0.9,
+  });
+  check("§26 预览：落差 → fall", previewArc("drop", -1.5, loco), { mode: "fall" });
+  check("§26 预览：攀爬 → climb", previewArc("climb", 1.2, loco), { mode: "climb" });
+  check("§26 预览：平地不需要弧线", previewArc("flat", 0, loco), null);
+
+  // ⑧ 已有弧线时按**真实弧线**取 y，不按预览 —— 顶点就是作者设的 apex。
+  const arced = sceneWith(
+    [actor("H", -4, 0), box("C", 2, 0, 1, 1, 0.6)],
+    [seg("s1", "H", [-4, 0], [6, 0], { arc: { mode: "parabola", apex: 0.5 } })],
+    "terrain",
+  );
+  const arcYs = segmentSpans(arced, arced.segments[0])[1].points.map((p) => round6(p[1]));
+  check("§26 已有弧线：顶点 = 作者设的 apex 0.5 + 抬升", Math.max(...arcYs), 0.63);
+
+  // ⑨ 体检清单：只收档位 > 0 的，并按开始时间排序。
+  check("§26 一条段的问题清单：跳跃 + 落差两条", segmentFindings(crateScene, crateScene.segments[0]).length, 2);
+  const scanScene = sceneWith(
+    [actor("H", 0, 0, 3), box("P", 0, 0, 4, 4, 3)],
+    [
+      seg("late", "H", [0, 0], [10, 0], { timeStart: 5, timeEnd: 6 }),
+      seg("early", "H", [0, 0], [10, 0], { timeStart: 1, timeEnd: 2 }),
+    ],
+    "terrain",
+  );
+  const scan = scanReachability(scanScene);
+  check("§26 全局体检：两条段各一处", scan.length, 2);
+  check("§26 全局体检：按开始时间排序", scan.map((f) => f.segmentId), ["early", "late"]);
+  // 往下掉 3m 报的是"太高会摔"（dropLimit = H + 1.0 = 1.9），不是"超过攀爬能力"。
+  check("§26 不可达文案：说人话带数字", scan[0].message, "下落 3.00 米太高，最多 1.90 米");
+  check("§26 落差文案：", reachMessage(6, -1.5, 0.6, 0, loco), "下落 1.50m");
+  check(
+    "§26 往上不可达文案：点名攀爬能力",
+    reachMessage(3, 2.5, 0.3, 0, loco),
+    "这里落差 2.50 米，超过攀爬能力 1.60 米",
+  );
+
+  // ⑩ 编队归并：徽标只画在锚点的段上，否则一队 5 人冒出 5 个徽标。
+  const squad = {
+    ...scene([actor("A1", 0, 0), actor("A2", 1, 0)], "terrain"),
+    groups: [
+      {
+        id: "g1",
+        name: "小队",
+        color: "#67a7ff",
+        members: ["A1", "A2"],
+        dynamics: true,
+        formation: "column" as const,
+        spacing: 1.2,
+        noise: 0.3,
+      },
+    ],
+  };
+  check("§26 锚点 A1：画徽标", isRouteAnchor(squad, "A1"), true);
+  check("§26 队员 A2：不画徽标", isRouteAnchor(squad, "A2"), false);
+  check("§26 不在任何队里：画徽标", isRouteAnchor(squad, "OTHER"), true);
+
+  check("§26 worstTier：不可达压过一切", worstTier([0, 1, 6, 2, 3]), 3);
+  check("§26 worstTier：全可走 → 0", worstTier([0, 0]), 0);
+
+  // ⑪ 障碍集合的"跳过去"排除（04 §2）—— 可达性 UI 的前提：路径不绕开，
+  //    才报得出"需跳跃"。这是 Phase 4 弧线落地后补上的那一行。
+  const jumpable = box("J", 2, 0, 1, 1, 0.6); // 0.6m ≤ H=0.9，对角线 1.41 ≤ R=2.5
+  const tooHigh = box("T", 2, 0, 1, 1, 1.2); // 1.2m > H
+  const tooWide = box("W", 2, 0, 4, 4, 0.6); // 对角线 5.66 > R
+  const sJumpable = scene([jumpable, actor("H", -4, 0)], "terrain");
+  const sTooHigh = scene([tooHigh, actor("H", -4, 0)], "terrain");
+  const sTooWide = scene([tooWide, actor("H", -4, 0)], "terrain");
+  const sPrefer = scene([{ ...jumpable, prefer: "walk-around" }, actor("H", -4, 0)], "terrain");
+  const rectIds = (st: DirectorState) => blockingRects(st, "H", 0, loco).length;
+  check("§26 0.6m 小箱：跳得过去 → 不是障碍", rectIds(sJumpable), 0);
+  check("§26 1.2m 箱：超过跳跃高度 → 仍是障碍", rectIds(sTooHigh), 1);
+  check("§26 0.6m 但 4×4：跨度超包络 → 仍是障碍", rectIds(sTooWide), 1);
+  check("§26 prefer walk-around：作者要求绕行 → 恢复为障碍", rectIds(sPrefer), 1);
+}
+
+// §27 拖拽即时反馈 + 起跳瞬时速度接线（docs/3d/03 §6 / 02 §13）
+// ────────────────────────────────────────────────────────────────────────────
+{
+  const flat = sceneWith([actor("H", -4, 0)], [seg("s1", "H", [-4, 0], [6, 0])], "terrain");
+  const crateScene = sceneWith(
+    [actor("H", -4, 0), box("C", 2, 0, 1, 1, 0.6)],
+    [seg("s1", "H", [-4, 0], [6, 0])],
+    "terrain",
+  );
+  const tallScene = sceneWith(
+    [actor("H", 0, 0, 3), box("P", 0, 0, 4, 4, 3)],
+    [seg("s1", "H", [0, 0], [10, 0])],
+    "terrain",
+  );
+  const round6 = (n: number) => Math.round(n * 1e6) / 1e6;
+
+  // ① 没问题就是没提示 —— 平地上拖来拖去不该冒出任何红字。
+  check("§27 平地拖拽：无提示", dragReachHint(flat, "s1", "end"), null);
+  check("§27 不存在的段：无提示", dragReachHint(flat, "GHOST", "end"), null);
+
+  // ② 0.6m 箱：档位 [0,1,0,6,0] → 最严重是"需跳跃"（1 比 6 严重），marker 原样透传。
+  const crateHint = dragReachHint(crateScene, "s1", "end");
+  check("§27 拖到箱子上：报需跳跃", crateHint?.tier, 1);
+  check("§27 拖到箱子上：段 id 正确", crateHint?.segmentId, "s1");
+  check("§27 拖到箱子上：marker 原样透传", crateHint?.marker, "end");
+  check("§27 拖到箱子上：带位置（挂 tooltip 用）", crateHint?.at.length, 3);
+
+  // ③ 不可达优先于其它一切，且文案与 Inspector / 徽标同源。
+  const tallHint = dragReachHint(tallScene, "s1", "start");
+  check("§27 拖下 3m 台：报不可达", tallHint?.tier, 3);
+  check("§27 拖下 3m 台：文案说人话带数字", tallHint?.message, "下落 3.00 米太高，最多 1.90 米");
+
+  // ④ 不带 segmentId = 全场景扫描（拖 set 对象时那块一动，所有 agent 的路都可能被改）。
+  const scanHint = dragReachHint(
+    sceneWith(
+      [actor("H", -4, 0), box("C", 2, 0, 1, 1, 0.6), actor("G", -4, 6, 3), box("P", -4, 6, 4, 4, 3)],
+      [seg("jump", "H", [-4, 0], [6, 0]), seg("drop", "G", [-4, 6], [10, 6])],
+      "terrain",
+    ),
+    null,
+    null,
+  );
+  check("§27 全场景扫描：挑最严重的那条（不可达）", scanHint?.tier, 3);
+  check("§27 全场景扫描：指向出问题的那一段", scanHint?.segmentId, "drop");
+
+  // ⑤ **只报告、绝不干预**：这是 §6 的硬要求（允许放下）。
+  //    判定跑完之后，几何必须一字未改 —— 否则"报告"就变成了"偷偷改剧本"。
+  const before = JSON.stringify(crateScene.segments);
+  dragReachHint(crateScene, "s1", "end");
+  dragReachHint(crateScene, null, null);
+  check("§27 判定不写回几何（不硬阻止落位）", JSON.stringify(crateScene.segments), before);
+
+  // ⑥ 起跳瞬时速度 = d(弧长)/dt ÷ 跑步速度。线性缓动 + 10m/1s = 10m/s → 满速。
+  check("§27 10m/1s 线性：满速", takeoffSpeedRatio(flat, flat.segments[0]), 1);
+  // 10m/12.5s = 0.8m/s = 半速 → 恰好是"站着跳只能跳到一半远"的那个 0.5。
+  const slow = sceneWith(
+    [actor("H", -4, 0)],
+    [seg("s1", "H", [-4, 0], [6, 0], { timeEnd: 12.5 })],
+    "terrain",
+  );
+  check("§27 10m/12.5s：半速", round6(takeoffSpeedRatio(slow, slow.segments[0])), 0.5);
+  // 零时长段：速度无从谈起，按全速处理 —— 不凭空造一条"没有助跑"的假警告。
+  const zero = sceneWith(
+    [actor("H", -4, 0)],
+    [seg("s1", "H", [-4, 0], [6, 0], { timeStart: 2, timeEnd: 2 })],
+    "terrain",
+  );
+  check("§27 零时长段：按全速（不告警）", takeoffSpeedRatio(zero, zero.segments[0]), 1);
+
+  // ⑦ 02 §5 的那个既有陷阱：默认缓动在 u=0 斜率为 0 → 起跳瞬间水平速度≈0 → 站着跳。
+  const easeInOut = sceneWith(
+    [actor("H", -4, 0)],
+    [seg("s1", "H", [-4, 0], [6, 0], { ease: [0.42, 0, 0.58, 1] })],
+    "terrain",
+  );
+  const stagnant = takeoffSpeedRatio(easeInOut, easeInOut.segments[0]);
+  check("§27 ease-in-out 在 u=0：几乎零速（0.6 以下）", stagnant < 0.6, true);
+  // 端到端：把它接进 checkJumpArc，应当触发"没有助跑"，且有效跳远被砍到 ~50%。
+  const loco = locomotionOf(flat, actor("H", 0, 0));
+  const wired = checkJumpArc({ dh: 0.5, dx: 0.4, apex: 0.65, loco, speedRatio: stagnant });
+  check("§27 接线后：报没有助跑", wired.needsRunup, true);
+  check("§27 接线后：有效跳远按速度缩放（≈50%）", round6(wired.reach / jumpReachOf(0.5, loco)), round6(speedScale(stagnant)));
+  // 反过来：全速时不报助跑，也不缩放。
+  const full = checkJumpArc({ dh: 0.5, dx: 0.4, apex: 0.65, loco, speedRatio: 1 });
+  check("§27 全速：不报助跑", full.needsRunup, false);
+  check("§27 全速：不缩放", round6(full.reach / jumpReachOf(0.5, loco)), 1);
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败\n`);

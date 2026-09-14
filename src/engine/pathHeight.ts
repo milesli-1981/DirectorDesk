@@ -117,6 +117,22 @@ export function pathHeightAt(
 }
 
 /**
+ * 段的**起跳面 / 落点面**高度（弧线的基准）。
+ *
+ * 对外暴露是为了让可达性分档（`engine/reach.ts`）与渲染吃同一份起落面 ——
+ * 各自算一遍就会出现"线画在 1.2m、包络图按 0.9m 判"的分叉。
+ * 对象不存在 → null。
+ */
+export function arcEndHeights(
+  state: DirectorState,
+  segment: MoveSegment,
+): { y0: number; y1: number } | null {
+  const object = state.objects.find((o) => o.id === segment.object);
+  if (!object) return null;
+  return { y0: groundAtStart(state, object, segment), y1: groundAtEnd(state, object, segment) };
+}
+
+/**
  * 便捷：按 id 取高度（`pathGroundAt` 的弧线感知版本）。找不到对象 → 0。
  */
 export function pathHeightOfId(

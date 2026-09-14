@@ -6,10 +6,9 @@ import { clone as cloneSkeleton } from "three/examples/jsm/utils/SkeletonUtils.j
 import { useDirectorStore } from "../state/directorStore";
 import { actionPoseAt, staticPoseWeight } from "../engine/actionPose";
 import { findClip, NOMINAL_SPEED, type ModelConfig } from "../engine/modelConfig";
+import { RUN_SPEED } from "../engine/locomotion";
 import { JointName, Pose } from "../domain/schema";
 
-/** 速度达到此值即视为跑（与 WorldView 里方块简模的步态阈值一致）。 */
-const RUN_SPEED = 1.6;
 /** 动作切换的交叉淡入时长（秒）。 */
 const FADE = 0.25;
 /**

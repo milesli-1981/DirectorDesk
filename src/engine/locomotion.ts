@@ -1,6 +1,17 @@
 import { AssetCategory, DirectorObject, DirectorState, Locomotion } from "../domain/schema";
 
 /**
+ * 跑步速度（m/s）。
+ *
+ * 它同时是两件事的分母 / 阈值，所以必须是**同一个常数**：
+ * - docs/3d/02 §5 的 `speedRatio = 起跳水平速度 / 跑步速度`（助跑缩放 + "没助跑"提示）
+ * - 步态判定：≥ 此值画面上就在跑
+ *
+ * 分成两个常数会出现"画面上明明在跑，包络却按走路算"这种说不通的结果。
+ */
+export const RUN_SPEED = 1.6;
+
+/**
  * 运动能力表。
  *
  * 设计要点：**阈值挂在运动主体上，不是障碍上。**

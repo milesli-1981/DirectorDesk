@@ -5,7 +5,7 @@ import { Html, Line, OrbitControls, PerspectiveCamera } from "@react-three/drei"
 import * as THREE from "three";
 import { MarkerHover, useDirectorStore } from "../state/directorStore";
 import { AssetCategory, DirectorObject, DirectorState, Handoff, HandoffMode, JointName, MoveSegment, PathPoint, Pose, Vec2 } from "../domain/schema";
-import { pathChain } from "../engine/path";
+import { buildArcLut, pathChain, pointAtArcLength, samplePath } from "../engine/path";
 import {
   hitCameraRay,
   hitCameraPathPointScreen,
@@ -29,8 +29,19 @@ import {
   standingHeightFor,
 } from "../engine/ground";
 import { raycastGround } from "../engine/raycast";
-import { pathHeightAt, arcPolyline } from "../engine/pathHeight";
+import { pathHeightAt, arcPolyline, arcEndHeights, arcActive } from "../engine/pathHeight";
+import { arcAtU, arcHeightAt, arcIsFlat } from "../engine/arc";
+import { sampleArcHits } from "../engine/jump";
+import {
+  dragReachHint,
+  isRouteAnchor,
+  REACH_STYLES,
+  segmentSpans,
+  ReachSpan,
+  ReachStyle,
+} from "../engine/reach";
 import { actionPoseAt, staticPoseWeight } from "../engine/actionPose";
+import { RUN_SPEED } from "../engine/locomotion";
 import { MODEL_CONFIG } from "../engine/modelConfig";
 import { HumanoidGLB, ModelBoundary } from "./HumanoidModel";
 import { animalModelOf } from "../engine/animalModels";
@@ -128,6 +139,15 @@ type DragState =
       startBaseY: number;
       startClientY: number;
       /** 该深度下 1 像素对应多少世界米。 */
+      worldPerPixel: number;
+    }
+  // 拖弧顶把手改 `arc.apex`。与 height 同构：屏幕纵向位移 → 世界高度，
+  // 起点与折算率按下时锁定，于是拖拽途中转相机手感会变但不会跳。
+  | {
+      kind: "apex";
+      segmentId: string;
+      startApex: number;
+      startClientY: number;
       worldPerPixel: number;
     };
 
@@ -307,6 +327,109 @@ function HeightHandle({
         <span className="node-label height-readout">Y {top.toFixed(2)}</span>
       </Html>
     </group>
+  );
+}
+
+/* ------------------------------------------------- 弧线预览（docs/3d/03 §3） */
+
+type ApexGrab = (
+  event: ThreeEvent<PointerEvent>,
+  segment: MoveSegment,
+  at: [number, number, number],
+  startApex: number,
+) => void;
+
+/** 弧顶在**世界**里的位置：路径上 `arc` 区间的中点，高度取该里程处的弧线值。 */
+function arcApexInfo(segment: MoveSegment, state: DirectorState) {
+  const arc = segment.arc;
+  if (!arc || !arcActive(state, segment)) return null;
+  const ends = arcEndHeights(state, segment);
+  if (!ends || arcIsFlat(arc, ends.y0, ends.y1)) return null;
+  const lut = buildArcLut(samplePath(segment));
+  if (lut.total < 1e-6) return null;
+  const u = ((arc.from ?? 0) + (arc.to ?? 1)) / 2;
+  const p = pointAtArcLength(lut, u * lut.total);
+  const y = arcAtU(arc, u, ends.y0, ends.y1);
+  return {
+    at: [p.x, y, p.z] as [number, number, number],
+    /** 起跳面高度 —— 顶点高度的定义基准（`arc.apex` 就是相对它）。 */
+    groundY: ends.y0,
+    apex: arc.apex ?? 0,
+    isParabola: arc.mode === "parabola",
+  };
+}
+
+/**
+ * 顶点把手 + 高度标尺。
+ *
+ * 只给**选中的对象**画：把手是可交互元素，几十条段各挂一个球会把画布糊住，
+ * 而"我想调的通常是正在编辑的那条"—— 与 `PathHandles` 只在选中时出现同理。
+ */
+function ArcHandles({ segment, onGrabApex }: { segment: MoveSegment; onGrabApex: ApexGrab }) {
+  const state = useDirectorStore((s) => s.state);
+  const [hovered, setHovered] = useState(false);
+  const info = useMemo(() => arcApexInfo(segment, state), [segment, state]);
+  if (!info) return null;
+  const [x, y, z] = info.at;
+  const accent = hovered ? "#ffffff" : "#ff9f0a";
+  return (
+    <group>
+      {/* 高度标尺：顶点垂到起跳面。读数就是 `apex` 本身（它的定义基准）。 */}
+      <Line
+        points={[
+          [x, info.groundY + 0.02, z],
+          [x, y, z],
+        ]}
+        color="#ff9f0a"
+        dashed
+        dashSize={0.18}
+        gapSize={0.14}
+        lineWidth={1}
+      />
+      <Html
+        position={[x, y + 0.42, z]}
+        center
+        style={{ pointerEvents: "none" }}
+        zIndexRange={[28, 0]}
+      >
+        <span className="node-label height-readout">顶点 {(y - info.groundY).toFixed(2)}m</span>
+      </Html>
+      {info.isParabola ? (
+        <mesh
+          position={[x, y, z]}
+          scale={hovered ? 1.3 : 1}
+          onPointerDown={(event) => {
+            event.stopPropagation();
+            onGrabApex(event, segment, info.at, info.apex);
+          }}
+          onPointerOver={() => setHovered(true)}
+          onPointerOut={() => setHovered(false)}
+        >
+          <sphereGeometry args={[0.16, 20, 14]} />
+          <meshStandardMaterial
+            color={accent}
+            emissive="#ff9f0a"
+            emissiveIntensity={hovered ? 1.1 : 0.45}
+          />
+        </mesh>
+      ) : null}
+    </group>
+  );
+}
+
+function ArcPreviewLayer({ onGrabApex }: { onGrabApex: ApexGrab }) {
+  const state = useDirectorStore((s) => s.state);
+  const selectedId = useDirectorStore((s) => (s.selectedKind === "object" ? s.selectedId : null));
+  const showHelpers = useDirectorStore((s) => s.viewMode === "director");
+  if (!showHelpers || !selectedId) return null;
+  return (
+    <>
+      {state.segments
+        .filter((seg) => seg.object === selectedId && seg.arc && arcActive(state, seg))
+        .map((seg) => (
+          <ArcHandles key={seg.id} segment={seg} onGrabApex={onGrabApex} />
+        ))}
+    </>
   );
 }
 
@@ -656,7 +779,6 @@ function HumanoidRig({
 
     // 步态：显式 walk/run 片段优先；否则按 MOVE 的速度自动判定（低速走、高速跑）。
     // 注意 MOVE 决定"去哪里"，步态只决定身体怎么动，二者互不覆盖。
-    const RUN_SPEED = 1.6;
     const isRun =
       actionSample.gait === "run" || (actionSample.gait === "auto" && speed >= RUN_SPEED);
     const cadence = isRun ? 1.5 + speed * 1.9 : 1.5 + speed * 1.2;
@@ -772,6 +894,129 @@ function Actors() {
 
 /* ------------------------------------------------------------------- Paths */
 
+/**
+ * 可达性徽标（docs/3d/03 §4）。
+ *
+ * **用 DOM（`Html`）而不是 WebGL sprite 是刻意的** —— 可达性提示只给导演看，
+ * 不该出现在导出的成片里。这与 `NameTag` 用 sprite 的理由正好相反（名牌要进成片），
+ * 两者合起来就是那条隐含约定：**DOM = 导演视图，WebGL sprite = 成片**。
+ * 外层 `showHelpers = viewMode === "director"` 让导出的视频天然干净。
+ *
+ * 点击 → 选中该段。修复动作集中在 Inspector 的可达性面板里 ——
+ * 四种一键修复放在一个地方，比在画布上开四级菜单好找得多。
+ */
+function ReachBadge({
+  segment,
+  span,
+  style,
+  message,
+}: {
+  segment: MoveSegment;
+  span: ReachSpan;
+  style: ReachStyle;
+  message: string;
+}) {
+  const selectItem = useDirectorStore((s) => s.selectItem);
+  return (
+    <Html
+      position={[span.mid[0], span.mid[1] + HANDOFF_BADGE_LIFT, span.mid[2]]}
+      center
+      style={{ pointerEvents: "auto" }}
+      zIndexRange={[45, 0]}
+    >
+      <button
+        type="button"
+        className="reach-badge"
+        title={`${style.label} · ${message} — 点击查看修复`}
+        style={{ borderColor: style.color, color: style.color }}
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={() => selectItem(segment.id)}
+      >
+        {style.glyph} {style.label}
+      </button>
+    </Html>
+  );
+}
+
+/**
+ * 拖拽途中的可达性 tooltip（docs/3d/03 §6）。
+ *
+ * 挂在**出问题的那一处**上方，而不是跟着光标跑：跟着跑会挡住正在摆的物体，
+ * 而问题本身有位置（"这一跨跳不过去"），指在那里才说得清。
+ *
+ * 文案由 `engine/reach.ts` 统一生成（说人话、带数字），这里不再拼一遍。
+ * 不可达时补一句「仍可放下」—— 系统只是报告，不硬阻止，要让人知道这一点。
+ */
+function DragReachTip() {
+  const hint = useDirectorStore((s) => s.dragReach);
+  if (!hint || hint.tier === 0) return null;
+  const style = REACH_STYLES[hint.tier];
+  return (
+    <Html
+      position={[hint.at[0], hint.at[1] + 0.62, hint.at[2]]}
+      center
+      style={{ pointerEvents: "none" }}
+      zIndexRange={[55, 0]}
+    >
+      <span className="reach-tip" style={{ borderColor: style.color, color: style.color }}>
+        {style.glyph ? `${style.glyph} ` : ""}
+        {hint.message}
+        {hint.tier === 3 ? " · 仍可放下" : ""}
+      </span>
+    </Html>
+  );
+}
+
+/**
+ * 跳跃轨迹撞到几何 → 撞点处一个红叉（docs/3d/03 §3）。
+ *
+ * 只画叉、不弹窗：导演看见形状被挡住了，自己会去 Inspector 里改弧顶或落点。
+ * 红叉对**所有**带弧线的段都画（不要求选中）—— 撞上了是错误，错误不该藏着。
+ */
+function ArcHitCross({ segment, state }: { segment: MoveSegment; state: DirectorState }) {
+  const hit = useMemo(() => {
+    if (!segment.arc || !arcActive(state, segment)) return null;
+    const ends = arcEndHeights(state, segment);
+    if (!ends) return null;
+    const lut = buildArcLut(samplePath(segment));
+    if (lut.total < 1e-6) return null;
+    return sampleArcHits(
+      state,
+      segment.object,
+      (s) => pointAtArcLength(lut, s * lut.total),
+      (s) => arcAtU(segment.arc!, s, ends.y0, ends.y1),
+    );
+  }, [segment, state]);
+  if (!hit) return null;
+  const r = 0.22;
+  const { x, y, z } = hit.at;
+  return (
+    <group>
+      <Line
+        points={[
+          [x - r, y - r, z],
+          [x + r, y + r, z],
+        ]}
+        color="#ff453a"
+        lineWidth={2.5}
+      />
+      <Line
+        points={[
+          [x - r, y + r, z],
+          [x + r, y - r, z],
+        ]}
+        color="#ff453a"
+        lineWidth={2.5}
+      />
+      <Html position={[x, y + 0.45, z]} center style={{ pointerEvents: "none" }} zIndexRange={[30, 0]}>
+        <span className="node-label" style={{ color: "#ff7b91" }}>
+          撞到「{objectDisplayName(hit.object)}」
+        </span>
+      </Html>
+    </group>
+  );
+}
+
 function SegmentPaths() {
   const segments = useDirectorStore((s) => s.state.segments);
   const selectedObjectId = useDirectorStore((s) =>
@@ -822,21 +1067,66 @@ function SegmentPaths() {
           ? arcPolyline(state, segment, segment.object)
           : pathPolyline(segment, groundAt);
         if (points.length < 2) return null;
-        // 障碍感知「导航层」：环境（set 资产）如何重塑该 segment 的行动路线（橙色虚线）。
+        // 障碍感知「导航层」：环境（set 资产）如何重塑该 segment 的行动路线。
         // 与运动求解共用 segmentRoutePoints **与同一份障碍集合**，因此这条线就是 agent
         // 真正走的路线——群队锚点会把「编队骑得过去」的小障碍排除掉，两边必须一致，
         // 否则会看到橙色线绕行、人却直穿过去。
         const rects = routeObstacles(state, segment.object);
-        const route = segmentRoutePoints(segment, rects);
-        const routePoints = route.map(
-          (p) => [p.x, groundAt(p.x, p.z) + 0.13, p.z] as [number, number, number],
-        );
+        // 可达性分段：`engine/reach.ts` 吃的是**同一份** route + 障碍集合，
+        // 所以线上的档位就是求解器眼里的档位，不会分叉。
+        const spans = segmentSpans(state, segment);
+        const hasIssue = spans.some((span) => span.tier !== 0);
+        // 全平的路线继续保持现状（不画）—— 只有在有绕行或有问题时才出现导航层。
+        const showRoute = rects.length > 0 || hasIssue;
+        const decorate = isRouteAnchor(state, segment.object);
+
         return (
           <group key={segment.id}>
             <Line points={points} color={active ? "#67a7ff" : "#35505f"} lineWidth={active ? 3 : 1.5} />
-            {rects.length > 0 ? (
-              <Line points={routePoints} color="#f0a35a" dashed dashSize={0.35} gapSize={0.25} lineWidth={1.5} />
-            ) : null}
+            {showRoute
+              ? spans.length > 0
+                ? spans.map((span, index) => {
+                    const style = REACH_STYLES[span.tier];
+                    if (span.points.length < 2) return null;
+                    return (
+                      <group key={`${segment.id}_r${index}`}>
+                        <Line
+                          points={span.points}
+                          color={style.color}
+                          lineWidth={style.width}
+                          dashed={style.dashed}
+                          dashSize={style.dashSize}
+                          gapSize={style.gapSize}
+                        />
+                        {span.tier !== 0 && decorate ? (
+                          <ReachBadge
+                            segment={segment}
+                            span={span}
+                            style={style}
+                            message={span.message}
+                          />
+                        ) : null}
+                      </group>
+                    );
+                  })
+                : // 退化为「没有地形判定」的情形（planar / 非 actor）：保持既有画法不变。
+                  (() => {
+                    const route = segmentRoutePoints(segment, rects);
+                    return (
+                      <Line
+                        points={route.map(
+                          (p) => [p.x, groundAt(p.x, p.z) + 0.13, p.z] as [number, number, number],
+                        )}
+                        color="#f0a35a"
+                        dashed
+                        dashSize={0.35}
+                        gapSize={0.25}
+                        lineWidth={1.5}
+                      />
+                    );
+                  })()
+              : null}
+            <ArcHitCross segment={segment} state={state} />
           </group>
         );
       })}
@@ -909,26 +1199,40 @@ function EndpointMarker({ segment, which }: { segment: MoveSegment; which: "star
   const z = which === "start" ? segment.startZ : segment.endZ;
   // 只订阅"这一个点的地面高度"这个数字：地形变化时才重渲染，不是每次 state 变动都重渲染。
   const groundY = useDirectorStore((s) => pathGroundAt(s.state, segment.object, x, z));
+  // 拖拽即时反馈（docs/3d/03 §6）：正在被拖的**这一个**端点，按可达性档位染色。
+  // 选择器返回数字而不是对象，引用比较天然稳定。
+  const tier = useDirectorStore((s) =>
+    s.dragReach && s.dragReach.segmentId === segment.id && s.dragReach.marker === which
+      ? s.dragReach.tier
+      : 0,
+  );
   // 与 hitEndpointScreen 用的是同一个 pathGroundAt + 同一个 LIFT，所以"亮起来的一定点得中"。
   const y = groundY + ENDPOINT_MARKER_LIFT;
-  const color = which === "start" ? "#67a7ff" : "#f0a35a";
+  const base = which === "start" ? "#67a7ff" : "#f0a35a";
   // 悬停色保持原有色相（端点没有「选中」态的白色语义，变白反而会和路径点混淆），只提亮、放大。
   const hoverColor = which === "start" ? "#a9cdff" : "#ffc79a";
+  // 档位色盖过悬停色：拖拽途中"这一次落位有问题"比"对准了"更值得看。
+  const tint = tier !== 0 ? REACH_STYLES[tier].color : null;
+  const color = tint ?? (hovered ? hoverColor : base);
 
   return (
     <group>
-      <mesh position={[x, y, z]} scale={hovered ? 1.35 : 1}>
+      <mesh position={[x, y, z]} scale={hovered || tier !== 0 ? 1.35 : 1}>
         <sphereGeometry args={[0.24, 20, 14]} />
         <meshStandardMaterial
-          color={hovered ? hoverColor : color}
-          emissive={color}
-          emissiveIntensity={hovered ? 1.1 : 0.4}
+          color={color}
+          emissive={tint ?? base}
+          emissiveIntensity={tier !== 0 ? 1.3 : hovered ? 1.1 : 0.4}
         />
       </mesh>
       <Html position={[x, y + 0.52, z]} center style={{ pointerEvents: "none" }} zIndexRange={[25, 0]}>
-        <span className="node-label" style={{ color: hovered ? hoverColor : color }}>
+        <span className="node-label" style={{ color }}>
           {which === "start" ? "START" : "END"}
-          {hovered ? " · 拖动移动" : ""}
+          {tier !== 0
+            ? ` · ${REACH_STYLES[tier].label}`
+            : hovered
+              ? " · 拖动移动"
+              : ""}
         </span>
       </Html>
     </group>
@@ -964,6 +1268,15 @@ function PointMarker({
     next ? pathGroundAt(s.state, segment.object, next.x, next.z) : 0,
   );
   const y = groundY + POINT_MARKER_LIFT;
+  // 拖拽即时反馈（docs/3d/03 §6）：正在被拖的**这一个**路径点按档位染色。
+  const tier = useDirectorStore((s) =>
+    s.dragReach && s.dragReach.segmentId === segment.id && s.dragReach.marker === point.id
+      ? s.dragReach.tier
+      : 0,
+  );
+  const tint = tier !== 0 ? REACH_STYLES[tier].color : null;
+  // 档位色盖过选中 / 悬停色，理由同 EndpointMarker。
+  const shape = tint ?? (isSelected ? "#ffffff" : hovered ? "#b9ffd6" : "#55d88a");
 
   return (
     <group>
@@ -999,20 +1312,21 @@ function PointMarker({
       <mesh
         rotation={[-Math.PI / 2, 0, 0]}
         position={[point.x, y, point.z]}
-        scale={hovered ? 1.35 : 1}
+        scale={hovered || tier !== 0 ? 1.35 : 1}
       >
         {isArc ? <ringGeometry args={[0.2, 0.34, 28]} /> : <circleGeometry args={[0.24, 26]} />}
-        <meshBasicMaterial
-          color={isSelected ? "#ffffff" : hovered ? "#b9ffd6" : "#55d88a"}
-          side={THREE.DoubleSide}
-        />
+        <meshBasicMaterial color={shape} side={THREE.DoubleSide} />
       </mesh>
 
-      {isSelected || hovered ? (
+      {isSelected || hovered || tier !== 0 ? (
         <Html position={[point.x, y + 0.33, point.z]} center style={{ pointerEvents: "none" }} zIndexRange={[25, 0]}>
-          <span className="node-label">
+          <span className="node-label" style={tint ? { color: tint } : undefined}>
             #{index + 1}
-            {hovered ? " · 拖动移动 · 点按出菜单" : ""}
+            {tier !== 0
+              ? ` · ${REACH_STYLES[tier].label}`
+              : hovered
+                ? " · 拖动移动 · 点按出菜单"
+                : ""}
           </span>
         </Html>
       ) : null}
@@ -1638,10 +1952,37 @@ function Interaction() {
     // 手势结束就熄灭「Shift 3D」提示。提前到 return 之前：没有拖拽时它本来就该是灭的，
     // 而 setTerrainGesture 在值没变时不写 store，所以这里的多余调用是零成本。
     store.setTerrainGesture(false);
+    // 可达性提示属于"拖拽途中"，手势一结束就该消失；
+    // 放下之后改由路径着色 / 徽标 / Inspector **持续**标红（docs/3d/03 §6）。
+    store.setDragReach(null);
     if (!dragRef.current) return;
     dragRef.current = null;
     store.setDragging(false);
     if (controls) controls.enabled = store.viewMode === "director" && !store.viewLocked;
+  };
+
+  /**
+   * 拖拽途中刷新可达性提示（docs/3d/03 §6）。
+   *
+   * **必须重新取一次 state**：参数里的 `store` 是这一帧开始时的快照，
+   * 拿它判定的话提示永远慢一帧 —— 已经拖进坑里了，字还写着"可走"。
+   *
+   * 只报告、不干预：这里不写任何几何、也不阻止落位。
+   */
+  const refreshReachHint = (drag: DragState) => {
+    const next = useDirectorStore.getState();
+    // 拖路径点 / 端点：只看那一条段（代价恒定）。
+    // 拖对象 / 高度手柄：那块 set 一动，所有 agent 的路都可能被改，只能全扫。
+    // planar 下 `segmentSpans` 会在算路线之前就返回空，扫描是零成本的。
+    next.setDragReach(
+      drag.kind === "point"
+        ? dragReachHint(next.state, drag.segmentId, drag.pointId)
+        : drag.kind === "endpoint"
+          ? dragReachHint(next.state, drag.segmentId, drag.which)
+          : drag.kind === "object" || drag.kind === "height"
+            ? dragReachHint(next.state, null, null)
+            : null,
+    );
   };
 
   /**
@@ -1662,6 +2003,34 @@ function Interaction() {
       kind: "height",
       id: object.id,
       startBaseY: objectBottom(object),
+      startClientY: event.nativeEvent.clientY,
+      worldPerPixel: depth / Math.max(focalPx, 1),
+    });
+    capturePointer(event);
+  };
+
+  /**
+   * 抓住弧顶把手：与 `grabHeight` 完全同构，只是改写的是 `arc.apex` 而不是 `baseY`。
+   *
+   * 顶点高度是**作者旋钮**（`schema.ts` 的 `VerticalArc` 注释），不是从物理反推的，
+   * 所以直接把它挂到手柄上是顺理成章的 —— 拖多少就是多少，系统只负责事后校验。
+   */
+  const grabApex = (
+    event: ThreeEvent<PointerEvent>,
+    segment: MoveSegment,
+    at: [number, number, number],
+    startApex: number,
+  ) => {
+    const perspective = camera as THREE.PerspectiveCamera;
+    const fov = perspective.fov || DIRECTOR_FOV;
+    const focalPx = size.height / (2 * Math.tan((fov * Math.PI) / 360));
+    const depth = perspective.position.distanceTo(
+      new THREE.Vector3(at[0], at[1], at[2]),
+    );
+    beginDrag({
+      kind: "apex",
+      segmentId: segment.id,
+      startApex,
       startClientY: event.nativeEvent.clientY,
       worldPerPixel: depth / Math.max(focalPx, 1),
     });
@@ -1926,6 +2295,17 @@ function Interaction() {
         drag.id,
       );
       store.updateAsset(drag.id, { baseY: Math.round(next * 1000) / 1000 });
+      // 抬高 / 压低一块 set 会改写所有压在它上面的路 —— 这正是"拖出个爬不上去的台阶"的瞬间。
+      refreshReachHint(drag);
+      return;
+    }
+
+    if (drag.kind === "apex") {
+      const dyPx = drag.startClientY - event.nativeEvent.clientY;
+      // 顶点不许为负（负的顶点 = 往地里跳），保留两位小数与 baseY 的写法一致。
+      const next = Math.max(0, Math.round((drag.startApex + dyPx * drag.worldPerPixel) * 100) / 100);
+      const seg = store.state.segments.find((item) => item.id === drag.segmentId);
+      if (seg?.arc) store.setSegmentArc(drag.segmentId, { ...seg.arc, apex: next });
       return;
     }
 
@@ -2007,6 +2387,9 @@ function Interaction() {
       drag.current = point;
       setGhost(point);
     }
+    // 可达性即时反馈：几何已经写进 store 了，这里按**新**状态重判一次。
+    // 只报告，绝不阻止上面的落位（docs/3d/03 §6）。
+    refreshReachHint(drag);
   };
 
   return (
@@ -2026,6 +2409,7 @@ function Interaction() {
       <gridHelper args={[40, 40, "#2f3d57", "#182132"]} position={[0, 0.01, 0]} />
 
       {heightTarget ? <HeightHandle object={heightTarget} onGrab={grabHeight} /> : null}
+      <ArcPreviewLayer onGrabApex={grabApex} />
 
       {ghost ? (
         <group>
@@ -2266,6 +2650,7 @@ function WorldScene() {
       <Interaction />
       <SegmentPaths />
       <PathHandles />
+      <DragReachTip />
       <HandoffMarkers />
       <FollowLinks />
       <Actors />
@@ -2543,6 +2928,9 @@ export function WorldView() {
     return segment && segment.object === s.selectedId ? marker : null;
   });
   const dragging = useDirectorStore((s) => s.dragging);
+  // 只有「不可达」才值得变红：需跳跃 / 需攀爬 / 有落差都是"能过，只是要处理"，
+  // 不值得拿红色去喊。红色留给真正过不去的。
+  const dragReachBlocked = useDirectorStore((s) => s.dragReach?.tier === 3);
   const togglePathDraw = useDirectorStore((s) => s.togglePathDraw);
   const addAsset = useDirectorStore((s) => s.addAsset);
   const addCamera = useDirectorStore((s) => s.addCamera);
@@ -2754,7 +3142,11 @@ export function WorldView() {
       <div
         className={`canvasWrap${pathDrawMode ? " is-drawing" : ""}${
           hoverMarker ? " is-handle" : ""
-        }${hoverMarker && dragging ? " is-handle-drag" : ""}`}
+        }${hoverMarker && dragging ? " is-handle-drag" : ""}${
+          // 拖到了不可达的位置：光标变红 + 画布压一圈红边（docs/3d/03 §6）。
+          // 只是**报告**，落位本身照旧被允许 —— 所以不用 not-allowed 那类"禁止"光标。
+          dragReachBlocked ? " is-blocked" : ""
+        }`}
         onDragOver={(event) => {
           event.preventDefault();
           event.dataTransfer.dropEffect = "copy";

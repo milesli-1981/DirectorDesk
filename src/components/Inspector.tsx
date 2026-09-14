@@ -40,8 +40,16 @@ import { CAMERA_CHANNELS, CameraChannel } from "../engine/ease";
 import { axisSide, cameraAxis } from "../engine/axis";
 import { waypointKeyframes } from "../engine/path";
 import { locomotionOf } from "../engine/locomotion";
-import { supportUnder } from "../engine/ground";
-import { checkJumpArc, classifyGap, type GapKind } from "../engine/jump";
+import { objectBottom, objectTop, supportUnder } from "../engine/ground";
+import { checkJumpArc, classifyGap, speedScale, type GapKind } from "../engine/jump";
+import {
+  previewArc,
+  REACH_STYLES,
+  scanReachability,
+  segmentSpans,
+  takeoffSpeedRatio,
+} from "../engine/reach";
+import { RUN_SPEED } from "../engine/locomotion";
 import { LockBadge } from "./LockBadge";
 
 /** 高差分档的中文标签（与 engine/jump.ts 的 GapKind 一一对应）。 */
@@ -496,6 +504,8 @@ export function Inspector() {
   const setCameraMoveEase = useDirectorStore((s) => s.setCameraMoveEase);
   const setSegmentSpeedKeys = useDirectorStore((s) => s.setSegmentSpeedKeys);
   const setSegmentArc = useDirectorStore((s) => s.setSegmentArc);
+  const addPathPoint = useDirectorStore((s) => s.addPathPoint);
+  const selectItem = useDirectorStore((s) => s.selectItem);
   const setCameraMoveSpeedKeys = useDirectorStore((s) => s.setCameraMoveSpeedKeys);
   const setHandoffMode = useDirectorStore((s) => s.setHandoffMode);
   const setCameraJunctionMode = useDirectorStore((s) => s.setCameraJunctionMode);
@@ -595,6 +605,9 @@ export function Inspector() {
       state.handoffs.find((h) => h.nextSeg === segment.id)
     : undefined;
 
+  // 全局体检面板是否展开。展开才扫描（见 `health` 的注释）。
+  const [healthOpen, setHealthOpen] = useState(false);
+
   // 自定义动作弹窗：新建（空）/ 编辑（带已有记录）。由 Kind 下拉的「自定义」选项驱动。
   const [customize, setCustomize] = useState<{ mode: "create" } | { mode: "edit"; id: string } | null>(
     null,
@@ -647,11 +660,27 @@ export function Inspector() {
     const kind = classifyGap(dh, loco);
     const arc = segment.arc;
     let check: ReturnType<typeof checkJumpArc> | null = null;
+    // 起跳瞬时速度（docs/3d/02 §13 的接线）：站着起跳只能跳到一半远，
+    // 所以这个比值会同时缩放有效跳远，并决定要不要报"没有助跑"。
+    const speedRatio = takeoffSpeedRatio(state, segment);
     if (arc && arc.mode === "parabola") {
-      check = checkJumpArc({ dh, dx, apex: arc.apex ?? Math.max(dh, 0), loco });
+      check = checkJumpArc({ dh, dx, apex: arc.apex ?? Math.max(dh, 0), loco, speedRatio });
     }
-    return { owner, loco, dh, dx, kind, arc, check, y0, y1 };
+    return { owner, loco, dh, dx, kind, arc, check, y0, y1, speedRatio };
   }, [segment, state]);
+
+  /**
+   * 可达性（Phase 5）：与画布上的分段着色**共用** `segmentSpans`，
+   * 于是面板里说的档位就是线上画的那一档 —— 不会出现"面板说可走、线却是红的"。
+   */
+  const reachSpans = useMemo(
+    () => (segment ? segmentSpans(state, segment).filter((span) => span.tier !== 0) : []),
+    [segment, state],
+  );
+  const reachLoco = arcInfo?.loco ?? null;
+  // 全局体检（§9）：长场景里导演不可能一段段点开看有没有标红，所以做成一次扫描。
+  // 只在展开时才算 —— 扫描会遍历全场景所有段，没必要在每次选中时都跑。
+  const health = useMemo(() => (healthOpen ? scanReachability(state) : []), [healthOpen, state]);
 
   // 用显示名（改名后即时联动），未命名的资产回退到 id。
   const title = camera
@@ -1119,6 +1148,7 @@ export function Inspector() {
                     dx: arcInfo.dx,
                     apex: Math.max(arcInfo.dh, Math.min(arcInfo.loco.maxJumpHeight, arcInfo.dh + 0.3)),
                     loco: arcInfo.loco,
+                    speedRatio: arcInfo.speedRatio,
                   });
                   setSegmentArc(segment.id, { mode: "parabola", apex: corrected.apex });
                 }
@@ -1175,12 +1205,172 @@ export function Inspector() {
               {arcInfo.check.issues.map((i) => i.message).join("；")}
             </p>
           ) : null}
+          {/* 助跑（docs/3d/02 §5）：把"起跳瞬时速度"这个原本看不见的数摆出来 ——
+              它既缩放有效跳远，也是"想跳更远就在前面留一段助跑"这个手法的抓手。 */}
+          {arcInfo.arc || arcInfo.kind === "jump" ? (
+            <p className="hint">
+              起跳瞬时速度 <b>{(arcInfo.speedRatio * 100).toFixed(0)}%</b> 跑步速度
+              （{(arcInfo.speedRatio * RUN_SPEED).toFixed(2)} m/s） → 有效跳远按{" "}
+              <b>{(speedScale(arcInfo.speedRatio) * 100).toFixed(0)}%</b> 计。
+            </p>
+          ) : null}
           {arcInfo.check?.needsRunup ? (
             <p className="hint" style={{ color: "var(--warn, #f0a35a)" }}>
-              ⚠ 起跳前没有助跑 —— 站着跳只能跳到一半远。建议在跳跃前留一段助跑。
+              ⚠ 起跳前没有助跑 —— 站着跳只能跳到一半远（现在只有{" "}
+              {(arcInfo.speedRatio * 100).toFixed(0)}% 速度）。建议在跳跃前留一段助跑，
+              或把这一段的速度曲线开头改成近线性。
             </p>
           ) : null}
           <JumpEnvelope loco={arcInfo.loco} dh={arcInfo.dh} dx={arcInfo.dx} />
+        </div>
+      ) : null}
+
+      {/* 可达性（Phase 5）—— 逐处列出问题 + 一键修复。
+          判定来自 `engine/reach.ts`，与画布上的分段着色同源。 */}
+      {segment && reachSpans.length > 0 && reachLoco ? (
+        <div className="field">
+          <div className="lab">可达性 · {reachSpans.length} 处需要处理</div>
+          {reachSpans.map((span, index) => {
+            const style = REACH_STYLES[span.tier];
+            const loco = reachLoco;
+            const blocker = span.blockerId
+              ? state.objects.find((o) => o.id === span.blockerId)
+              : undefined;
+            const climbable =
+              span.dh > 0 && loco.maxClimbHeight > 0 && span.dh <= loco.maxClimbHeight + 1e-6;
+            // 降低落差：把挡路那块的高度降到"跳得过去"为止（保留它作为障碍的存在感）。
+            const lowerH = blocker
+              ? Math.max(0.1, Math.round((span.fromY + loco.maxJumpHeight - objectBottom(blocker)) * 100) / 100)
+              : 0;
+            const lowerHint = blocker
+              ? `把「${objectDisplayName(blocker)}」从 ${objectTop(blocker).toFixed(2)}m 降到 ${lowerH.toFixed(2)}m 或以下`
+              : "";
+            return (
+              <div key={`${segment.id}_${index}`} className="reach-row">
+                <div className="reach-head" style={{ color: style.color }}>
+                  <span className="reach-glyph">{style.glyph}</span>
+                  {style.label}
+                  <span className="mono">
+                    {span.dh >= 0 ? "+" : "−"}
+                    {Math.abs(span.dh).toFixed(2)}m · 跨度 {span.dx.toFixed(2)}m
+                  </span>
+                </div>
+                <p className="hint">{span.message}</p>
+                <div className="row">
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={() => {
+                      const arc = previewArc(span.kind, span.dh, loco);
+                      if (arc) setSegmentArc(segment.id, arc);
+                    }}
+                  >
+                    ⤴ 生成弧线
+                  </button>
+                  {climbable ? (
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      onClick={() => setSegmentArc(segment.id, { mode: "climb" })}
+                    >
+                      🧗 改为攀爬
+                    </button>
+                  ) : null}
+                  {blocker ? (
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      title={lowerHint}
+                      onClick={() =>
+                        updateAsset(blocker.id, { footprint: { ...blocker.footprint, h: lowerH } })
+                      }
+                    >
+                      ⬇ 降低落差
+                    </button>
+                  ) : null}
+                  {blocker ? (
+                    <button
+                      type="button"
+                      className={`ghost-button${blocker.prefer === "walk-around" ? " on" : ""}`}
+                      title={
+                        blocker.prefer === "walk-around"
+                          ? `「${objectDisplayName(blocker)}」当前强制绕行，点此恢复`
+                          : `给「${objectDisplayName(blocker)}」打上绕行标记，路线会重新绕开它`
+                      }
+                      onClick={() =>
+                        updateAsset(blocker.id, {
+                          prefer: blocker.prefer === "walk-around" ? "auto" : "walk-around",
+                        })
+                      }
+                    >
+                      {blocker.prefer === "walk-around" ? "↩ 取消绕行" : "↷ 改为绕行"}
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    title="在这一处加一个路点，可以把它拖到别处绕过去"
+                    onClick={() => addPathPoint(segment.id, span.mid[0], span.mid[2])}
+                  >
+                    ＋ 加落脚点
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+
+      {/* 全局可达性体检（docs/3d/03 §9）：一次扫全场景，点条目直达。 */}
+      {showInspector ? (
+        <div className="field">
+          <div className="lab">全局体检</div>
+          <button
+            type="button"
+            className={`ghost-button${healthOpen ? " on" : ""}`}
+            onClick={() => setHealthOpen((v) => !v)}
+          >
+            {healthOpen
+              ? `收起 · ${health.length} 处`
+              : "🔍 扫描全场景可达性"}
+          </button>
+          {healthOpen ? (
+            health.length === 0 ? (
+              <p className="hint">全部可走 —— 没有跳跃 / 攀爬 / 不可达的地方。</p>
+            ) : (
+              <>
+                <p className="hint">
+                  {[1, 2, 3, 6]
+                    .map((tier) => {
+                      const n = health.filter((f) => f.tier === tier).length;
+                      return n > 0 ? `${n} 处${REACH_STYLES[tier as 1 | 2 | 3 | 6].label}` : "";
+                    })
+                    .filter(Boolean)
+                    .join(" · ")}
+                </p>
+                {health.map((finding) => {
+                  const style = REACH_STYLES[finding.tier];
+                  return (
+                    <button
+                      key={`${finding.segmentId}_${finding.index}`}
+                      type="button"
+                      className="health-row"
+                      onClick={() => selectItem(finding.segmentId)}
+                    >
+                      <span style={{ color: style.color }}>
+                        {style.glyph} {style.label}
+                      </span>
+                      <span className="mono">
+                        {objectDisplayName({ id: finding.objectId, name: finding.objectName })} ·{" "}
+                        {finding.timeStart.toFixed(1)}s
+                      </span>
+                      <span className="hint">{finding.message}</span>
+                    </button>
+                  );
+                })}
+              </>
+            )
+          ) : null}
         </div>
       ) : null}
 

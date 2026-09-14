@@ -40,6 +40,7 @@ import { ASSET_PRESETS } from "../engine/assetPresets";
 import { placeObject } from "../engine/place";
 import { settleStack, stackChain } from "../engine/stack";
 import { arraySlots, ArraySpec } from "../engine/array";
+import { DragReachHint } from "../engine/reach";
 import { JUMP_EASE } from "../engine/arc";
 import { ANIMAL_MODELS, DEFAULT_ANIMAL_SPECIES } from "../engine/animalModels";
 import {
@@ -313,6 +314,15 @@ interface DirectorStore {
    * 之所以不进 `state`：它是手势的瞬时状态，不该被存盘、也不该进 undo 历史。
    */
   terrainGesture: boolean;
+  /**
+   * 拖拽途中的可达性即时反馈（docs/3d/03 §6）。
+   *
+   * 纯 UI 状态：不进 `state`、不进 undo 历史（与 `hoverMarker` 同样的理由）。
+   * 之所以挂在 store 而不是画布组件内部：判定的**输入**在 `Interaction`（它知道
+   * 拖的是哪个把手），而**消费方**在 `PathHandles` / tooltip / 外层光标 ——
+   * 跨组件共享一次判定，比让三处各算一遍可靠得多（这正是 `reach.ts` 存在的理由）。
+   */
+  dragReach: DragReachHint | null;
 
   setTime: (time: number) => void;
   setPlaying: (playing: boolean) => void;
@@ -327,6 +337,8 @@ interface DirectorStore {
   setDragging: (dragging: boolean) => void;
   /** 设置「本次手势按住 Shift」提示状态。只在值变化时写入，避免拖拽途中刷爆 store。 */
   setTerrainGesture: (on: boolean) => void;
+  /** 更新拖拽可达性提示。拖拽结束传 null。 */
+  setDragReach: (hint: DragReachHint | null) => void;
 
   selectObject: (objectId: string) => void;
   selectCamera: (cameraId: string) => void;
@@ -868,6 +880,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
     pathDrawMode: false,
     dragging: false,
     terrainGesture: false,
+    dragReach: null,
 
     // 播放需要连续时间，不能在这里做 0.1s 量化。
     setTime: (time) =>
@@ -906,6 +919,8 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
 
     setTerrainGesture: (on) =>
       set((store) => (store.terrainGesture === on ? {} : { terrainGesture: on })),
+
+    setDragReach: (hint) => set({ dragReach: hint }),
 
     selectObject: (objectId) =>
       set((store) => ({

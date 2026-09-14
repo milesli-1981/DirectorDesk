@@ -157,6 +157,14 @@ export interface DirectorObject {
   topShape?: TopShape;
   /** 是否可站上去。默认 true（由 maxStep 与坡度推导）。水面 / 沼泽设 false。 */
   walkable?: boolean;
+  /**
+   * 遇障时的**作者意图**：默认（`"auto"`）按能力表决定 —— 迈得上就迈、跳得过就跳
+   * （见 docs/3d/04 §3：画了一条直线说明作者想走直线，绕行才是系统自作主张）。
+   *
+   * 设为 `"walk-around"` 即强制绕行：一片刺丛、一个水坑，你不会想让人跳进去。
+   * 这是可达性 UI 里「改为绕行」一键修复写下的那个字段（docs/3d/03 §5 / 04 §12）。
+   */
+  prefer?: "auto" | "walk-around";
   /** 是否水平阻挡。默认 true。栅栏 / 草丛可设 false。 */
   blocking?: boolean;
   /** 是否遮挡相机视线。默认 true。玻璃可设 false —— 它与 blocking 是独立的语义。 */

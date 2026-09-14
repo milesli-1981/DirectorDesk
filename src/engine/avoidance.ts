@@ -106,14 +106,27 @@ function standingTopAt(state: DirectorState, x: number, z: number): number {
  * | 条件 | 判定 | 理由 |
  * |---|---|---|
  * | `blocking === false` | 排除 | 语义开关（草丛、水面） |
+ * | `prefer === "walk-around"` | **全部保留** | 作者显式要求绕行（docs/3d/04 §3 的逃生口） |
  * | `top ≤ fromY + maxStep` | 排除 | 直接迈上去，不构成水平阻挡 |
+ * | `top ≤ fromY + maxJumpHeight` 且跨度在包络内 | 排除 | 跳过去（默认走直线是导演意图） |
  * | `bottom ≥ fromY + 身高 + 净空` | 排除 | 可从下方穿行（桥 / 雨棚 / 拱洞） |
  * | `topShape === "ramp"` 且坡度 > `maxSlopeDeg` | **保留** | 太陡 → 等同墙 |
  * | 其他 | 保留 | 真阻挡 |
  *
- * 注意**没有"跳过去"这一条**：`maxJumpHeight` / 跳跃包络属 Phase 4。
- * 现在把"跳得过"的障碍剔掉会让路径直穿过去、而人又还不会跳 —— 那是穿模。
- * 等 Phase 4 落地跳跃弧线后在这里加一行即可（这正是"只改集合"设计的收益）。
+ * ## "跳过去"这一条为什么现在才有
+ *
+ * 注释原本写着"等 Phase 4 落地跳跃弧线后在这里加一行即可" —— Phase 4 的弧线已经落地，
+ * 于是这一步到站了。它也是 Phase 5 可达性 UI 的**前提**：不把跳得过的障碍剔掉，
+ * 路径永远绕开它们，`segmentSpans` 就永远报不出"需跳跃 / 需攀爬"，UI 成了死代码。
+ *
+ * 代价是作者不补弧线时会**穿模**。这是刻意的：与"拖拽不硬阻止"同一条原则
+ * （docs/3d/03 §6）—— 系统负责**持续标红**并给出一键修复，不替作者偷偷改路线。
+ *
+ * ## planar 不变性（自动满足，不是特判）
+ *
+ * planar 的能力表里 `maxStep = maxJumpHeight = 0`，两条排除条件都退化成 `top ≤ 0`；
+ * 现实中不存在高度为 0 的 set（预设最小 0.3），所以 **planar 下仍恒等于 `setRects`**。
+ * §17 把这个恒等式钉成了回归守卫。
  *
  * @param fromY 出发点高度。务必来自 `routeHeightFor`（时间无关），否则缓存会退化。
  */
@@ -132,11 +145,23 @@ export function blockingRects(
 /** 该对象是否"拦不住"出发点在 `fromY` 的主体。 */
 function isPassable(o: DirectorObject, fromY: number, loco: Locomotion): boolean {
   if (o.blocking === false) return true; // 语义开关：草丛 / 水面
+  // 作者显式要求绕行 → 任何"迈得上 / 跳得过 / 穿得下"的豁免一律作废。
+  if (o.prefer === "walk-around") return false;
   const bottom = objectBottom(o);
   const top = objectTop(o);
   // ① 迈得上去（台阶 / 矮箱）。太陡的坡不享受这个豁免 —— 它等同墙。
   const tooSteep = o.topShape === "ramp" && slopeDegOf(o) > loco.maxSlopeDeg;
   if (!tooSteep && top <= fromY + loco.maxStep + 1e-6) return true;
+  // ①′ 跳得过去：高度在跳跃能力内，且整个 footprint 的**对角线**在跳远能力内。
+  //     用对角线是**保守方向** —— 沿任意方向跨过它都不会超过包络。
+  if (
+    !tooSteep &&
+    loco.maxJumpHeight > 0 &&
+    top <= fromY + loco.maxJumpHeight + 1e-6 &&
+    Math.hypot(o.footprint.w, o.footprint.d) <= loco.maxJumpReach + 1e-6
+  ) {
+    return true;
+  }
   // ② 从下方穿行（桥 / 雨棚）：整个身高 + 净空都在底面之下。
   if (bottom >= fromY + loco.height + HEAD_CLEARANCE) return true;
   return false;
