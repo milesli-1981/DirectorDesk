@@ -40,7 +40,14 @@ import { CAMERA_CHANNELS, CameraChannel } from "../engine/ease";
 import { axisSide, cameraAxis } from "../engine/axis";
 import { waypointKeyframes } from "../engine/path";
 import { locomotionOf } from "../engine/locomotion";
-import { objectBottom, objectTop, supportUnder } from "../engine/ground";
+import { objectBottom, objectTop, stairHeightFromPlanes, supportUnder } from "../engine/ground";
+import {
+  helixStairPath,
+  stairBounds,
+  stairPathOf,
+  stairRunLength,
+  stairSlopeDeg,
+} from "../engine/stair";
 import { checkJumpArc, classifyGap, speedScale, type GapKind } from "../engine/jump";
 import {
   previewArc,
@@ -372,7 +379,7 @@ function ArrayPanel({ object }: { object: DirectorObject }) {
     >
       <div className="mini-btns">
         {(ARRAY_KINDS.map((item) => {
-          const disabled = item.k === "stair" && !isTerrain;
+          const disabled = false;
           return (
             <button
               key={item.k}
@@ -469,10 +476,17 @@ function ArrayPanel({ object }: { object: DirectorObject }) {
   );
 }
 
+/**
+ * 阵列的排布方式。
+ *
+ * **刻意不提供「台阶」**：那是抽象楼梯（`topShape: "stair"`）出现之前的旧做法 ——
+ * 一摞离散盒子必然带来三个毛病（每级一次 y 突变、得逐块标 `blocking: false`、不能拐弯，
+ * 见 docs/3d/00 §9.15）。要做台阶请把顶面形状改成「抽象楼梯」，再用手绘 / 螺旋给路径。
+ * 引擎侧 `array.ts` 仍保留 `stair` 分支（老场景可能存过这个 kind），但 UI 不再给入口。
+ */
 const ARRAY_KINDS: { k: ArrayKind; label: string; hint: string }[] = [
   { k: "line", label: "直线", hint: "沿一条直线依次排开（立柱、树、椅子）" },
   { k: "grid", label: "网格", hint: "矩形阵列 行×列（停车场、观众席）" },
-  { k: "stair", label: "台阶", hint: "逐级抬高的台阶（terrain 专属，抬高量是作者显式意图）" },
   { k: "ring", label: "环绕", hint: "等角度绕一圈（围坐、环列）" },
 ];
 
@@ -607,6 +621,11 @@ export function Inspector() {
 
   // 全局体检面板是否展开。展开才扫描（见 `health` 的注释）。
   const [healthOpen, setHealthOpen] = useState(false);
+
+  // 抽象楼梯「螺旋路径」生成器的参数。放在这里（而不是那段 JSX 里）是因为 hook
+  // 不能写在条件分支里 —— 楼梯面板只对 `topShape === "stair"` 的对象渲染。
+  const [helixRadius, setHelixRadius] = useState(2.5);
+  const [helixTurns, setHelixTurns] = useState(1);
 
   // 自定义动作弹窗：新建（空）/ 编辑（带已有记录）。由 Kind 下拉的「自定义」选项驱动。
   const [customize, setCustomize] = useState<{ mode: "create" } | { mode: "edit"; id: string } | null>(
@@ -930,6 +949,197 @@ export function Inspector() {
                 }
               />
             ))}
+          </SubGroup>
+          {/* 顶面形状：平顶 / 斜坡 / **抽象楼梯**（一个整体，路线用**路径**表达）。
+              楼梯的物理是连续折线坡面，踏步只用于渲染 —— 所以它既不会"一级一跳"，
+              也不需要作者逐块标 blocking:false（见 engine/stair.ts 开头的说明）。 */}
+          <SubGroup
+            title="顶面形状"
+            hint="平顶 = 盒子；斜坡沿 D 向抬升；抽象楼梯 = 一条路径（转角即拐弯，转角处自动铺方形休息平台）。"
+          >
+            <Field label="Shape">
+              <select
+                value={object.topShape ?? "flat"}
+                onChange={(event) => {
+                  const shape = event.target.value as "flat" | "ramp" | "stair";
+                  updateAsset(object.id, {
+                    topShape: shape,
+                    // 切成楼梯时把"一段直跑"落成**真实路径点**：之后拖点即塑形；
+                    // `D` 只是初始进深（路径一旦存在，它就是唯一权威）。
+                    ...(shape === "stair" && !object.stair?.path
+                      ? {
+                          stair: {
+                            path: stairPathOf(object).map((p) => ({
+                              id: `SP_${Date.now().toString(36)}_${Math.floor(Math.random() * 1000)}`,
+                              x: p.x,
+                              z: p.z,
+                            })),
+                          },
+                        }
+                      : {}),
+                  });
+                }}
+              >
+                <option value="flat">平顶 Flat</option>
+                <option value="ramp">斜坡 Ramp</option>
+                <option value="stair">抽象楼梯 Stair</option>
+              </select>
+            </Field>
+            {object.topShape === "stair"
+              ? (() => {
+                  const path = object.stair?.path ?? [];
+                  const newId = () =>
+                    `SP_${Date.now().toString(36)}_${Math.floor(Math.random() * 1000)}`;
+                  const patchPath = (next: Array<{ id: string; x: number; z: number }>) =>
+                    updateAsset(object.id, { stair: { path: next } });
+                  const bounds = stairBounds(object);
+                  const runLen = stairRunLength(object);
+                  const slope = stairSlopeDeg(object);
+                  const planeH = stairHeightFromPlanes(state, object);
+                  return (
+                    <>
+                      <p className="hint">
+                        楼梯 = **路径 + 高度**（始终是对象列表里的**一个对象**）。
+                        路径来源：不画 = **一段直跑**（长度取 D）；或打开工具栏 **✏️ Path**
+                        在画布上**按住拖手绘**（转角即拐弯）；或按下面**螺旋**生成 ——
+                        生成后都能**拖蓝点**微调。高度可手填 H，也可**取两端平面高差**。
+                        坡度永远是派生量（拉长路径就变缓），转角处自动铺方形休息平台。
+                      </p>
+                      <div className="mini-btns">
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          title="沿最后一个方向再延一段（路径变长 ⇒ 坡度变缓）"
+                          onClick={() => {
+                            const last = path[path.length - 1];
+                            const prev = path[path.length - 2];
+                            const dx = last && prev ? last.x - prev.x : 0;
+                            const dz = last && prev ? last.z - prev.z : 1;
+                            const len = Math.hypot(dx, dz) || 1;
+                            patchPath([
+                              ...path,
+                              {
+                                id: newId(),
+                                x: last.x + (dx / len) * 2,
+                                z: last.z + (dz / len) * 2,
+                              },
+                            ]);
+                          }}
+                        >
+                          ＋ 延长
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          title="在最长的边上插一个中点；再把它拖开就是拐弯"
+                          onClick={() => {
+                            let at = 1;
+                            let best = -1;
+                            for (let i = 1; i < path.length; i += 1) {
+                              const l = Math.hypot(
+                                path[i].x - path[i - 1].x,
+                                path[i].z - path[i - 1].z,
+                              );
+                              if (l > best) {
+                                best = l;
+                                at = i;
+                              }
+                            }
+                            if (!path[at] || !path[at - 1]) return;
+                            const a = path[at - 1];
+                            const b = path[at];
+                            patchPath([
+                              ...path.slice(0, at),
+                              { id: newId(), x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 },
+                              ...path.slice(at),
+                            ]);
+                          }}
+                        >
+                          ＋ 中间插点
+                        </button>
+                      </div>
+                      {path.map((p, i) => (
+                        <div key={p.id} className="mini-btns">
+                          <span className="node-label">#{i + 1}</span>
+                          {(["x", "z"] as const).map((axis) => (
+                            <input
+                              key={axis}
+                              type="number"
+                              step={0.5}
+                              className="pt-num"
+                              title={axis.toUpperCase()}
+                              value={Number(p[axis].toFixed(2))}
+                              onChange={(event) =>
+                                patchPath(
+                                  path.map((q, k) =>
+                                    k === i ? { ...q, [axis]: Number(event.target.value) } : q,
+                                  ),
+                                )
+                              }
+                            />
+                          ))}
+                          {path.length > 2 ? (
+                            <button
+                              type="button"
+                              className="ghost-button"
+                              onClick={() => patchPath(path.filter((_, k) => k !== i))}
+                            >
+                              删除
+                            </button>
+                          ) : null}
+                        </div>
+                      ))}
+                      <div className="mini-btns">
+                        <span className="node-label">螺旋</span>
+                        <input
+                          type="number"
+                          step={0.5}
+                          className="pt-num"
+                          title="螺旋半径（米）"
+                          value={helixRadius}
+                          onChange={(event) => setHelixRadius(Number(event.target.value))}
+                        />
+                        <input
+                          type="number"
+                          step={0.25}
+                          className="pt-num"
+                          title="圈数"
+                          value={helixTurns}
+                          onChange={(event) => setHelixTurns(Number(event.target.value))}
+                        />
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          title="按半径与圈数生成一条圆路径（生成后就是普通路径，可继续拖点）"
+                          onClick={() => patchPath(helixStairPath(object, helixRadius, helixTurns))}
+                        >
+                          生成螺旋路径
+                        </button>
+                      </div>
+                      <div className="mini-btns">
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          title="把总高设成『终点处支撑面顶面 − 起点处支撑面顶面』——连接有高低差的两层"
+                          onClick={() =>
+                            updateAsset(object.id, {
+                              footprint: { ...object.footprint, h: Math.max(0.1, planeH) },
+                            })
+                          }
+                        >
+                          H ← 取两端平面高差（当前 {planeH.toFixed(2)}m）
+                        </button>
+                      </div>
+                      <p className="hint">
+                        宽 {object.footprint.w.toFixed(1)}m × 总高 {object.footprint.h.toFixed(1)}m、
+                        路径水平长 {runLen.toFixed(2)}m ⇒ 坡度 {slope.toFixed(1)}°；
+                        占地 {(bounds.maxX - bounds.minX).toFixed(1)} ×{" "}
+                        {(bounds.maxZ - bounds.minZ).toFixed(1)} m
+                      </p>
+                    </>
+                  );
+                })()
+              : null}
           </SubGroup>
           {/* 阵列（Phase 8）：按排布规格批量复制当前对象。落在 Block 尺寸之后 ——
               先定单个盒子的尺寸，再决定复制多少份，是自然的编辑顺序。 */}
@@ -1693,6 +1903,18 @@ export function Inspector() {
               <p className="hint">
                 跟随阻尼：相机对目标瞬变（转向 / 绕障让位 / 扭动）的响应滞后一点；瞬变若很快消失则被忽略。0 = 完全跟手，越大越「拖」。可在单个运镜段覆盖。
               </p>
+              <Field label="自动对焦 Auto Focus">
+                <button
+                  type="button"
+                  className={`toggle${camera.autoFocus !== false ? " on" : ""}`}
+                  title="无意图主体时（自由 PATH 的固定方向 / 沿轨迹等）自动对焦到画面内最靠近构图中心的演员；关掉则沿用镜头 target。"
+                  onClick={() =>
+                    updateCamera(camera.id, { autoFocus: camera.autoFocus === false })
+                  }
+                >
+                  {camera.autoFocus !== false ? "自动对焦" : "锁定对焦目标"}
+                </button>
+              </Field>
               <Field label="跟跳时相机随高度跟随 Follow Jump">
                 <button
                   type="button"
@@ -2236,7 +2458,14 @@ export function Inspector() {
                               {group === "motion" ? "运动 Motion" : "镜头 Lens"}
                             </div>
                             {CAMERA_CHANNELS.filter(
-                              (channel) => KEY_CHANNEL_META[channel].group === group,
+                              (channel) =>
+                                KEY_CHANNEL_META[channel].group === group &&
+                                // PATH 不走 placeCamera 通道体系：只保留与轨迹无关的通道（焦距 / 荷兰角 / 平面摇 / 俯仰）。
+                                (move.type !== "PATH" ||
+                                  channel === "lensMm" ||
+                                  channel === "roll" ||
+                                  channel === "panDeg" ||
+                                  channel === "tiltDeg"),
                             ).map((channel) => {
                               const meta = KEY_CHANNEL_META[channel];
                               const value = activeKey[channel];

@@ -10,10 +10,32 @@ import {
   SpeedKey,
   TimelineItem,
 } from "../domain/schema";
-import { buildTimelineItems, itemRange, rawContentEnd } from "../engine/timeline";
+import {
+  buildTimelineItems,
+  ContentEndKind,
+  contentEndCause,
+  itemRange,
+} from "../engine/timeline";
 import { CAMERA_CHANNELS, curveVal, normalizeEase } from "../engine/ease";
 import { flightProfileOf } from "../engine/stance";
 import { waypointKeyframes } from "../engine/path";
+
+/** 「内容到 Xs」提示里那一类的说法（与 `ContentEndKind` 一一对应）。 */
+const CONTENT_KIND_LABEL: Record<ContentEndKind, string> = {
+  segment: "路段",
+  constraint: "约束",
+  camera: "镜头",
+  action: "动作",
+};
+
+/**
+ * 拖动被"片长"这堵墙挡住时的那句话。数字带上、出路给全 —— 因为 `clamp` 本身不吭声，
+ * 停在墙上的手感与"卡住 / 拖不动"完全一样。
+ */
+const overDurationHint = (duration: number) =>
+  `片段不能超出片长 ${duration}s：往左拖，或先把片长调大（超出部分不参与播放 / 导出）`;
+/** 起点撞到 0s 时的同款提示。 */
+const BEFORE_ZERO_HINT = "片段起点不能早于 0s";
 
 const MAX_PX_PER_SEC = 100;
 const MIN_PX_PER_SEC = 12;
@@ -221,7 +243,10 @@ export function Timeline() {
 
   const items = useMemo(() => buildTimelineItems(state), [state]);
   // 内容排到片长之外时给出提示：这些片段不参与播放 / 导出，但没有被删除。
-  const contentEnd = useMemo(() => rawContentEnd(state), [state]);
+  // 同时取回"**是谁**顶在内容末尾" —— 这四类（路段 / 约束 / 镜头 / 动作）不一定都在视野里，
+  // 只报一个数字的话，作者会遇到"说内容到 12s，可画面上没有东西到 12s"而无从下手。
+  const content = useMemo(() => contentEndCause(state), [state]);
+  const contentEnd = content.end;
   const overflow = contentEnd > state.duration + 1e-6;
   // 点警告时把片长对齐到内容末尾：向上取到 0.1（duration 的存储精度），确保严格盖住内容。
   const alignEnd = Math.ceil((contentEnd - 1e-6) * 10) / 10;
@@ -292,6 +317,13 @@ export function Timeline() {
   } | null>(null);
   const [dragRowId, setDragRowId] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  /**
+   * 拖动被「片段不能超出片长」/「不能早于 0s」夹住时的一句话。
+   *
+   * 夹取本身是**故意**的（片长之外的部分不参与播放 / 导出），但静默地停住会被读成
+   * "拖不动 / 卡住了" —— 这是纯靠手感才能发现的失败。碰到墙就把原因和出路写在时间轴上。
+   */
+  const [clampHint, setClampHint] = useState<string | null>(null);
   // 相机行双击改名（name 可改、id 不变）。
   const [camEditingId, setCamEditingId] = useState<string | null>(null);
   const [camDraft, setCamDraft] = useState("");
@@ -348,6 +380,22 @@ export function Timeline() {
     setTime((event.clientX - rect.left + element.scrollLeft - LABEL_WIDTH) / pxPerSec);
   };
 
+  /**
+   * 顶在内容末尾的那一条，到底是什么、在哪儿 —— 点 ⚠ 提示就带你去。
+   *
+   * 只报名还不够：这类内容常常**在折叠的动作行里、在相机自己的轨道上，或干脆在可视区之外**，
+   * 作者看着"内容到 12.0s"却在画面上找不到它，就只能干看着片长降不下来。
+   */
+  const locateContentEnd = () => {
+    if (content.kind === "camera") selectCamera(content.owner);
+    else selectObject(content.owner);
+    selectItem(content.id);
+    const target =
+      document.getElementById(`clip-${content.id}`) ??
+      document.querySelector(`[data-track="${content.owner}"]`);
+    target?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  };
+
   const handleClipMove = (event: React.PointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
     if (!drag) return;
@@ -366,6 +414,16 @@ export function Timeline() {
           return { id: entry.id, timeStart: entry.start + delta, timeEnd: entry.end + delta };
         }),
       );
+      // 带子的两端同样会撞墙（store 逐条夹到 [0, duration]）—— 一并说出来。
+      const lastEnd = drag.band.reduce((max, entry) => Math.max(max, entry.end), 0);
+      const firstStart = drag.band.reduce((min, entry) => Math.min(min, entry.start), Infinity);
+      if (drag.mode !== "l" && lastEnd + delta > state.duration + 1e-6) {
+        setClampHint(overDurationHint(state.duration));
+      } else if (drag.mode !== "r" && firstStart + delta < -1e-6) {
+        setClampHint(BEFORE_ZERO_HINT);
+      } else {
+        setClampHint(null);
+      }
       return;
     }
     if (!drag.item) return;
@@ -384,6 +442,14 @@ export function Timeline() {
       nextStart = drag.start;
       nextEnd = clamp(drag.end + delta, drag.start + 0.1, state.duration);
     }
+
+    // 撞到「片长」或「0」这两堵墙时说一句：`clamp` 是不吭声的，看起来就像拖不动。
+    const hitEnd = drag.mode === "r" && drag.end + delta > state.duration + 1e-6;
+    const hitPushed = drag.mode === "m" && drag.start + delta > state.duration - length + 1e-6;
+    const hitStart = drag.mode !== "r" && drag.start + delta < -1e-6;
+    if (hitEnd || hitPushed) setClampHint(overDurationHint(state.duration));
+    else if (hitStart) setClampHint(BEFORE_ZERO_HINT);
+    else setClampHint(null);
 
     if (drag.item.kind === "segment") setSegmentTime(drag.item.source, nextStart, nextEnd);
     else if (drag.item.kind === "constraint") setConstraintTime(drag.item.source, nextStart, nextEnd);
@@ -420,6 +486,9 @@ export function Timeline() {
     return (
       <div
         key={item.id}
+        // 每条片段带一个可寻址 id：`⚠ 内容到 Xs` 的「定位」要能滚到**具体这一条** ——
+        // 它常在折叠的动作行里、或相机自己的轨道上，靠肉眼翻等于没有。
+        id={`clip-${item.source}`}
         className={`clip ${item.kind} ${selectedItem === item.source ? "sel" : ""}`}
         style={{
           left: range.start * pxPerSec,
@@ -451,6 +520,7 @@ export function Timeline() {
         onPointerMove={handleClipMove}
         onPointerUp={() => {
           dragRef.current = null;
+          setClampHint(null);
         }}
         onDoubleClick={(event) => {
           // 双击相机片段空白处：在该时刻插入一个空关键帧。
@@ -618,6 +688,7 @@ export function Timeline() {
         onPointerMove={handleClipMove}
         onPointerUp={() => {
           dragRef.current = null;
+          setClampHint(null);
         }}
       >
         整队动作 ×{band.entries.length}
@@ -655,16 +726,35 @@ export function Timeline() {
             }}
           />
         </label>
-        {/* 片长调得比内容短时明确告知：超出部分只是不出片，片段仍在。点一下即把片长对齐到内容末尾。 */}
+        {/* 片长调得比内容短时明确告知：超出部分只是不出片，片段仍在。
+            提示里必须**带上是谁**（见 `contentEndCause`）：顶在末尾的四类不一定都在视野里，
+            只说一个数字的话，作者会对着"内容到 12s"找不到那 12s 在哪。
+            所以主按钮是「定位」（带你去那一条），「对齐片长」另给一个 —— 它的方向是把片长
+            拉回去，与"我想缩短片长"正好相反，不该占据主按钮的位置。 */}
         {overflow ? (
-          <button
-            type="button"
-            className="dur-warn"
-            title={`有片段排到 ${contentEnd.toFixed(1)}s（含团队队员的动作）。点击把片长设到 ${alignEnd}s；超出的部分不参与播放 / 导出，片段不会被删除`}
-            onClick={() => setDuration(alignEnd)}
-          >
-            ⚠ 内容到 {contentEnd.toFixed(1)}s · 对齐片长
-          </button>
+          <>
+            <button
+              type="button"
+              className="dur-warn"
+              title={`顶在内容末尾的是「${content.owner}」的${CONTENT_KIND_LABEL[content.kind]}「${content.label}」（到 ${contentEnd.toFixed(1)}s）。点击选中它并滚到它所在的行`}
+              onClick={locateContentEnd}
+            >
+              ⚠ 内容到 {contentEnd.toFixed(1)}s（{content.owner} · {CONTENT_KIND_LABEL[content.kind]}）· 定位
+            </button>
+            <button
+              type="button"
+              className="dur-warn"
+              title={`把片长设到 ${alignEnd}s：超出的部分不参与播放 / 导出，片段不会被删除`}
+              onClick={() => setDuration(alignEnd)}
+            >
+              对齐片长 {alignEnd}s
+            </button>
+          </>
+        ) : null}
+        {clampHint ? (
+          <span className="dur-warn as-note" title="拖到的时刻超出片长，已停在片长上">
+            {clampHint}
+          </span>
         ) : null}
       </div>
       <div className="scroll" id="scroll" ref={scrollRef} onPointerDown={handleScrub}>
@@ -694,7 +784,7 @@ export function Timeline() {
                 const band = teamActionBands.get(team.id);
                 return (
                   <Fragment key={team.id}>
-                    <div className="row asset-node group-node">
+                    <div className="row asset-node group-node" data-track={team.id}>
                       <div
                         className="label asset-label"
                         title={`团队 · ${team.name}（${team.members.length} 人，整队共用一条路线）`}
@@ -758,7 +848,12 @@ export function Timeline() {
               return (
                 <Fragment key={object.id}>
                   {/* 资产（父节点）：运动轨道即资产自身的路径 / 约束。 */}
-                  <div className={`row asset-node ${dragRowId === object.id ? "row-dragging" : ""}`}>
+                  <div
+                    className={`row asset-node ${dragRowId === object.id ? "row-dragging" : ""}`}
+                    // 「⚠ 内容到 Xs · 定位」的落点：片段没渲染出来（行折叠 / 在可视区外）时
+                    // 至少把这一行滚进视野，不让提示点下去毫无反应。
+                    data-track={object.id}
+                  >
                     <div
                       className="label asset-label"
                       title={`${noun} · ${objectDisplayName(object)}${

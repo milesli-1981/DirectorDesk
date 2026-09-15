@@ -101,9 +101,50 @@ export interface Pose {
  * 因此对象只保存 x / z，高度由 Proxy 语义决定。
  */
 /**
- * 顶面形状。盒子表达不了斜坡，这是目前唯一的形状扩展。ramp = 沿局部 +Z 从 bottom 升到 top。
+ * 顶面形状。盒子表达不了斜坡与楼梯，这两种是目前的形状扩展。
+ *
+ * - `flat`：盒子。
+ * - `ramp`：沿局部 +Z 从 `bottom` 升到 `top` 的**斜面**。
+ * - `stair`：**抽象楼梯** —— 沿一条可拐弯的折线铺开的若干梯跑 + 平台（见 `StairSpec`）。
+ *   与 `ramp` 一样，它是"视觉近似、物理精确"的抽象：物理上是**连续坡面**（不是一级级台阶），
+ *   踏步由坡度派生、只用于渲染。
  */
-export type TopShape = "flat" | "ramp";
+export type TopShape = "flat" | "ramp" | "stair";
+
+/**
+ * 抽象楼梯的**路径点**（世界坐标）。作者在 Director View 上拖的就是它 ——
+ * 与资产路径（`MoveSegment.points`）/ 相机路径（`CameraMove.pathPoints`）同一套交互。
+ */
+export interface StairPathPoint {
+  id: string;
+  x: number;
+  z: number;
+}
+
+/**
+ * 抽象楼梯的参数（`topShape: "stair"` 时生效）。
+ *
+ * ## 为什么是"路径"而不是"一段段梯跑"
+ *
+ * 楼梯的**水平路线**和资产的行走路线是同一件事，所以用同一套表达：一条折线，
+ * 拖点即塑形，转角即拐弯。作者不需要填"第几段拐多少度"—— 想往哪拐就把点拖过去。
+ *
+ * 由此三件事都变成**派生量**，不用作者说：
+ *
+ * - **坡度** = `atan(总高 / 路径水平长度)`（要缓就把路径拉长）；
+ * - **每段的高** = 总高 × 该段长度 / 路径总长（按弧长均摊）；
+ * - **转角平台** = **急转**（≥ 40°）的转折点铺一段水平方形平台（边长 = 楼梯宽度），
+ *   把两段梯跑的角补齐，接缝无洞、高度连续；缓转按连续曲面直接接上，不插平台。
+ * - **平台是从路径里扣除的**（吃掉两侧边各半个宽度）⇒ **水平延伸 = 路径长**、
+ *   **末端（最后一个路径点）正好到达总高**。
+ *
+ * 路径点缺省（或不足 2 点）时退回**一段直跑**：沿对象局部 +Z，长度取 `footprint.d` ——
+ * 于是"没画路径"的楼梯与普通斜坡盒子一样好用，`D` 滑杆仍然管用。
+ */
+export interface StairSpec {
+  /** 水平路线（世界坐标）。≥2 点才生效。 */
+  path?: StairPathPoint[];
+}
 
 /**
  * 运动能力：阈值挂在**运动主体**上，不是障碍上。
@@ -163,6 +204,8 @@ export interface DirectorObject {
   bottom?: number;
   /** 顶面形状，默认 "flat"。 */
   topShape?: TopShape;
+  /** 抽象楼梯参数（`topShape: "stair"` 时生效）：坡度 + 梯段/拐弯。 */
+  stair?: StairSpec;
   /** 是否可站上去。默认 true（由 maxStep 与坡度推导）。水面 / 沼泽设 false。 */
   walkable?: boolean;
   /**
@@ -453,6 +496,8 @@ export interface CameraObject {
    * 因此对**段上的弧线**与**走出平台边缘的落差**都生效，而不只是 `arc`。
    */
   followJumpHeight?: boolean;
+  /** 自动对焦（默认 true）：无意图主体（自由 PATH 等）时，对焦到画面内最靠近构图中心的演员。 */
+  autoFocus?: boolean;
 }
 
 /**

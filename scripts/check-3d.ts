@@ -2,14 +2,17 @@
 import * as THREE from "three";
 import { createBlankState } from "../src/engine/demoShot";
 import {
+  coversXZ,
   groundHeightAt,
   objectBottom,
   objectTop,
   pathGroundAt,
   restingHeightAt,
   snapElevation,
+  stairHeightFromPlanes,
   standingHeightFor,
   supportUnder,
+  topAt,
 } from "../src/engine/ground";
 import { footprintsOverlap, separateSetAsset, solidOverlap, verticalOverlap } from "../src/engine/collision";
 import { locomotionOf, locomotionOfId } from "../src/engine/locomotion";
@@ -55,6 +58,28 @@ import {
   worstTier,
 } from "../src/engine/reach";
 import { cameraAnchorHeight, solveCamera } from "../src/engine/cameraSolver";
+import { objectPosition } from "../src/engine/solver";
+import {
+  helixStairPath,
+  STAIR_HANDLE_LIFT,
+  STAIR_VISUAL_STEP,
+  stairBounds,
+  stairHandleY,
+  stairRunLength,
+  stairRuns,
+  stairSlopeDeg,
+  stairTreads,
+} from "../src/engine/stair";
+import { simplifyPath } from "../src/engine/path";
+import { ObjectAction, objectActions } from "../src/engine/objectActions";
+import {
+  DEFAULT_STAIR_WIDTH,
+  insertBend,
+  offsetPolyline,
+  planStairLink,
+} from "../src/engine/stairLink";
+import { planStairWalk } from "../src/engine/stairWalk";
+import { hitStairPathPointScreen } from "../src/engine/pick";
 import {
   AIRBORNE_EPS,
   airborneOf,
@@ -64,8 +89,19 @@ import {
   stanceOf,
   surfaceAt,
   tiltFor,
+  torsoCompensation,
 } from "../src/engine/stance";
-import { DirectorObject, DirectorState, MoveSegment, Locomotion, CameraObject, VerticalArc } from "../src/domain/schema";
+import {
+  ActionClip,
+  CameraMove,
+  CameraObject,
+  DirectorObject,
+  DirectorState,
+  Locomotion,
+  MoveSegment,
+  VerticalArc,
+} from "../src/domain/schema";
+import { contentEndCause, rawContentEnd } from "../src/engine/timeline";
 
 let pass = 0;
 let fail = 0;
@@ -1564,6 +1600,9 @@ console.log("\n[29] 跟跳防抖（followJumpHeight）");
   //    `supportUnder` 退回基准面 0，于是"上坡"变成了"掉下坡"，断言毫无意义。
   //    这里改成 12m 深、1m 高的缓坡（d 方向是坡轴），步幅内抬升 0.29m < 0.35m。
   {
+    // 缓坡**不需要任何魔法字段**：`isPassable` 对坡面 / 楼梯看的是**坡脚**（不是坡顶），
+    // 坡脚够得着 + 坡度在能力表内 ⇒ 沿坡走上去。这条曾经是坑：拿坡顶去比 `maxStep` 的话，
+    // 任何像样的坡都会被判成墙，演员绕坡而行而不是走上去。§33 把这条钉住了。
     const walk = sceneWith(
       [
         { ...box("R", 0, 0, 8, 12, 1, -0.5), topShape: "ramp" } as DirectorObject,
@@ -1575,17 +1614,28 @@ console.log("\n[29] 跟跳防抖（followJumpHeight）");
     const a0 = cameraAnchorHeight(walk, "H", 0, 0, -4, false);
     const a1 = cameraAnchorHeight(walk, "H", 2, 0, 4, false);
     check("§29 缓坡步行：关掉跟随后仍跟着升高", a1 > a0 + 0.5, true);
-    // 且全程"不离地"—— 否则这条用例会退化成在测跳跃，失去它存在的意义。
+
+    // 且全程**不离地、不锁高度**。
+    // 判据走 `airborneOf`（= `airborneLiftAt`，唯一出处）：它只在该段有生效弧线时
+    // 才可能非零，所以缓坡恒 0；而"关掉跟随"在非离地时等价于"照跟实际高度"。
+    // 位置一律取**对象的真实位置**（`objectPosition`）：高度是沿它自己走过的路径派生的，
+    // 手工假造 (x,z) 会取到"另一条路径上"的高度（这正是本用例曾有的隐患）。
+    const obj = walk.objects[1];
     let maxAir = 0;
+    let maxLockGap = 0;
     for (let i = 0; i <= 10; i += 1) {
       const t = (i / 10) * 2;
-      const z = -4 + 8 * (i / 10);
-      const air =
-        pathHeightAt(walk, walk.objects[1], 0, z, t) -
-        standingHeightFor(walk, walk.objects[1], 0, z);
-      maxAir = Math.max(maxAir, air);
+      const p = objectPosition(walk, "H", t);
+      maxAir = Math.max(maxAir, airborneOf(walk, obj, p.x, p.z, t).lift);
+      maxLockGap = Math.max(
+        maxLockGap,
+        Math.abs(
+          cameraAnchorHeight(walk, "H", t, p.x, p.z, false) - pathHeightAt(walk, obj, p.x, p.z, t),
+        ),
+      );
     }
-    check("§29 缓坡步行：全程不离地（离地量 ≈ 0）", round6(maxAir), 0);
+    check("§29 缓坡步行：全程不离地", round6(maxAir), 0);
+    check("§29 缓坡步行：锚线全程 == 实际高度（不锁在起跳高度）", round6(maxLockGap), 0);
   }
 }
 
@@ -1687,6 +1737,51 @@ console.log("\n[31] 姿态：坡面 pitch / roll + 骨盆高度自适应（Phase
     const s = stanceOf(st, "H", 0, 0, 0);
     check("§31 平面坡上：pitch 生效", round6(deg(s.pitch)), -round6(SLOPE_DEG));
     check("§31 平面坡上：pelvisLift ≈ 0（平面抵消）", Math.abs(s.pelvisLift) < 1e-3, true);
+
+    // 坡面姿态补偿（`torsoCompensation`）：整个 group 为了"脚贴坡"而倾，上半身必须反向补回，
+    // 否则走上坡的人整体后仰一个坡度角（侧看就是"人歪了"）。这两条钉住"躯干回到竖直"
+    // 与"平地恒为 null"（planar 逐像素不变）。
+    {
+      const comp = torsoCompensation(s);
+      check("§31 坡面补偿：spine 补回 pitch（补偿 + pitch = 0 ⇒ 躯干竖直）", round6((comp?.[0] ?? 0) + s.pitch), 0);
+      check(
+        "§31 坡面补偿：平地 / planar 恒为 null（不叠加任何关节角）",
+        torsoCompensation({ pitch: 0, roll: 0 }),
+        null,
+      );
+    }
+
+    // 渲染层的欧拉序：`tiltFor` 的角度是**角色自己的轴**上的，所以角色 group 必须用 YXZ 序
+    // （yaw 先作用）。默认的 XYZ 把 rotation.x 施加在世界轴上 —— 朝 +X 的角色因此被"侧倾"，
+    // 画面上就是"人歪了"。这里直接拿 three 的矩阵验：`R·(0,1,0)` 必须等于立足面法线，
+    // 且对任意 yaw 都成立（单测 yaw = 0 会漏掉这个 bug）。
+    {
+      const slopeRad = (30 * Math.PI) / 180;
+      // 沿 +X 上坡：法线 = (−sin, cos, 0)。
+      const n: [number, number, number] = [-Math.sin(slopeRad), Math.cos(slopeRad), 0];
+      const upOf = (yawRad: number): THREE.Vector3 => {
+        const t = tiltFor(n, yawRad);
+        return new THREE.Vector3(0, 1, 0).applyMatrix4(
+          new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(t.pitch, yawRad, t.roll, "YXZ")),
+        );
+      };
+      // 沿坡 / 横切坡（pitch 或 roll 之一为 0）时是**精确**的：
+      for (const yawDeg of [0, 90, 180]) {
+        const up = upOf((yawDeg * Math.PI) / 180);
+        check(
+          `§31 欧拉序 YXZ：yaw=${yawDeg}° 时身体上轴 = 立足面法线`,
+          [round6(up.x), round6(up.y), round6(up.z)],
+          [round6(n[0]), round6(n[1]), round6(n[2])],
+        );
+      }
+      // 斜切坡（pitch 与 roll 同时不为 0）：`tiltFor` 是**小角近似**，只要求不差得离谱。
+      // 要精确对齐得把姿态改成四元数（`setFromUnitVectors`），目前不做。
+      const oblique = upOf(Math.PI / 4);
+      const errDeg =
+        (Math.acos(Math.max(-1, Math.min(1, oblique.dot(new THREE.Vector3(...n))))) * 180) /
+        Math.PI;
+      check("§31 斜切坡：小角近似误差 < 4°", round6(errDeg) < 4, true);
+    }
     check("§31 平面坡上：不判离地", s.airborne, false);
   }
 
@@ -1796,19 +1891,1204 @@ console.log("\n[31] 姿态：坡面 pitch / roll + 骨盆高度自适应（Phase
     const next = rewriteArcApex(arc, 3.2);
     check("§31 apex 改写保留 mode", next.mode, "parabola");
     check("§31 apex 改写保留 from/to", [next.from, next.to], [0.1, 0.9]);
-    check("§31 apex 改写只改 apex 值", round6(next.apex), 3.2);
+    // `apex` 在类型里是可选的（只有 parabola 用），所以用 `NaN` 兜底：万一改写把 apex 丢了，
+    // 这里会直接变红，而不是"undefined 悄悄通过"。
+    check("§31 apex 改写只改 apex 值", round6(next.apex ?? Number.NaN), 3.2);
     check("§31 apex 改写返回新对象（不就地改）", next !== arc, true);
-    check("§31 apex 改写不污染原对象", round6(arc.apex), 1.5);
+    check("§31 apex 改写不污染原对象", round6(arc.apex ?? Number.NaN), 1.5);
     // 下限钳到 0：作者把顶点拖到地面以下没有物理意义。
     const neg = rewriteArcApex(arc, -4);
-    check("§31 apex 拖到负 → 钳到 0", round6(neg.apex), 0);
+    check("§31 apex 拖到负 → 钳到 0", round6(neg.apex ?? Number.NaN), 0);
     // fall / climb 的其它字段也一并保留（这些模式没有 apex，但顶点把手只挂在 parabola 上，
     // 这里只是确认纯函数对其它 mode 同样"只动 apex"）。
-    const fall: VerticalArc = { mode: "fall", fallTo: -2 };
-    const fallen = rewriteArcApex(fall, 0);
-    check("§31 fall 改写保留 mode", fallen.mode, "fall");
-    check("§31 fall 改写保留 fallTo", (fallen as { fallTo?: number }).fallTo, -2);
+    // 用 `climbSeconds`（类型里真有这个字段）—— 早先这里写的是 `fallTo`：那个字段全项目
+    // 只有 `engine/arc.ts` 一句注释提过，代码与类型都没有，守卫其实在测一个**幻影字段**。
+    const climb: VerticalArc = { mode: "climb", climbSeconds: 1.4 };
+    const climbed = rewriteArcApex(climb, 0);
+    check("§31 climb 改写保留 mode", climbed.mode, "climb");
+    check("§31 climb 改写保留 climbSeconds", climbed.climbSeconds, 1.4);
   }
+}
+
+console.log("\n[32] 相机高度时间低通（走台阶防抖）");
+{
+  // 一级 0.3m 的台阶：人从地面（z<0）走上台面（z>0）。
+  // 台上机位高度 = 台面 0.3 + eye_level 1.7 = 2.0；台下 = 1.7。
+  const step = box("S", 0, 4, 8, 8, 0.3);
+  const objs = [step, actor("H", 0, -4)];
+  const walk = seg("W", "H", [0, -4], [0, 6], { timeEnd: 2 });
+
+  const terrain = camScene(objs, [cam("C", "H")], [walk], "terrain");
+  let minY = Number.POSITIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  let maxDelta = 0;
+  let prevY = solveCamera(terrain, "C", 0)!.position[1];
+  for (let i = 0; i <= 200; i += 1) {
+    const y = solveCamera(terrain, "C", (i / 200) * 2)!.position[1];
+    minY = Math.min(minY, y);
+    maxY = Math.max(maxY, y);
+    if (i > 0) maxDelta = Math.max(maxDelta, Math.abs(y - prevY));
+    prevY = y;
+  }
+  check("§32 台下机位高度 = 1.7", round6(minY), 1.7);
+  check("§32 台上机位高度 = 2.0（0.3 台阶 + 1.7）", round6(maxY), 2.0);
+  // 这条是守卫：没有低通时跨台阶会是一整跳 0.3m，这里立刻红。
+  check("§32 走台阶：机位高度无逐帧跳变（< 0.05m）", maxDelta < 0.05, true);
+
+  // planar：地面恒 0 ⇒ 没有台阶可抖，且低通短路 ⇒ Y 恒定 1.7（逐像素回归）。
+  const planar = camScene(objs, [cam("C", "H")], [walk]);
+  let pMin = Number.POSITIVE_INFINITY;
+  let pMax = Number.NEGATIVE_INFINITY;
+  for (let i = 0; i <= 200; i += 1) {
+    const y = solveCamera(planar, "C", (i / 200) * 2)!.position[1];
+    pMin = Math.min(pMin, y);
+    pMax = Math.max(pMax, y);
+  }
+  check("§32 planar：机位高度恒 1.7（低通短路）", [round6(pMin), round6(pMax)], [1.7, 1.7]);
+
+  // —— 身体侧：台阶的落差必须被抹成**短坡**，而不是瞬跳 ——
+  //
+  // 这是"台阶 y 低通"的另一半。只平滑镜头不平滑身体，主体会在画框里每级瞬跳
+  // （实测 6m/50mm 取景下约占画面高 10%）；两者都平滑且同源，主体才真正稳住。
+  {
+    const body = terrain.objects[1];
+    let maxBody = 0;
+    let maxGround = 0;
+    let prevBody: number | null = null;
+    let prevGround: number | null = null;
+    for (let i = 0; i <= 200; i += 1) {
+      const t = (i / 200) * 2;
+      const p = objectPosition(terrain, "H", t);
+      const y = pathHeightAt(terrain, body, p.x, p.z, t);
+      const g = standingHeightFor(terrain, body, p.x, p.z);
+      if (prevBody !== null) maxBody = Math.max(maxBody, Math.abs(y - prevBody));
+      if (prevGround !== null) maxGround = Math.max(maxGround, Math.abs(g - prevGround));
+      prevBody = y;
+      prevGround = g;
+    }
+    check("§32 身体：台阶落差被抹成短坡（单帧 < 0.1m）", maxBody < 0.1, true);
+    check("§32 对照：瞬时地面本身仍是整跳 0.3m", round6(maxGround), 0.3);
+
+    // planar 逐值恒等：地面恒 0 ⇒ 低通必须没有任何副作用。
+    const flat = camScene(objs, [cam("C", "H")], [walk]);
+    let gap = 0;
+    for (let i = 0; i <= 200; i += 1) {
+      const t = (i / 200) * 2;
+      const p = objectPosition(flat, "H", t);
+      gap = Math.max(
+        gap,
+        Math.abs(
+          pathHeightAt(flat, flat.objects[1], p.x, p.z, t) -
+            standingHeightFor(flat, flat.objects[1], p.x, p.z),
+        ),
+      );
+    }
+    check("§32 身体：planar 逐值恒等（低通无副作用）", round6(gap), 0);
+  }
+
+  // —— 画面级不变量：台阶抖的**可见形式**是俯仰角跳，不是高度跳 ——
+  //
+  // 机位 Y 与瞄准点 Y 必须**同拍**（一起平移、一起被平滑）。只平滑机位、不同步平滑瞄准点，
+  // 两者就会错拍：镜头在每级台阶处先仰后俯。实测这个回归曾让俯仰角一帧跳 ~2.7°，
+  // 比完全不平滑还难看（不平滑时两者同跳、俯仰角恒定，画面只是整体平移）。
+  {
+    const pitchAt = (state: DirectorState, camId: string, t: number): number => {
+      const r = solveCamera(state, camId, t)!;
+      const dx = r.target[0] - r.position[0];
+      const dz = r.target[2] - r.position[2];
+      return (Math.atan2(r.target[1] - r.position[1], Math.hypot(dx, dz)) * 180) / Math.PI;
+    };
+    let minP = Number.POSITIVE_INFINITY;
+    let maxP = Number.NEGATIVE_INFINITY;
+    let maxDP = 0;
+    let prevP = pitchAt(terrain, "C", 0);
+    for (let i = 1; i <= 200; i += 1) {
+      const p = pitchAt(terrain, "C", (i / 200) * 2);
+      minP = Math.min(minP, p);
+      maxP = Math.max(maxP, p);
+      maxDP = Math.max(maxDP, Math.abs(p - prevP));
+      prevP = p;
+    }
+    check("§32 走台阶：俯仰角全程恒定（画面不俯仰抖）", maxP - minP < 0.01, true);
+    check("§32 走台阶：单帧俯仰跳变 < 0.05°", maxDP < 0.05, true);
+  }
+
+  // 开启防抖后同样同拍 —— 这条同时守住"作者的防抖没有被默认高度低通覆盖掉"：
+  // 覆盖时两者按各自不同的窗平滑，高度差会在整段行走中来回摆。
+  {
+    const stab = camScene(objs, [cam("C2", "H", { stabilize: 0.9 })], [walk], "terrain");
+    let minD = Number.POSITIVE_INFINITY;
+    let maxD = Number.NEGATIVE_INFINITY;
+    for (let i = 0; i <= 200; i += 1) {
+      const r = solveCamera(stab, "C2", (i / 200) * 2)!;
+      const d = r.target[1] - r.position[1];
+      minD = Math.min(minD, d);
+      maxD = Math.max(maxD, d);
+    }
+    check("§32 开启防抖：机位与瞄准点同拍（高度差恒定）", maxD - minD < 0.01, true);
+  }
+}
+
+console.log("\n[33] 抽象楼梯（整体建模：坡度 + 总高 + 拐弯）");
+{
+  const DEG = Math.PI / 180;
+  /** 造一座直跑楼梯：路径从 `(x, z)` 沿 +Z 走 `run` 米，总高 `h`。 */
+  const stair = (id: string, x: number, z: number, w: number, h: number, run: number) =>
+    ({
+      ...box(id, x, z, w, run, h),
+      topShape: "stair",
+      stair: {
+        path: [
+          { id: `${id}_a`, x, z },
+          { id: `${id}_b`, x, z: z + run },
+        ],
+      },
+    }) as DirectorObject;
+
+  // ① 直跑：路径水平长 3.1177m、总高 1.8 ⇒ **派生**坡度 30°。
+  const dep = 1.8 / Math.tan(30 * DEG);
+  const straight = stair("ST", 0, 3, 2, 1.8, dep);
+  check("§33 直跑：坡脚高度 = 底", round6(topAt(straight, 0, 3)), 0);
+  check("§33 直跑：中点 = 半高", round6(topAt(straight, 0, 3 + dep / 2)), 0.9);
+  check("§33 直跑：坡顶 = 总高", round6(topAt(straight, 0, 3 + dep)), 1.8);
+  check("§33 直跑：坡度是**派生量** = atan(高 / 路径水平长)", round6(stairSlopeDeg(straight)), 30);
+  // 沿路径的进深 = 路径长；**顶端再外铺一块边长 = 宽度的到达平台**（接在路径之外）。
+  check(
+    "§33 直跑：进深 = 路径长 + 顶端到达平台（一个梯宽）",
+    round6(stairBounds(straight).maxZ - 3),
+    round6(dep + 2),
+  );
+
+  // 缺省路径（没画）：退回沿局部 +Z 的一段直跑，长度 = `footprint.d`。
+  const plain = { ...box("SP", 0, 0, 2, 3, 1.8), topShape: "stair" } as DirectorObject;
+  check("§33 缺省路径：退回一段直跑（D = 水平长）", round6(stairRunLength(plain)), 3);
+  check(
+    "§33 缺省路径：坡度 = atan(h / d)",
+    round6(stairSlopeDeg(plain)),
+    round6((Math.atan2(1.8, 3) * 180) / Math.PI),
+  );
+  // 路径是**世界坐标**：`rotation` 只影响"缺省直跑"的方向，不影响已画好的路径。
+  const rotated = { ...straight, rotation: 90 } as DirectorObject;
+  check("§33 路径是世界坐标：rotation 不改路径长", round6(stairRunLength(rotated)), round6(dep));
+  check("§33 路径是世界坐标：高度也不受影响", round6(topAt(rotated, 0, 3 + dep / 2)), 0.9);
+
+  // ② **连续坡面**，不是一级级台阶：这正是"整体建模"要解决的问题（否则身体一级一跳）。
+  {
+    let maxJump = 0;
+    let prev = topAt(straight, 0, 3);
+    for (let i = 1; i <= 100; i += 1) {
+      const y = topAt(straight, 0, 3 + (dep * i) / 100);
+      maxJump = Math.max(maxJump, Math.abs(y - prev));
+      prev = y;
+    }
+    // 对照：0.3m 一级的盒子在此处会是 0.3 的整跳（见 §32 的「瞬时地面本身仍是整跳 0.3m」）。
+    check("§33 直跑：全程无整级跳变（< 0.03m）", maxJump < 0.03, true);
+  }
+
+  // ③ 水平占用面 = 梯跑本身，不是 footprint 那个盒子。
+  check("§33 占用面：段内为真", coversXZ(straight, 0, 3 + dep / 2), true);
+  // **顶端到达平台**：路线终点之外一个梯宽仍然有面 —— 站在终点上的人整个脚印才站得住。
+  check("§33 占用面：顶端平台内为真（站终点上不会半个身子悬空）", coversXZ(straight, 0, 3 + dep + 0.5), true);
+  check("§33 占用面：平台之外为假", coversXZ(straight, 0, 3 + dep + 2 + 0.5), false);
+  check("§33 占用面：横向出界为假", coversXZ(straight, 1.5, 3 + dep / 2), false);
+
+  // ④ 可走：**不需要标 blocking:false** —— 坡脚够得着、坡度在能力表内就不是障碍。
+  {
+    const st: DirectorState = {
+      ...scene([straight, actor("H", 0, -2)], "terrain"),
+      segments: [seg("s1", "H", [0, -2], [0, 3 + dep + 1], { timeEnd: 4 })],
+    };
+    check("§33 可走：楼梯不算障碍（不必标 blocking:false）", blockingRectsFor(st, "H").length, 0);
+    // 太陡：路径只给 1.04m ⇒ 派生坡度 60° > maxSlope 45° ⇒ 仍算墙。
+    const steep = stair("SX", 0, 3, 2, 1.8, 1.8 / Math.tan(60 * DEG));
+    const stSteep: DirectorState = {
+      ...scene([steep, actor("H", 0, -2)], "terrain"),
+      segments: [seg("s1", "H", [0, -2], [0, 3 + dep + 1], { timeEnd: 4 })],
+    };
+    check("§33 太陡（60° > maxSlope 45°）：仍算障碍", blockingRectsFor(stSteep, "H").length, 1);
+    // planar：能力表 maxSlopeDeg = 0 ⇒ 一切坡都"太陡" ⇒ 楼梯仍是障碍（planar 逐像素不变）。
+    const stPlanar: DirectorState = {
+      ...scene([straight, actor("H", 0, -2)]),
+      segments: [seg("s1", "H", [0, -2], [0, 3 + dep + 1], { timeEnd: 4 })],
+    };
+    check("§33 planar：楼梯仍算障碍（maxSlopeDeg = 0）", blockingRectsFor(stPlanar, "H").length, 1);
+  }
+
+  // ⑤ 拐弯：两段 + 转角平台，接缝处高度连续、沿折线全程有面可站。
+  {
+    // 路径：先沿 +Z 爬，再拐 90° 沿 +X 爬（转角处自动生成平台）。
+    const L = {
+      ...box("SL", 0, 0, 2, 2, 2.4),
+      topShape: "stair",
+      stair: {
+        path: [
+          { id: "L_a", x: 0, z: 0 },
+          { id: "L_b", x: 0, z: 2 },
+          { id: "L_c", x: 2, z: 2 },
+        ],
+      },
+    } as DirectorObject;
+    const runs = stairRuns(L);
+    check("§33 L 形：两段梯跑 + 一个转角平台 + 一个顶端平台 = 4 段", runs.length, 4);
+    check("§33 L 形：第二段朝向 = 90°（由路径推导）", round6((runs[2].heading * 180) / Math.PI), 90);
+    check("§33 L 形：转角平台是水平的", round6(runs[1].y1 - runs[1].y0), 0);
+    check(
+      "§33 L 形：平台起点 = 第一段终点（接缝无洞）",
+      [round6(runs[1].x), round6(runs[1].z)],
+      [
+        round6(runs[0].x + Math.sin(runs[0].heading) * runs[0].length),
+        round6(runs[0].z + Math.cos(runs[0].heading) * runs[0].length),
+      ],
+    );
+
+    let covered = true;
+    let monotone = true;
+    let prevY = -Infinity;
+    for (const run of runs) {
+      for (let i = 0; i <= 10; i += 1) {
+        const a = (run.length * i) / 10;
+        const x = run.x + Math.sin(run.heading) * a;
+        const z = run.z + Math.cos(run.heading) * a;
+        if (!coversXZ(L, x, z)) covered = false;
+        const y = topAt(L, x, z);
+        if (y < prevY - 1e-6) monotone = false;
+        prevY = y;
+      }
+    }
+    check("§33 L 形：沿折线全程有面可站", covered, true);
+    check("§33 L 形：沿折线高度单调不减（不会中途下陷）", monotone, true);
+    check("§33 L 形：末端达到总高", round6(topAt(L, runs[2].x + Math.sin(runs[2].heading) * runs[2].length, runs[2].z + Math.cos(runs[2].heading) * runs[2].length)), 2.4);
+  }
+
+  // ⑥ 画布拾取（拖拽入口）：把手球心必须与**渲染高度同源**，否则"看得见却点不中"。
+  {
+    const s2 = stair("SH", 0, 0, 2, 1.8, dep);
+    const stHit: DirectorState = scene([s2], "terrain");
+    const p1 = s2.stair!.path![1];
+    const y = stairHandleY(s2, p1.x, p1.z) + STAIR_HANDLE_LIFT;
+    const down = new THREE.Vector3(0, -1, 0);
+    const hit = hitStairPathPointScreen(
+      stHit,
+      "SH",
+      new THREE.Ray(new THREE.Vector3(p1.x, y + 6, p1.z), down),
+      12,
+      800,
+    );
+    check("§33 拾取：射线指向把手 → 命中该点", hit?.pointId, p1.id);
+    const miss = hitStairPathPointScreen(
+      stHit,
+      "SH",
+      new THREE.Ray(new THREE.Vector3(p1.x + 1.5, y + 6, p1.z), down),
+      12,
+      800,
+    );
+    check("§33 拾取：偏开 1.5m → 不命中", miss, null);
+    check("§33 拾取：球心高度 = 楼梯表面 + 抬升", round6(y - stairHandleY(s2, p1.x, p1.z)), round6(STAIR_HANDLE_LIFT));
+  }
+
+  // ⑦ 路径的来源之「螺旋生成」：它产出的就是一条**普通路径**，不是第二套机制。
+  {
+    const s3 = { ...box("SH2", 0, 0, 2, 3, 1.8), topShape: "stair" } as DirectorObject;
+    const R = 2.5;
+    const T = 1.5;
+    const helix = helixStairPath(s3, R, T);
+    // rotation = 0 ⇒ 圆心在 (R, 0)。
+    let maxErr = 0;
+    for (const p of helix) maxErr = Math.max(maxErr, Math.abs(Math.hypot(p.x - R, p.z) - R));
+    check("§33 螺旋：所有点到圆心距离 = 半径", maxErr < 1e-6, true);
+    check("§33 螺旋：起点 = 对象原点（切向进入，无折角）", [round6(helix[0].x), round6(helix[0].z)], [0, 0]);
+
+    const spiral = { ...s3, stair: { path: helix } } as DirectorObject;
+    // 精确：折线长度 = 弦长和（每段圆心角 2πT/n ⇒ 弦长 2R·sin(πT/n)）。
+    const segs = helix.length - 1;
+    const chordSum = segs * 2 * R * Math.sin((Math.PI * T) / segs);
+    check("§33 螺旋：路径长 = 折线弦长和", Math.abs(stairRunLength(spiral) - chordSum) < 1e-6, true);
+    // 并且逼近理论弧长（离散化误差 < 1%）。
+    const arc = 2 * Math.PI * R * T;
+    check("§33 螺旋：与理论弧长 2π·半径·圈数 相差 < 1%", Math.abs(chordSum - arc) / arc < 0.01, true);
+    // 圈数越多 ⇒ 路径越长 ⇒ 同样的总高下坡度越缓（坡度是派生量）。
+    const half = { ...s3, stair: { path: helixStairPath(s3, R, 0.5) } } as DirectorObject;
+    check("§33 螺旋：圈数少 ⇒ 坡度更陡（派生量随之变）", stairSlopeDeg(half) > stairSlopeDeg(spiral), true);
+  }
+
+  // ⑧ 高度的来源之「两端平面高差」：连接有高低差的两层时不必自己量。
+  {
+    const plat = box("PL", 0, 6, 4, 4, 2); // 终点落在 2m 平台上
+    const st = {
+      ...box("SH3", 0, 0, 2, 6, 0.5),
+      topShape: "stair",
+      stair: {
+        path: [
+          { id: "a", x: 0, z: 0 },
+          { id: "b", x: 0, z: 6 },
+        ],
+      },
+    } as DirectorObject;
+    const sceneH = scene([plat, st], "terrain");
+    check("§33 取高差：终点平台 2m − 起点地面 0 = 2m", round6(stairHeightFromPlanes(sceneH, st)), 2);
+    // 排除自身：没有别的支撑面时不该量到楼梯自己头上。
+    const lone = scene([st], "terrain");
+    check("§33 取高差：排除自身（什么都没有 → 0）", round6(stairHeightFromPlanes(lone, st)), 0);
+  }
+
+  // ⑨ 手绘（工具栏 ✏️ Path 按住拖）：轨迹 → 抽稀 → 楼梯路径。
+  //    抽稀这一环是手绘能不能用的关键：不抽稀就会在画布上冒出几十个控制点，
+  //    抽稀过头又会把拐角抹平成一条直线（整座 L 形楼梯直接消失）。
+  {
+    const line = Array.from({ length: 40 }, (_, i) => ({ x: 0, z: i * 0.15 }));
+    const thinnedLine = simplifyPath(line, 0.35);
+    check("§33 手绘：直线轨迹抽稀成 2 点", thinnedLine.length, 2);
+    check(
+      "§33 手绘：首尾与原始轨迹一致",
+      [round6(thinnedLine[0].z), round6(thinnedLine[1].z)],
+      [0, round6(39 * 0.15)],
+    );
+
+    const lStroke = [
+      ...Array.from({ length: 10 }, (_, i) => ({ x: 0, z: i * 0.15 })),
+      ...Array.from({ length: 10 }, (_, i) => ({ x: (i + 1) * 0.15, z: 1.35 })),
+    ];
+    const thinnedL = simplifyPath(lStroke, 0.35);
+    check("§33 手绘：拐角被保住（L 形 → 3 点）", thinnedL.length, 3);
+    check("§33 手绘：拐点就是画的那个角", [round6(thinnedL[1].x), round6(thinnedL[1].z)], [0, 1.35]);
+
+    // 抽稀后的轨迹直接喂给楼梯：转角处照样自动生成休息平台、坡度照样是派生量。
+    const drawn = {
+      ...box("SD", 0, 0, 2, 4, 1.8),
+      topShape: "stair",
+      stair: { path: thinnedL.map((p, i) => ({ id: `D_${i}`, x: p.x, z: p.z })) },
+    } as DirectorObject;
+    const drawnRuns = stairRuns(drawn);
+    check("§33 手绘：手绘出的 L 形 → 2 梯跑 + 1 转角平台 + 1 顶端平台", drawnRuns.length, 4);
+    // 拐角平台：沿平台取三点必须等高（不写死数值 —— 平台高由"第一段弧长占比"决定）。
+    const cornerY = topAt(drawn, 0, 1.35);
+    check(
+      "§33 手绘：拐角处是平台（三点等高）",
+      [round6(topAt(drawn, 0, 0.8)), round6(topAt(drawn, 0.7, 1.35))],
+      [round6(cornerY), round6(cornerY)],
+    );
+    check("§33 手绘：平台高度介于 0 与总高之间", cornerY > 0.1 && cornerY < 1.7, true);
+
+    // —— 模型的可读懂性不变量（这两条正是"作者对不上自己画的线"的根源）——
+    // ① 末端（= 路径最后一点）正好到达总高；
+    check("§33 手绘：路径最后一点处正好是总高", round6(topAt(drawn, 1.5, 1.35)), 1.8);
+    // ② **沿路径不外扩**：转角平台从路径里**扣除**（不额外接一段），只有顶端多铺一块
+    //    边长 = 梯宽的到达平台。（旧模型把平台接在转折点**之后**：末段升不到总高、
+    //    整条几何后移一个梯宽 —— 作者在路径末端量不到总高，就会觉得线对不上。）
+    const pad = drawnRuns[drawnRuns.length - 1];
+    check("§33 手绘：顶端到达平台是水平的、顶面 = 总高", [round6(pad.y0), round6(pad.y1)], [1.8, 1.8]);
+    check("§33 手绘：顶端到达平台边长 = 梯宽", round6(pad.length), 2);
+    const db = stairBounds(drawn);
+    check(
+      "§33 手绘：几何 = 路径 ± 半宽 + 顶端一个梯宽",
+      [db.maxX <= 1.5 + 2 + 0.01, db.maxZ <= 1.35 + 1 + 0.01],
+      [true, true],
+    );
+    const drawnEnd = drawnRuns[drawnRuns.length - 1];
+    check(
+      "§33 手绘：末端达到总高",
+      round6(
+        topAt(
+          drawn,
+          drawnEnd.x + Math.sin(drawnEnd.heading) * drawnEnd.length,
+          drawnEnd.z + Math.cos(drawnEnd.heading) * drawnEnd.length,
+        ),
+      ),
+      1.8,
+    );
+  }
+
+  // ⑩ 缓转不插平台（螺旋）。踩过的坑：原先"每个转折点都插一段进深 = 楼梯宽度的平台"，
+  //    而螺旋每段只转 15°，于是每小段都再走一个 1.4m 水平段 —— 几何逐段外扩
+  //    （半径 1.6 的螺旋被拉到 22m），24 段梯跑变成 47 段、螺旋变成一串平台。
+  {
+    const sp = { ...box("SH", 8, -2, 1.4, 1.4, 2.4), topShape: "stair" } as DirectorObject;
+    const helixPath = helixStairPath(sp, 1.6, 1);
+    const helix = { ...sp, stair: { path: helixPath } } as DirectorObject;
+    check(
+      "§33 螺旋：每段都是梯跑（边数 + 1 个顶端平台，缓转不插平台）",
+      stairRuns(helix).length,
+      helixPath.length,
+    );
+
+    // 路径是以 (9.6, −2) 为圆心、半径 1.6 的整圆；几何反推的包围盒最多再外扩半个梯宽，
+    // 外加顶端那一块到达平台（外扩一个梯宽 = 1.4）。旧 bug 会把半径 1.6 的螺旋拉到 22m。
+    const hb = stairBounds(helix);
+    const r = 1.6 + 0.7 + 1.4 + 0.01;
+    check(
+      "§33 螺旋：包围盒贴着圆（平台外扩会立刻越界）",
+      [
+        hb.minX >= 9.6 - r && hb.maxX <= 9.6 + r,
+        hb.minZ >= -2 - r && hb.maxZ <= -2 + r,
+      ],
+      [true, true],
+    );
+  }
+
+  // ⑪ 视觉踏步的**展开方向**。踩过的坑：渲染层自己算这个偏移，把踏步沿**垂直于**梯跑
+  //    的方向排开（盒子长边在 Z、位置却沿 X 递增）—— 整座楼梯画成一堆错位的方块、
+  //    人物站在真实表面上却看着悬空。现在展开只有 `stairTreads` 一个出处（渲染层只消费
+  //    中心点），这里把它的不变量钉住。
+  {
+    const st = { ...box("ST", 0, 0, 2, 4, 1.6), topShape: "stair" } as DirectorObject;
+    const run = stairRuns(st)[0];
+    const steps = Math.max(1, Math.round((run.y1 - run.y0) / STAIR_VISUAL_STEP));
+    const all = stairTreads(st);
+    // 梯跑按级高细分；顶端到达平台是平的 ⇒ 只有 1 级。
+    const treads = all.slice(0, steps);
+    check("§33 踏步：梯跑数量 = 按级高细分", treads.length, steps);
+    check("§33 踏步：顶端到达平台只有 1 级（它是平的）", all.length - steps, 1);
+    check(
+      "§33 踏步：中心横向恒在梯跑中线上（沿错方向排布会立刻越界）",
+      treads.every((t) => Math.abs(t.x - run.x) < 1e-9),
+      true,
+    );
+    // 沿程首尾各留半级 —— 说明它铺满整段、且是**沿**着梯跑铺的。
+    check(
+      "§33 踏步：中心沿程铺满整段（首尾各留半级）",
+      [
+        round6(Math.min(...treads.map((t) => t.z)) - run.z),
+        round6(Math.max(...treads.map((t) => t.z)) - run.z - run.length),
+      ],
+      [round6(run.length / steps / 2), round6(-run.length / steps / 2)],
+    );
+  }
+
+  // ⑫ 可达性：**走上楼梯不该被报"不可达"**。路线沿坡面上升时逐条边都迈得上，但合并后的
+  //    总量（1.8m）会被拿去问"能不能攀爬" —— 判据应该是**坡度**（与 `avoidance.isPassable`
+  //    同一套）。示例里那条"主角走上 L 形"的路线就因此挂着红叉「落差 1.80m」。
+  {
+    const slopeStair = {
+      ...box("SR", 0, 0, 1.8, 2, 1.8),
+      topShape: "stair",
+      stair: {
+        path: [
+          { id: "R_a", x: 0, z: 0 },
+          { id: "R_b", x: 0, z: 4 },
+        ],
+      },
+    } as DirectorObject;
+    const st: DirectorState = {
+      ...scene([slopeStair, { ...actor("H", 0, -1), baseY: 1.8 } as DirectorObject], "terrain"),
+      segments: [seg("sH", "H", [0, -1], [0, 3.8], { timeEnd: 8 })],
+    };
+    // 路线终点必须留在楼梯内：越过顶端半步就成了真的"落差"，那是另一回事（该报）。
+    check(
+      "§33 可达性：走上楼梯不报不可达（坡面按坡度判，不再当成落差）",
+      scanReachability(st).length,
+      0,
+    );
+  }
+
+  // ⑬ 沿路径累进的落脚高度：**`baseY` 不再是"能不能走上楼梯"的开关**。
+  //    老规则每点独立、以 `baseY + maxStep` 封顶 ⇒ `baseY` 缺省（0）的演员在楼梯上
+  //    永远升不过 `maxStep = 0.35`：几何在升、人不动，看起来就是"穿过台阶"。
+  //    现在从段首沿路径一步一步滚上去（见 `pathHeight.ts` 的 `progressiveGroundAt`）。
+  {
+    const slopeStair = {
+      ...box("SW2", 0, 0, 1.8, 2, 1.8),
+      topShape: "stair",
+      stair: {
+        path: [
+          { id: "W_a", x: 0, z: 0 },
+          { id: "W_b", x: 0, z: 4 },
+        ],
+      },
+    } as DirectorObject;
+    const st: DirectorState = {
+      // 演员**不带** baseY（= 0）：这正是用户拖进场景的新演员的样子。
+      ...scene([slopeStair, actor("HW", 0, -1)], "terrain"),
+      segments: [seg("sW", "HW", [0, -1], [0, 3.8], { timeEnd: 8 })],
+    };
+    const walker = st.objects.find((o) => o.id === "HW") as DirectorObject;
+    let hi = Number.NEGATIVE_INFINITY;
+    let drop = 0;
+    let prev = Number.NaN;
+    for (let i = 0; i <= 120; i += 1) {
+      const t = (i / 120) * 8;
+      const p = objectPosition(st, "HW", t);
+      const y = pathHeightAt(st, walker, p.x, p.z, t);
+      if (!Number.isNaN(prev)) drop = Math.max(drop, prev - y);
+      prev = y;
+      if (y > hi) hi = y;
+    }
+    // 老规则下这里恒 ≤ 0.325（= maxStep），所以这条会立刻红。
+    // 到顶时不写死 1.8：y 低通（0.15s 窗）有滞后，实测 1.79。
+    check("§33 累进落脚：baseY 缺省也能走到楼梯顶（≥ 1.7）", hi >= 1.7, true);
+    check("§33 累进落脚：全程不回落（不会中途跳到顶层再掉回来）", round6(drop), 0);
+
+    // **终点设在楼梯中间**：走完之后没有"活跃段"了，此时若退回"以 baseY 封顶"的老规则，
+    // 演员会当场掉回地面。终点的高度必须"停在哪就是哪"（段外沿用最近那段的剖面）。
+    const mid: DirectorState = {
+      ...scene([slopeStair, actor("HW3", 0, -1)], "terrain"),
+      segments: [seg("sW3", "HW3", [0, -1], [0, 2], { timeEnd: 4 })],
+    };
+    const w3 = mid.objects.find((o) => o.id === "HW3") as DirectorObject;
+    const p3 = objectPosition(mid, "HW3", 8); // 段早已结束
+    const yMid = pathHeightAt(mid, w3, p3.x, p3.z, 8);
+    check(
+      "§33 累进落脚：终点设在楼梯中间，走完停住不掉回地面（≈ 0.9）",
+      yMid > 0.7 && yMid < 1.0,
+      true,
+    );
+
+    /** 沿路线采样，返回脚底最高值。 */
+    const topAlong = (st: DirectorState, id: string): number => {
+      const o = st.objects.find((x) => x.id === id) as DirectorObject;
+      let top = 0;
+      for (let i = 0; i <= 80; i += 1) {
+        const t = (i / 80) * 8;
+        const p = objectPosition(st, id, t);
+        top = Math.max(top, pathHeightAt(st, o, p.x, p.z, t));
+      }
+      return top;
+    };
+
+    // **凌乱箱体**：新规则只沿「每级 ≤ maxStep 的连续可踏升面」上升 —— 既不会乱爬高箱，
+    // 也能把随手堆的矮箱当台阶走上去（这是本次改动新增的能力）。
+    const chained: DirectorState = {
+      ...scene(
+        [
+          { ...box("K1", 0, 2, 2, 1, 0.3), blocking: false } as DirectorObject,
+          { ...box("K2", 0, 3, 2, 1, 0.6), blocking: false } as DirectorObject,
+          { ...box("K3", 0, 4, 2, 1, 0.9), blocking: false } as DirectorObject,
+          actor("KW", 0, 0),
+        ],
+        "terrain",
+      ),
+      segments: [seg("sK", "KW", [0, 0], [0, 6], { timeEnd: 8 })],
+    };
+    check("§33 累进落脚：三块 0.3 矮箱连成台阶 → 能一级一级爬到 0.9", round6(topAlong(chained, "KW")), 0.9);
+
+    const lump: DirectorState = {
+      ...scene(
+        [{ ...box("K4", 0, 3, 2, 2, 0.6), blocking: false } as DirectorObject, actor("KW2", 0, 0)],
+        "terrain",
+      ),
+      segments: [seg("sK2", "KW2", [0, 0], [0, 6], { timeEnd: 8 })],
+    };
+    check("§33 累进落脚：单块 0.6 箱（> maxStep）不会被踩上去", round6(topAlong(lump, "KW2")), 0);
+  }
+
+  // ⑬ **脚底脚印的整体支撑**（"人物悬空"那条的真守卫）。
+  //
+  // 落脚判据是**点查询**（`supportUnder(x, z)`），它看不见"半个身子在外面"：站在路线
+  // **终点**上时（走完的人、摆在终点上的配角）一半脚印探在楼梯外，画面上就是"人悬在
+  // 半空"，而所有点查询都报正常。实测：0.6 见方的脚印在终点只有 56% 有支撑。
+  // 所以这里按**脚印网格**（渲染真正占据的面积）采样，而不是只看中心点。
+  {
+    const foot = 0.6;
+    let on = 0;
+    let total = 0;
+    for (let i = 0; i <= 8; i += 1) {
+      for (let j = 0; j <= 8; j += 1) {
+        const x = -foot / 2 + (foot * i) / 8;
+        const z = 3 + dep - foot / 2 + (foot * j) / 8;
+        total += 1;
+        if (coversXZ(straight, x, z)) on += 1;
+      }
+    }
+    check("§33 脚印：站在路线终点上整个脚印都有支撑（不再半个身子悬空）", on, total);
+  }
+
+  // ⑭ 环形菜单的**内容**：菜单是内容驱动的（`engine/objectActions`），清单为空就不出现 ——
+  //    所以"该不该弹菜单"与"有哪些动作"是同一个答案。按数据钉住它，而不是靠肉眼确认。
+  {
+    const ids = (list: ObjectAction[]) => list.map((a) => a.id);
+    const host = {
+      ...box("BD", 0, 0, 10, 10, 24),
+      category: "building",
+      role: "set",
+    } as DirectorObject;
+
+    check(
+      "§33 环形菜单：高台（building）有「台阶」",
+      ids(objectActions(scene([host], "terrain"), host, 0)).includes("STAIR_LINK"),
+      true,
+    );
+    // 已经是楼梯 → 不再提供「台阶」（楼梯连楼梯没有意义，还会互相压住）。
+    const stairHost = { ...host, topShape: "stair" } as DirectorObject;
+    check(
+      "§33 环形菜单：目标已是楼梯 → 不提供「台阶」",
+      ids(objectActions(scene([stairHost], "terrain"), stairHost, 0)).includes("STAIR_LINK"),
+      false,
+    );
+    // planar 没有高度 → 台阶无从谈起（与 `topShape` / `baseY` 的生效前提一致）。
+    check(
+      "§33 环形菜单：planar 下不提供「台阶」",
+      ids(objectActions(scene([host]), host, 0)).includes("STAIR_LINK"),
+      false,
+    );
+    // 静态环境不参与运动 → 不提供 MOVE / ACTION（与工具栏手绘路径对 set 的门禁同一条理由）。
+    const plain = box("PR", 0, 0, 1, 1, 1) as DirectorObject;
+    const plainIds = ids(objectActions(scene([plain], "terrain"), plain, 0));
+    check("§33 环形菜单：set 不提供 MOVE", plainIds.includes("MOVE"), false);
+    check("§33 环形菜单：set 不提供 ACTION", plainIds.includes("ACTION"), false);
+    // 演员那两套**原样保留**：这是已经调过的编排入口，行为不能变。
+    const man = actor("A1", 0, 0);
+    check(
+      "§33 环形菜单：演员（空闲）仍是 4 项编排动作",
+      ids(objectActions(scene([man], "terrain"), man, 0)),
+      ["MOVE", "LOOK AT", "FOLLOW", "ACTION"],
+    );
+  }
+
+  // ⑮ 高台连台阶的**规划**（环形菜单「台阶」的数学）。三处最容易悄悄错、且只在画面上
+  //    看得出来的地方：**哪头是坡顶**（由两端面高决定，不由"谁被选中"决定）、总高必须是
+  //    两端**实测**高差、两端锚点必须贴住各自的墙面（而不是捅进楼里 / 接到半空）。
+  {
+    const tower = {
+      ...box("TW", 0, 0, 4, 4, 3),
+      category: "building",
+      role: "set",
+    } as DirectorObject;
+    const st = scene([tower], "terrain");
+
+    // 作者最常见的点法：在高台上点「台阶」→ 点 6m 外的地面。
+    // 若按"源 = 坡脚"实现，这里算出来就是"地面连到地面"（高差 0）—— 那是错的。
+    const up = planStairLink(st, tower, undefined, 6, 0);
+    check("§33 连台阶：高台 → 地面（朝向由高差决定，不是由谁被选中）", up.ok, true);
+    if (up.ok) {
+      check(
+        "§33 连台阶：坡脚在地面、坡顶在楼顶",
+        [round6(up.plan.startY), round6(up.plan.endY)],
+        [0, 3],
+      );
+      check("§33 连台阶：总高 = 两端实测高差（不是作者填的）", round6(up.plan.rise), 3);
+      check("§33 连台阶：坡脚 = 点的那一处", [round6(up.plan.start.x), round6(up.plan.start.z)], [6, 0]);
+      check(
+        "§33 连台阶：坡顶落在楼顶之内（没捅进墙里）",
+        [up.plan.end.x > 0, up.plan.end.x < 2],
+        [true, true],
+      );
+      check(
+        "§33 连台阶：坡度是派生量 = atan(高差 / 水平距离)",
+        round6(up.plan.slopeDeg),
+        round6((Math.atan2(up.plan.rise, up.plan.run) * 180) / Math.PI),
+      );
+    }
+
+    // 高台连更高的高台：从低台顶面爬到高台顶面。
+    const peer = {
+      ...box("T4", 12, 0, 6, 6, 5),
+      category: "building",
+      role: "set",
+    } as DirectorObject;
+    const pair = planStairLink(scene([tower, peer], "terrain"), tower, peer, 12, 0);
+    check("§33 连台阶：高台连更高的高台，通过", pair.ok, true);
+    if (pair.ok) {
+      check(
+        "§33 连台阶：坡脚在低台顶面、坡顶在高台顶面",
+        [round6(pair.plan.startY), round6(pair.plan.endY)],
+        [3, 5],
+      );
+    }
+
+    // 太陡：24m 高台连 20m 外 ⇒ ≈58° > 45° ⇒ 拒绝，且话里带"至少多远"（照着改就能成）。
+    const tall = {
+      ...box("T2", 0, 0, 10, 10, 24),
+      category: "building",
+      role: "set",
+    } as DirectorObject;
+    const steep = planStairLink(scene([tall], "terrain"), tall, undefined, 20, 0);
+    check("§33 连台阶：24m 高台连 20m 外 → 拒绝（太陡）", steep.ok, false);
+    check(
+      "§33 连台阶：拒绝话里给出「至少多远」",
+      !steep.ok && steep.problem.text.includes("至少 24 m"),
+      true,
+    );
+
+    // 两座等高的高台：高差 0 ⇒ 拒绝（台阶要有高差）。
+    const flat = {
+      ...box("T5", 12, 0, 6, 6, 3),
+      category: "building",
+      role: "set",
+    } as DirectorObject;
+    check(
+      "§33 连台阶：两座等高高台 → 拒绝",
+      planStairLink(scene([tower, flat], "terrain"), tower, flat, 12, 0).ok,
+      false,
+    );
+  }
+
+  // ⑯ 预览折线：`plan.points` 既是预览画的虚线、也是最终写进 `stair.path` 的那一份 ——
+  //    所以"加点拉长折线 → 坡度变缓"必须真的成立在**同一份几何**上（否则作者看着变绿、
+  //    生成出来还是红的），而"被拒时也要给出折线"是预览层能提供修法的前提。
+  {
+    const tower24 = {
+      ...box("T9", 0, 0, 10, 10, 24),
+      category: "building",
+      role: "set",
+    } as DirectorObject;
+    const st9 = scene([tower24], "terrain");
+
+    const straight = planStairLink(st9, tower24, undefined, 20, 0);
+    check("§33 连台阶：先给一条太陡的直线（24m 高台连 20m 外）", straight.ok, false);
+    // 这条是预览层的**契约**：几何问题也要把折线给出来，否则作者根本没有"改"的入口。
+    check("§33 连台阶：被拒时仍给出折线（预览才画得出来）", (straight.plan?.points.length ?? 0) >= 2, true);
+
+    const base = straight.plan!;
+    const bends = insertBend(base, { x: 40, z: 0 });
+    const stretched = planStairLink(st9, tower24, undefined, 20, 0, bends);
+    check("§33 连台阶：加转折点后折线变长", stretched.plan!.run > base.run, true);
+    check("§33 连台阶：加转折点后坡度变缓并通过", stretched.ok, true);
+    check(
+      "§33 连台阶：折线 = 坡脚 + 转折点 + 坡顶（顺序即路径顺序）",
+      stretched.plan!.points.length,
+      3,
+    );
+    check(
+      "§33 连台阶：run 是折线长，不是两端直线距离",
+      round6(stretched.plan!.run) !==
+        round6(
+          Math.hypot(
+            stretched.plan!.end.x - stretched.plan!.start.x,
+            stretched.plan!.end.z - stretched.plan!.start.z,
+          ),
+        ),
+      true,
+    );
+    // 再加一个点：应当落在**离它最近的那一段**之后，已有的转折不被挪动。
+    const two = insertBend(stretched.plan!, { x: 10, z: 0 });
+    check(
+      "§33 连台阶：加点落在最近的那一段之后（已有转折不打乱）",
+      [round6(two[0].x), round6(two[1].x)],
+      [40, 10],
+    );
+    check("§33 连台阶：两个转折点都在折线里", planStairLink(st9, tower24, undefined, 20, 0, two).plan!.points.length, 4);
+  }
+
+  // ⑰ 宽度：**人能通过的基本条件**（作者原话），所以它是创建时的输入项，不再是硬编码 1.8；
+  //    并且要看得见 —— 预览里画出走廊的两条边界。
+  {
+    const tower3 = {
+      ...box("TW3", 0, 0, 4, 4, 3),
+      category: "building",
+      role: "set",
+    } as DirectorObject;
+    const st3 = scene([tower3], "terrain");
+
+    const def = planStairLink(st3, tower3, undefined, 6, 0);
+    check("§33 连台阶：宽度默认值", round6(def.plan!.width), round6(DEFAULT_STAIR_WIDTH));
+
+    // 比人的脚宽（0.6）还窄 ⇒ 拒绝。这不是"窄一点"，是人过不去 —— 与坡度同级。
+    const narrow = planStairLink(st3, tower3, undefined, 6, 0, [], 0.5);
+    check("§33 连台阶：宽度 0.5 m（< 人的脚宽 0.6）→ 拒绝", narrow.ok, false);
+    check(
+      "§33 连台阶：宽度拒绝的话里带两个数（当前 / 下限）",
+      !narrow.ok && narrow.problem.text.includes("0.5") && narrow.problem.text.includes("0.6"),
+      true,
+    );
+    // 不算太窄就不该拒绝 —— 否则"宽度可调"是假的。
+    check("§33 连台阶：宽度 1.2 m 正常通过", planStairLink(st3, tower3, undefined, 6, 0, [], 1.2).ok, true);
+
+    // 走廊边界：与折线等长、严格平行、横向相距 宽度/2（直线段上是精确值）。
+    const wide = planStairLink(st3, tower3, undefined, 6, 0, [], 2).plan!;
+    check(
+      "§33 连台阶：两条走廊边界与折线点数一致",
+      [wide.edges[0].length, wide.edges[1].length],
+      [wide.points.length, wide.points.length],
+    );
+    check(
+      "§33 连台阶：边界横向偏移 = 宽度/2",
+      wide.edges.map((edge) =>
+        edge.every((p, i) => Math.abs(Math.abs(p.z - wide.points[i].z) - wide.width / 2) < 1e-6),
+      ),
+      [true, true],
+    );
+
+    // `offsetPolyline` 本身：沿 +X 的直线，法线在 Z 上。
+    const straightLine = [
+      { x: 0, z: 0, y: 0 },
+      { x: 2, z: 0, y: 1 },
+      { x: 4, z: 0, y: 2 },
+    ];
+    const off = offsetPolyline(straightLine, 0.9);
+    check("§33 折线偏移：横向恰为 ±lateral", off.map((p) => round6(p.z)), [-0.9, -0.9, -0.9]);
+    check("§33 折线偏移：不改沿程与高度", off.map((p) => round6(p.x)), [0, 2, 4]);
+  }
+
+  // ⑱ 「走楼梯」：把楼梯自己的路径变成演员的路线。**不做第二次拟合** —— 楼梯的路径与
+  //    演员走的路本来是同一件事，所以这里只加一段接近段；拒绝的两种都是"他上不去"。
+  {
+    const ids = (list: ObjectAction[]) => list.map((a) => a.id);
+    // 直跑：d = 4 ⇒ 路径 4 m、总高 2 ⇒ 26.6°，人能走。
+    const runStair = { ...box("SW", 0, 0, 2, 4, 2), topShape: "stair" } as DirectorObject;
+    const man = actor("A1", 0, -6);
+    const st = scene([runStair, man], "terrain");
+
+    const walk = planStairWalk(st, runStair, man);
+    check("§33 走楼梯：能走（26.6° < 45°）", walk.ok, true);
+    if (walk.ok) {
+      check("§33 走楼梯：路线 = 接近段 + 楼梯路径", walk.plan.points.length, 3);
+      check("§33 走楼梯：接近段退到坡脚之外（不凭空出现在楼梯上）", round6(walk.plan.points[0].z), -2);
+      check("§33 走楼梯：终点就是坡顶", round6(walk.plan.points[2].z), 4);
+      check(
+        "§33 走楼梯：中间点就是楼梯路径的第一个点（同一份几何）",
+        [round6(walk.plan.points[1].x), round6(walk.plan.points[1].z)],
+        [0, 0],
+      );
+    }
+
+    // 太陡：6 m 高 / 4 m 路径 ⇒ 56° > 45° ⇒ 拒绝，话里带两个数。
+    const steepStair = { ...box("SW2", 0, 0, 2, 4, 6), topShape: "stair" } as DirectorObject;
+    const steepWalk = planStairWalk(scene([steepStair, man], "terrain"), steepStair, man);
+    check("§33 走楼梯：太陡（56° > 45°）→ 拒绝", steepWalk.ok, false);
+    check(
+      "§33 走楼梯：拒绝话里带坡度与上限",
+      !steepWalk.ok && steepWalk.text.includes("56") && steepWalk.text.includes("45"),
+      true,
+    );
+
+    // 太窄：0.5 m 宽的楼梯装不下 0.6 m 宽的人 ⇒ 拒绝。
+    const narrowStair = { ...box("SW3", 0, 0, 0.5, 4, 2), topShape: "stair" } as DirectorObject;
+    check(
+      "§33 走楼梯：太窄（0.5 < 0.6）→ 拒绝",
+      planStairWalk(scene([narrowStair, man], "terrain"), narrowStair, man).ok,
+      false,
+    );
+
+    // 同一条楼梯对不同主体结论不同：缓坡 + 1.5 m 宽 ⇒ 人走得（宽 0.6）、车走不得（宽 2.0）。
+    const gentle = { ...box("SW4", 0, 0, 1.5, 4, 1), topShape: "stair" } as DirectorObject;
+    const car = {
+      ...box("CAR", 0, -8, 2, 4.2, 1.5),
+      category: "vehicle",
+      type: "actor",
+      role: "agent",
+    } as DirectorObject;
+    const shared = scene([gentle, man, car], "terrain");
+    check(
+      "§33 走楼梯：同一条楼梯 —— 人走得、车走不得（按各自能力表）",
+      [planStairWalk(shared, gentle, man).ok, planStairWalk(shared, gentle, car).ok],
+      [true, false],
+    );
+
+    // 菜单内容：这一项只在**真有它走得上去的楼梯**时出现（与"点了能不能成"同一个答案）。
+    check(
+      "§33 环形菜单：有可走的楼梯 → 演员有「走楼梯」",
+      ids(objectActions(st, man, 0)).includes("WALK_STAIR"),
+      true,
+    );
+    check(
+      "§33 环形菜单：场景里没有楼梯 → 不出现「走楼梯」",
+      ids(objectActions(scene([man], "terrain"), man, 0)).includes("WALK_STAIR"),
+      false,
+    );
+    check(
+      "§33 环形菜单：只有太陡的楼梯 → 也不出现",
+      ids(objectActions(scene([steepStair, man], "terrain"), man, 0)).includes("WALK_STAIR"),
+      false,
+    );
+
+    // —— 真的走上去吗 ——
+    // 光有"路线形状对"不算数：把这条路线喂给求解器 + 累进落脚，逐帧看**脚底高度**。
+    // （这一条才拦得住"几何在升、人不动"那一类：数字自洽、画面不对。）
+    const walkMan = actor("A2", 0, -6);
+    const stWalkScene = scene([runStair, walkMan], "terrain");
+    const planned = planStairWalk(stWalkScene, runStair, walkMan);
+    if (planned.ok) {
+      const route = planned.plan.points;
+      const segWalk: MoveSegment = {
+        ...seg("sWalk", "A2", [0, 0], [0, 0], { timeEnd: 8 }),
+        startX: route[0].x,
+        startZ: route[0].z,
+        endX: route[route.length - 1].x,
+        endZ: route[route.length - 1].z,
+        points: route.map((p, i) => ({
+          id: `wp${i}`,
+          type: "path" as const,
+          shape: "LINE" as const,
+          x: p.x,
+          z: p.z,
+        })),
+      };
+      const stWalk: DirectorState = { ...stWalkScene, segments: [segWalk] };
+      const man2 = stWalk.objects.find((o) => o.id === "A2") as DirectorObject;
+      const ys: number[] = [];
+      for (let i = 0; i <= 20; i += 1) {
+        const t = (i / 20) * 8;
+        const p = objectPosition(stWalk, "A2", t);
+        ys.push(pathHeightAt(stWalk, man2, p.x, p.z, t));
+      }
+      check("§33 走楼梯：脚底高度单调不减（不会中途下陷）", ys.every((y, i) => i === 0 || y >= ys[i - 1] - 1e-6), true);
+      check("§33 走楼梯：从地面起步（≈ 0）", round6(ys[0]) <= 0.05, true);
+      check("§33 走楼梯：走到坡顶（≈ 总高 2）", ys[ys.length - 1] >= 1.9, true);
+    }
+
+    // —— 向下走 ——
+    // 起点层高这一步是关键：向上走时路线起点**恰好**在地面（层高 0），所以不写也对；
+    // 向下走时起点在楼顶，层高必须跟着路线起点，否则落脚链条从地面起步、人穿过楼梯。
+    const upPlan = planStairWalk(st, runStair, man, "up");
+    check("§33 走楼梯（上）：起点层高 = 地面（以前不写也对，是巧合）", upPlan.ok ? round6(upPlan.plan.startY) : -1, 0);
+
+    const downPlan = planStairWalk(st, runStair, man, "down");
+    check("§33 走楼梯：向下也能走", downPlan.ok, true);
+    if (downPlan.ok) {
+      check("§33 走楼梯（下）：路线 = 平台接近段 + 倒序路径", downPlan.plan.points.length, 3);
+      check("§33 走楼梯（下）：起点落在到达平台上（不悬空）", round6(downPlan.plan.points[0].z), 5);
+      check("§33 走楼梯（下）：终点就是坡脚", round6(downPlan.plan.points[2].z), 0);
+      check("§33 走楼梯（下）：起点层高 = 楼顶 2（这是必须写回去的那个数）", round6(downPlan.plan.startY), 2);
+    }
+
+    // 抬高的楼梯（坡脚在 3 m）：**只能下来不能上去** —— 从地面一步迈不上 3 m。
+    const elevated = { ...runStair, baseY: 3 } as DirectorObject;
+    const stElevated = scene([elevated, man], "terrain");
+    check(
+      "§33 走楼梯：坡脚悬在 3 m → 向上拒绝（一步迈不上去）",
+      planStairWalk(stElevated, elevated, man, "up").ok,
+      false,
+    );
+    check(
+      "§33 走楼梯：同一条楼梯向下走得成",
+      planStairWalk(stElevated, elevated, man, "down").ok,
+      true,
+    );
+    check(
+      "§33 环形菜单：抬高的楼梯 → 只有「走下来」（菜单跟着可行性变）",
+      ids(objectActions(stElevated, man, 0)).filter((id) => id.startsWith("WALK_")),
+      ["WALK_STAIR_DOWN"],
+    );
+    check(
+      "§33 环形菜单：两向都走得成 → 两项都在",
+      (["WALK_STAIR", "WALK_STAIR_DOWN"] as const).map((want) =>
+        ids(objectActions(st, man, 0)).includes(want),
+      ),
+      [true, true],
+    );
+
+    // —— 向下走的端到端：逐帧看脚底 ——
+    const downMan = actor("A3", 0, 5);
+    const stDownScene = scene([runStair, downMan], "terrain");
+    if (downPlan.ok) {
+      const routeDown = downPlan.plan.points;
+      const segDown: MoveSegment = {
+        ...seg("sDown", "A3", [0, 0], [0, 0], { timeEnd: 8 }),
+        startX: routeDown[0].x,
+        startZ: routeDown[0].z,
+        endX: routeDown[routeDown.length - 1].x,
+        endZ: routeDown[routeDown.length - 1].z,
+        points: routeDown.map((p, i) => ({
+          id: `dp${i}`,
+          type: "path" as const,
+          shape: "LINE" as const,
+          x: p.x,
+          z: p.z,
+        })),
+      };
+      // 同一条路线、只换演员层高 —— 于是"层高该写什么"这件事被量出来，而不是靠推理。
+      // `salt` 顶掉 `pathHeight.ts` 按 (对象, 段) 缓存的高度剖面：两次采样若共用同一
+      // `revision`，第二次会拿到第一次的剖面（实测踩到过：反例量出来与正例一模一样）。
+      const feetWith = (baseY: number, salt: number): number[] => {
+        const world = {
+          ...stDownScene,
+          revision: stDownScene.revision + salt,
+          objects: stDownScene.objects.map((o) => (o.id === "A3" ? { ...o, baseY } : o)),
+          segments: [segDown],
+        } as DirectorState;
+        const who = world.objects.find((o) => o.id === "A3") as DirectorObject;
+        const out: number[] = [];
+        for (let i = 0; i <= 20; i += 1) {
+          const t = (i / 20) * 8;
+          const p = objectPosition(world, "A3", t);
+          out.push(pathHeightAt(world, who, p.x, p.z, t));
+        }
+        return out;
+      };
+      const good = feetWith(downPlan.plan.startY, 1);
+      check(
+        "§33 走楼梯（下）：脚底从楼顶降到地面（首 ≈ 2、末 ≈ 0）",
+        [good[0] > 1.9, good[good.length - 1] < 0.05],
+        [true, true],
+      );
+      check("§33 走楼梯（下）：全程不回升", good.every((y, i) => i === 0 || y <= good[i - 1] + 1e-6), true);
+      // 反例（这就是"层高必须跟着路线起点"的证明）：层高留在地面 0 ⇒ 链条从 0 起步，
+      // 人贴地穿过整座楼梯。数字自洽、画面全错，所以把原因钉在这里而不是只写在注释里。
+      const ignored = feetWith(0, 2);
+      check("§33 走楼梯（下）：层高不写 → 链条从地面起步（人穿过楼梯）", round6(ignored[0]) <= 0.05, true);
+    }
+  }
+
+  // ⑲ 走完楼梯之后：终点能不能落在**平台 / 楼顶**上。
+  //
+  // 作者的问法："楼梯连着一个 building，我能不能把这段 path 的终点设在那个平台上。"
+  // 拆成两件事量，因为它们是两件事：
+  //   ① 走上去的路线本来就收在楼梯顶端 —— 而连到 building 的台阶，顶端就落在楼顶边上；
+  //   ② 把终点再往里挪到楼顶中间，**站位与落脚高度都要跟着对** —— 不能被避障推回去
+  //      （building 对地面来说是障碍），也不能掉回地面。
+  {
+    const bld = {
+      ...box("BLD", 0, 6, 8, 8, 3),
+      category: "building",
+      role: "set",
+    } as DirectorObject;
+    const actor9 = actor("A9", 0, -10);
+    const baseWorld = scene([bld, actor9], "terrain");
+    // 用「连台阶」的规划造出那段台阶（与 store 落库同一份几何，不用手写）。
+    const link = planStairLink(baseWorld, bld, undefined, 0, -8, [], 1.8);
+    check("§33 楼顶：台阶连到 building（16.6° < 45°）", link.ok, true);
+    if (link.ok) {
+      const stair = {
+        id: "LNK",
+        name: "台阶",
+        type: "prop",
+        category: "structure",
+        role: "set",
+        x: link.plan.start.x,
+        z: link.plan.start.z,
+        rotation: 0,
+        topShape: "stair",
+        stair: { path: link.plan.points.map((p, i) => ({ id: `sp${i}`, x: p.x, z: p.z })) },
+        footprint: { w: link.plan.width, d: link.plan.run, h: link.plan.rise },
+        baseY: link.plan.startY,
+        color: "#8b9bb0",
+      } as DirectorObject;
+      const world0 = scene([bld, actor9, stair], "terrain");
+      const walkUp = planStairWalk(world0, stair, actor9, "up");
+      // 连台阶时"坡顶落在楼顶之内"：顶端在楼边（z = 2.0）往里 0.05 —— 也就是**站在楼顶上**。
+      check(
+        "§33 楼顶：台阶的顶端就在楼顶边上（往里 0.05，= 连台阶时接到的那个顶面）",
+        [link.plan.end.z > 2, link.plan.end.z < 2.1],
+        [true, true],
+      );
+      check(
+        "§33 楼顶：走上去的终点 = 楼梯顶端（楼顶边上），不用手动改",
+        walkUp.ok ? round6(walkUp.plan.points[walkUp.plan.points.length - 1].z) : -1,
+        round6(link.plan.end.z),
+      );
+
+      const route = walkUp.ok ? walkUp.plan.points : [];
+      if (route.length >= 2) {
+        // 终点再往里 3 m（= 楼顶中间）：polyline 变成 [起点, ...路线点, 新终点]。
+        const endZ = link.plan.end.z + 3;
+        const segRoof: MoveSegment = {
+          ...seg("sRoof", "A9", [0, 0], [0, 0], { timeEnd: 10 }),
+          startX: route[0].x,
+          startZ: route[0].z,
+          endX: 0,
+          endZ,
+          points: route.slice(1).map((p, i) => ({
+            id: `rp${i}`,
+            type: "path" as const,
+            shape: "LINE" as const,
+            x: p.x,
+            z: p.z,
+          })),
+        };
+        const world: DirectorState = { ...world0, segments: [segRoof] };
+        const who = world.objects.find((o) => o.id === "A9") as DirectorObject;
+        const pEnd = objectPosition(world, "A9", 10);
+        // 这两条原先记的是"已知取舍"（被截在楼前 + 高度与站位不同源）。`blockingRectsForSegment`
+        // 的**端点层高判据**落地后它们应当翻成期望行为 —— 现在就是。
+        check(
+          "§33 楼顶：终点设在楼顶中间 → 他确实走到了那里（不再被截在楼前）",
+          [round6(pEnd.x), round6(pEnd.z)],
+          [0, round6(endZ)],
+        );
+        check(
+          "§33 楼顶：脚底 = 楼顶高度（与站位同源，不是按作者进度硬取）",
+          round6(pathHeightAt(world, who, pEnd.x, pEnd.z, 10)) >= 2.9,
+          true,
+        );
+
+        // **反面（豁免的安全性）**：同一个世界里**没有**那段台阶、终点却照样画在楼里 ——
+        // 他从地面迈不上 3 m 的楼顶，于是那个建筑**照旧是障碍**、照旧把他挡在楼外。
+        // 这正是 `endpointOnTopExempts` 第 3 条判据（"他到底是不是走上来的"）在起作用：
+        // 端点在障碍顶上只算必要条件，够不到那一层就不豁免 —— 所以豁免**不会让人穿墙**。
+        const segWall: MoveSegment = {
+          ...seg("sWall", "A9", [0, 0], [0, 0], { timeEnd: 10 }),
+          startX: 0,
+          startZ: -9.8,
+          endX: 0,
+          endZ,
+          points: [],
+        };
+        const worldWall: DirectorState = { ...baseWorld, segments: [segWall] };
+        check(
+          "§33 楼顶：没有台阶却把终点画在楼里 → 照旧被挡在楼外（豁免不会让人穿墙）",
+          round6(objectPosition(worldWall, "A9", 10).z) < 2,
+          true,
+        );
+        // 全程看一眼：脚底从地面升到楼顶，且**走到楼顶之后平走**（不再上升）。
+        const ys: number[] = [];
+        for (let i = 0; i <= 20; i += 1) {
+          const t = (i / 20) * 10;
+          const p = objectPosition(world, "A9", t);
+          ys.push(pathHeightAt(world, who, p.x, p.z, t));
+        }
+        check("§33 楼顶：脚底单调不减（不会中途下陷）", ys.every((y, i) => i === 0 || y >= ys[i - 1] - 1e-6), true);
+        check(
+          "§33 楼顶：到顶之后是**平走**（最后两段高度相同）",
+          round6(ys[ys.length - 1]) === round6(ys[ys.length - 2]),
+          true,
+        );
+      }
+    }
+  }
+}
+
+console.log("\n[34] 内容末尾：报数必须同时报名（「内容到 Xs」是谁顶的）");
+
+// 时间轴顶栏那句「⚠ 内容到 12.0s」数的是四类里的最大 `timeEnd`：路段 / 约束 / 相机镜头 /
+// 动作片段。它们**不一定都在视野里**（相机有自己的轨道、动作片段在折叠行、对象多了还要横向滚），
+// 所以只报一个数字会把人卡住 —— 作者会对着"内容到 12s"在画面上找不到那 12s 是什么。
+// 守卫钉两件事：末尾取对了，**出处也取对了**。
+{
+  const hero = actor("H1", 0, 0);
+  const base = scene([hero], "terrain");
+  const withSegs: DirectorState = {
+    ...base,
+    segments: [
+      seg("SEG_A", "H1", [0, 0], [1, 0], { timeEnd: 5 }),
+      seg("SEG_B", "H1", [1, 0], [2, 0], { timeEnd: 8 }),
+    ],
+  };
+
+  const bySegment = contentEndCause(withSegs);
+  check("[34] 内容末尾 = 最长的那一段", round6(bySegment.end), 8);
+  check("[34] 并且指出是哪一个（SEG_B，挂在 H1 上）", [bySegment.kind, bySegment.id, bySegment.owner], [
+    "segment",
+    "SEG_B",
+    "H1",
+  ]);
+  check(
+    "[34] rawContentEnd 与出处同源（不会长出第二份算法）",
+    round6(rawContentEnd(withSegs)),
+    round6(bySegment.end),
+  );
+
+  // 动作片段顶到 12s：画面上那几条 MOVE 只到 8s —— 提示必须说出**是动作片段**。
+  const withAction: DirectorState = {
+    ...withSegs,
+    actions: [
+      { id: "ACT_1", object: "H1", kind: "hold", timeStart: 0, timeEnd: 12 } as unknown as ActionClip,
+    ],
+  };
+  const byAction = contentEndCause(withAction);
+  check("[34] 动作片段更长时，末尾与出处一起翻成它", [
+    round6(byAction.end),
+    byAction.kind,
+    byAction.owner,
+  ], [12, "action", "H1"]);
+
+  // 相机镜头同理：相机有独立轨道，最容易被当成"画面上什么都没有"。
+  const withCam: DirectorState = {
+    ...withAction,
+    cameraMoves: [
+      { id: "MV_1", camera: "CAM_01", timeStart: 0, timeEnd: 15 } as unknown as CameraMove,
+    ],
+  };
+  const byCam = contentEndCause(withCam);
+  check("[34] 镜头更长时，出处翻成镜头（并报出是哪台相机）", [
+    round6(byCam.end),
+    byCam.kind,
+    byCam.owner,
+  ], [15, "camera", "CAM_01"]);
+
+  check(
+    "[34] 空场景：末尾 0、没有出处（调用点回退到片长）",
+    [round6(contentEndCause(scene([], "terrain")).end), contentEndCause(scene([], "terrain")).id],
+    [0, ""],
+  );
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败\n`);

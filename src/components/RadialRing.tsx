@@ -2,24 +2,14 @@ import { useState } from "react";
 import { useDirectorStore } from "../state/directorStore";
 import { curveToggleEligible } from "../engine/path";
 import { camCurveEligible } from "../engine/cameraPath";
-import { DirectorState, IntentAction } from "../domain/schema";
+import { IntentAction } from "../domain/schema";
+import { objectActions } from "../engine/objectActions";
 
 const SECTOR_COLORS = ["#285f86", "#2d765f", "#735c2b", "#6a3d68", "#65402e"];
 /** 破坏性动作（删除）用偏红的一档，与其他扇区一眼可分。 */
 const DELETE_COLOR = "#7d3742";
 /** 不合法时被替换为去饱和的灰，明确「不可点」。 */
 const DISABLED_COLOR = "#39434f";
-
-const TIPS: Record<string, string> = {
-  MOVE: "Create a MOVE intent.",
-  FOLLOW: "Create FOLLOW against a target.",
-  "LOOK AT": "Create a LOOK AT intent.",
-  ACTION: "Create an action intent.",
-  STOP: "Stop the current behavior.",
-  "CHANGE PATH": "Edit the current movement path.",
-  "ADD ACTION": "Insert an action at this time.",
-  TARGET: "Set a target.",
-};
 
 function arcPath(cx: number, cy: number, r1: number, r2: number, a0: number, a1: number): string {
   const p = (r: number, a: number) => [cx + Math.cos(a) * r, cy + Math.sin(a) * r];
@@ -28,19 +18,6 @@ function arcPath(cx: number, cy: number, r1: number, r2: number, a0: number, a1:
   const C = p(r2, a1);
   const D = p(r1, a1);
   return `M ${A[0]} ${A[1]} L ${B[0]} ${B[1]} A ${r2} ${r2} 0 0 1 ${C[0]} ${C[1]} L ${D[0]} ${D[1]} A ${r1} ${r1} 0 0 0 ${A[0]} ${A[1]} Z`;
-}
-
-function ringActions(state: DirectorState, objectId: string, time: number): IntentAction[] {
-  const object = state.objects.find((o) => o.id === objectId);
-  const active = state.constraints.some(
-    (q) => q.subject === objectId && time >= q.timeStart && time <= q.timeEnd,
-  );
-  if (object?.type === "actor") {
-    return active
-      ? ["STOP", "LOOK AT", "CHANGE PATH", "ADD ACTION"]
-      : ["MOVE", "LOOK AT", "FOLLOW", "ACTION"];
-  }
-  return ["MOVE", "TARGET", "ACTION"];
 }
 
 type RingItem = {
@@ -114,19 +91,46 @@ function Donut({ items, centerLabel }: { items: RingItem[]; centerLabel: string 
   );
 }
 
-/** 对象环形菜单：轻点（按下未拖动）资产唤起。 */
+/**
+ * 对象环形菜单：轻点（按下未拖动）资产唤起。
+ *
+ * **内容驱动**：扇区来自 `engine/objectActions` 的清单，列表为空就**整个不出现**
+ * （而不是画一个没有扇区的空圈）。于是"该不该弹菜单"与"有哪些动作"是同一个答案；
+ * 打开之前调用点也会先问一次（`hasObjectActions`），免得留下一个看不见却仍会
+ * 吃掉下一次点击的 `radialTarget`。
+ */
 export function RadialRing({ objectId }: { objectId: string }) {
   const state = useDirectorStore((s) => s.state);
   const currentTime = useDirectorStore((s) => s.currentTime);
   const executeIntent = useDirectorStore((s) => s.executeIntent);
+  const beginStairLink = useDirectorStore((s) => s.beginStairLink);
+  const beginWalkPick = useDirectorStore((s) => s.beginWalkPick);
+  const closeRing = useDirectorStore((s) => s.closeRing);
 
-  const actions = ringActions(state, objectId, currentTime);
+  const object = state.objects.find((o) => o.id === objectId);
+  if (!object) return null;
+  const actions = objectActions(state, object, currentTime);
+  if (actions.length === 0) return null;
+
   const items: RingItem[] = actions.map((action, index) => ({
-    key: action,
-    label: action,
-    tip: TIPS[action] ?? action,
-    color: SECTOR_COLORS[index % SECTOR_COLORS.length],
-    onClick: () => executeIntent(objectId, action),
+    key: action.id,
+    label: action.label,
+    tip: action.tip,
+    color: action.destructive ? DELETE_COLOR : SECTOR_COLORS[index % SECTOR_COLORS.length],
+    onClick: () => {
+      if (action.id === "STAIR_LINK") {
+        // 先关菜单再进入"选目标"模式：接下来的一次点击属于画布，不属于菜单。
+        closeRing();
+        beginStairLink(objectId);
+        return;
+      }
+      if (action.id === "WALK_STAIR" || action.id === "WALK_STAIR_DOWN") {
+        closeRing();
+        beginWalkPick(objectId, action.id === "WALK_STAIR" ? "up" : "down");
+        return;
+      }
+      executeIntent(objectId, action.id as IntentAction);
+    },
   }));
 
   return <Donut items={items} centerLabel={objectId} />;

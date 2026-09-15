@@ -2,7 +2,7 @@ import { DirectorObject, DirectorState, Vec3 } from "../domain/schema";
 import { standingHeightFor, supportUnder } from "./ground";
 import { locomotionOf } from "./locomotion";
 import { topPlaneOf } from "./raycast";
-import { pathHeightAt, arcActive, activeSegmentAt, arcEndHeights } from "./pathHeight";
+import { airborneLiftAt, pathHeightAt, arcActive, activeSegmentAt, arcEndHeights } from "./pathHeight";
 import { arcVerticalSpeed } from "./arc";
 import { objectPosition } from "./solver";
 
@@ -89,7 +89,8 @@ export function surfaceAt(
   const support = state.objects.find((o) => o.id === hit.supportId);
   if (!support) return { ...flat, y: hit.y };
 
-  const plane = topPlaneOf(support);
+  // 带上 (x, z)：抽象楼梯是折线顶面，姿态要取**该点所在那一段**的平面。
+  const plane = topPlaneOf(support, x, z);
   if (!plane) return { supportId: hit.supportId, y: hit.y, normal: [0, 1, 0], slopeDeg: 0, aspectDeg: 0 };
 
   // 法线 = 平面系数的前三个分量（未归一化的有符号平面 (nx,ny,nz,c)）。
@@ -109,23 +110,36 @@ export function surfaceAt(
  *
  *   forward = (sin yaw, 0, cos yaw)      // 行进方向（水平投影）
  *   right   = (cos yaw, 0, −sin yaw)     // 右手
- *   pitch   = asin(dot(normal, forward)) // 前倾角（上坡为正）
+ *   pitch   = asin(dot(normal, forward)) // **面向坡上时为负**（后仰，见下）
  *   roll    = asin(dot(normal, right))   // 侧倾角（向右倾为正）
  *
- * ## 为什么 roll 要取负 —— 由 three.js 的欧拉序 `XYZ` 决定，不是自由的
+ * `pitch` 的符号曾经在注释里写反过：上坡面的法线朝**上后方**，所以对齐法线
+ * ⇒ `dot(n, forward) < 0` ⇒ **后仰**。这不是算错，是"抬起前脚"的唯一手段：
+ * 面向坡上时把整个身体后仰一个坡度角，前脚（局部 +Z）就被抬起、正好踩到高出去的那块坡面。
+ * §31 用「面向坡上 → pitch < 0（前脚抬起）」「面向坡下 → pitch > 0」两条钉住。
  *
- * 渲染层写的是 `group.rotation.set(pitch, yaw, roll)`，对应 `R = Rx·Ry·Rz`
- * （three.js `Euler` 的 "XYZ" 是**矩阵相乘序**）。要求"身体局部 +Y 对齐法线"，
- * 即 `R·(0,1,0) = n`。展开 `Rz(r)·(0,1,0) = (−sin r, cos r, 0)`，再乘 `Ry(yaw)`、
- * `Rx(pitch)`，取小角近似可得：
+ * **代价（可见后果）**：人和方块没法只靠整体旋转既贴坡又立直 —— 上坡时整个人会后仰一个
+ * 坡度角（示例里 16.2° 的楼梯就是后仰 16.2°）。这是"没有逐脚 IK"下的必然取舍：
+ * 想同时要「脚贴坡」与「躯干立直」，得让腿 / 踝单独反向旋转，姿态层目前不做。
  *
- *   nx ≈ −sin roll·cos yaw      nz ≈ sin pitch（yaw = 0 时）
+ * ## 欧拉序必须是 `YXZ`（**不是** three.js 默认的 `XYZ`）
  *
- * 于是 `pitch = asin(dot(n, forward))`、**`roll = −asin(dot(n, right))`**。
+ * 这里的 pitch / roll 是**角色自己的轴**上的角度（pitch 绕角色右手、roll 绕角色正前方）。
+ * 默认序 `XYZ` 会把 `rotation.x` 施加在**世界轴**上 —— 于是只有 yaw = 0 的角色恰好对；
+ * 朝 +X 的角色（抽象楼梯的第二段就是这样）会被绕世界 X 转，画面上是**侧倾**，即"人歪了"。
+ * 渲染层因此把角色 group 的 `rotation.order` 设成 `"YXZ"`（`R = Ry·Rx·Rz`，yaw 先作用）。
  *
- * 两个符号不对称是真实的：局部前方是 +Z、局部右方是 +X，而 `rotation.x = +a`
- * 把 +Z 压低、`rotation.z = +a` 把 +X 抬高。`scripts/check-3d.ts` §31 用"面向坡
- * 与横切坡"两个 yaw 同时钉住这两条（单测一个 yaw 会把符号写反却看起来通过）。
+ * 于是 `R·(0,1,0) = n`（身体上轴 = 立足面法线）对**任意朝向**都成立：
+ *
+ *   R·(0,1,0) = Ry(yaw)·(−sin roll, cos roll·cos pitch, cos roll·sin pitch)
+ *
+ * 逐项与"法线在角色局部系的分量"对齐，正是下面两式：
+ *
+ *   pitch = asin(dot(n, forward))、roll = −asin(dot(n, right))
+ *
+ * `roll` 取负号不是自由的：局部前方是 +Z、局部右方是 +X，而 `rotation.z = +a`
+ * 把 +X 那一侧抬高。§31 现在有两条：一条拿矩阵验证"YXZ 下任意 yaw 的上轴 = 法线"，
+ * 一条钉住"面向坡上 / 横切坡"的符号（单测一个 yaw 会把符号写反却看起来通过）。
  *
  * **只处理 pitch + roll，不做 yaw 对齐** —— 朝向仍由求解器（`objectFacing`）唯一定，
  * 姿态不许染指"面朝哪"（否则"边走边转头"会被坡面歪掉）。
@@ -273,9 +287,46 @@ export function stanceOf(
 }
 
 /**
+ * 坡面姿态补偿的强度：0 = 不补偿（整个人跟着坡歪）、1 = 躯干完全竖直。
+ *
+ * 真人站坡是骨盆 / 腿跟坡、躯干立直，所以默认 1。想留一点"上坡自然前倾"就调小它。
+ */
+export const SLOPE_TORSO_COMP = 1;
+
+/**
+ * 坡面姿态补偿（关节角，加到 `spine` 上）：把**上半身**相对坡面 pitch/roll 反向转回来。
+ *
+ * ## 为什么需要
+ *
+ * `stanceOf` 让整个 group 对齐立足面法线 —— 那一步是为了让**脚**贴在坡面上（没有逐脚
+ * IK，只能整体转）。但人不会跟着坡歪：真人站在坡上是骨盆 / 腿跟坡、**躯干立直**。
+ * 少了这一步，走上坡的人会整体后仰一个坡度角（示例里 16.2° 的楼梯就后仰 16.2°），
+ * 侧视角看过去就是"人歪了"；站在坡上正对下坡的人则整体前倾同一个角。
+ *
+ * ## 轴向：实测自 `public/models/Xbot.glb` 的 `mixamorigSpine`，不是猜的
+ *
+ * - `rotation.x` 为正 ⇒ 颈 / 头朝 **+Z**（前方）移动 = 前倾；
+ * - `rotation.z` 为正 ⇒ 颈 / 头朝 **−X**（左侧）移动 = 向左倾。
+ *
+ * 与本项目「模型正面 = 本地 +Z、右手 = +X」**同号**，所以补偿就是 `(−pitch, −roll)`：
+ * `tiltFor` 面向坡上时给的 pitch 为负（后仰），补 `−pitch` 即正（前倾）⇒ 躯干回到竖直。
+ *
+ * 平地 / planar：pitch = roll = 0 ⇒ 返回 `null`，调用方不叠加任何关节角（逐像素不变）。
+ */
+export function torsoCompensation(
+  stance: { pitch: number; roll: number } | null | undefined,
+): Vec3 | null {
+  if (!stance) return null;
+  const x = -stance.pitch * SLOPE_TORSO_COMP;
+  const z = -stance.roll * SLOPE_TORSO_COMP;
+  if (Math.abs(x) < 1e-4 && Math.abs(z) < 1e-4) return null;
+  return [x, 0, z];
+}
+
+/**
  * 该对象此刻是否**离地**（跳跃 / 落差弧线中），以及离地量。
  *
- * 判据：`pathHeightAt`（实际高度，含弧线）− `standingHeightFor`（脚下地面）> `AIRBORNE_EPS`。
+ * 判据来自 `pathHeightAt` 的 `airborneLiftAt`（只在该段有生效弧线时才可能非零）。
  *
  * **判据只该有一个出处** —— `cameraSolver.ts` 的跟跳防抖、本模块的跳跃姿势、
  * 时间轴离地底纹都是同一件事（"人在空中"）。所以这里导出、那两处复用。
@@ -288,9 +339,7 @@ export function airborneOf(
   time: number,
 ): { airborne: boolean; lift: number } {
   if (!object || object.role === "set") return { airborne: false, lift: 0 };
-  const actual = pathHeightAt(state, object, x, z, time);
-  const ground = standingHeightFor(state, object, x, z);
-  const lift = actual - ground;
+  const lift = airborneLiftAt(state, object, x, z, time);
   return { airborne: lift > AIRBORNE_EPS, lift: Math.max(0, lift) };
 }
 

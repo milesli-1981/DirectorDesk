@@ -1113,7 +1113,8 @@ canvas {
   border-color: var(--ap-blue);
   box-shadow: var(--ap-ring);
 }
-/* 片长短于内容：输入框描橙边 + 一枚可点击的提示，点一下就把片长对齐到内容末尾。 */
+/* 片长短于内容：输入框描橙边 + 两枚提示：主按钮「定位」带你去那一条，
+   「对齐片长」把片长拉到内容末尾。 */
 .dur-field.is-overflow input[type="number"] {
   border-color: rgba(255, 159, 10, 0.6);
 }
@@ -1133,6 +1134,14 @@ canvas {
   color: #ffe4b8;
   background: rgba(255, 159, 10, 0.3);
   border-color: rgba(255, 159, 10, 0.6);
+}
+/* 同款外观、但它是"说明"不是按钮（拖动撞到片长时那句话）：不要手型、不要 hover 反馈。 */
+.dur-warn.as-note,
+.dur-warn.as-note:hover {
+  cursor: default;
+  color: #ffcf8a;
+  background: rgba(255, 159, 10, 0.16);
+  border-color: rgba(255, 159, 10, 0.35);
 }
 
 .timecode {
@@ -3015,7 +3024,7 @@ header {
   margin-bottom: 8px;
 }
 .hint {
-  color: var(--ap-text-3);
+  color: var(--ap-text-2);
   font-size: 11px;
   line-height: 1.55;
 }
@@ -3365,7 +3374,7 @@ header {
   margin: 8px 0 0;
   font-size: 11px;
   line-height: 1.55;
-  color: var(--ap-text-3);
+  color: var(--ap-text-2);
 }
 .right pre {
   margin: 8px 0 0;

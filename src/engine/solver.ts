@@ -16,7 +16,7 @@ import {
   tangentAtArcLength,
 } from "./path";
 import { Rect, setRects } from "./occlusion";
-import { blockingRects, routeHeightFor } from "./avoidance";
+import { blockingRects, blockingRectsForSegment, routeHeightFor } from "./avoidance";
 import { locomotionOfId } from "./locomotion";
 import { curveVal, normalizeEase } from "./ease";
 
@@ -50,23 +50,30 @@ function canStraddle(state: DirectorState, o: DirectorObject, r: Rect): boolean 
 }
 
 /**
- * 某对象做路径规划时应考虑的静态障碍。
+ * **一段**做路径规划时应考虑的静态障碍。这是障碍集合的**唯一入口**。
  *
  * 顺序（**不能反**）：全集 → 可达性过滤 → 「骑得过去」过滤。
- * - 可达性过滤（`blockingRects`，见 `engine/avoidance`）：迈得上的台阶、穿得过的桥下、
- *   语义开关标掉的草丛，都不算阻挡 —— 它们不该掰弯整条路径。这是 3D 化的落点。
+ * - 可达性过滤（`blockingRectsForSegment`，见 `engine/avoidance`）：迈得上的台阶、穿得过
+ *   的桥下、语义开关标掉的草丛、以及"**这一段就是在它顶上走**"的高台，都不算阻挡 ——
+ *   它们不该掰弯整条路径。这是 3D 化的落点。
  * - `canStraddle`：编队横向跨度够不够骑过这个障碍。它问的前提是"这本来就是个障碍"，
  *   所以必须排在可达性过滤**之后**；矮障碍已被上一步接管，它的适用面自然收窄（符合预期）。
  *
  * **可视化与运动求解都必须走这里**，否则橙色导航层会显示绕行、agent 却直穿过去。
+ *
+ * ## 为什么按「段」而不是按「对象」
+ *
+ * 早先是 `routeObstacles(state, objectId)`：整段生命里只取一个高度 —— **该对象全部段的
+ * 最小起始落脚高度**。这对"一段内从地面爬到高处"是错的：终点落在楼顶的那一段会被整段
+ * 按地面判，3 m 的楼于是成了墙，**作者画的终点根本走不到**（实测被截在楼前）。按段判
+ * 才能问出"他是从这一段的另一端走上来的吗"，从而把那种障碍剔掉（见 `endpointOnTopExempts`）。
+ * 旧的按对象取法**已删除**：两份取法并存正是"线显示绕行、人却直穿"那类分叉的来源。
  */
-export function routeObstacles(state: DirectorState, objectId: string): Rect[] {
-  const o = state.objects.find((item) => item.id === objectId);
+export function routeObstaclesFor(state: DirectorState, segment: MoveSegment): Rect[] {
+  const o = state.objects.find((item) => item.id === segment.object);
   if (!o) return setRects(state);
-  const loco = locomotionOfId(state, objectId);
-  const fromY = routeHeightFor(state, objectId);
   // planar 下 fromY 恒 0、maxStep = 0 → blockingRects 恒等于 setRects，行为与扩展前逐值一致。
-  return blockingRects(state, objectId, fromY, loco).filter((r) => !canStraddle(state, o, r));
+  return blockingRectsForSegment(state, segment).filter((r) => !canStraddle(state, o, r));
 }
 
 /** 无驱动（Segment / Constraint）时的基础位置。 */
@@ -82,22 +89,21 @@ function basePosition(state: DirectorState, o: DirectorObject, time: number): Ve
   // 环境（set 资产）参与运动求解：路径被挡时 agent 实际走绕行折线。
   // 例外：群队锚点要把「编队骑得过去」的小障碍排除掉——它们不该掰弯整条线路，
   // 而由队员在 local avoidance 里从石头两侧分流绕过（见 canStraddle 注释）。
-  const obstacles = routeObstacles(state, o.id);
-
+  // **按段取**（`routeObstaclesFor`）：停在哪一段就按那一段的端点层高判，见那里的说明。
   const active = ss.find((s) => time >= s.timeStart && time <= s.timeEnd);
-  if (active) return segmentPosition(active, time, obstacles);
+  if (active) return segmentPosition(active, time, routeObstaclesFor(state, active));
 
   // 停留位置同样取绕行折线的端点，避免停在障碍内部。
   const prev = [...ss].reverse().find((s) => time > s.timeEnd);
   if (prev) {
-    const route = segmentRoutePoints(prev, obstacles);
+    const route = segmentRoutePoints(prev, routeObstaclesFor(state, prev));
     const last = route[route.length - 1];
     return { x: last.x, z: last.z };
   }
 
   const next = ss.find((s) => time < s.timeStart);
   if (next) {
-    const route = segmentRoutePoints(next, obstacles);
+    const route = segmentRoutePoints(next, routeObstaclesFor(state, next));
     return { x: route[0].x, z: route[0].z };
   }
 
@@ -217,7 +223,7 @@ const objectRouteCache = new Map<string, ObjectRoute>();
 /**
  * 取对象跨所有 segment 的连续路径 LUT（按 state.revision 缓存，避免每帧重算绕障）。
  *
- * 陷阱：obstacles 必须按【锚点】算。routeObstacles 会剔除「编队骑得过去」的小障碍，
+ * 陷阱：obstacles 必须按【锚点】算。`routeObstaclesFor` 会剔除「编队骑得过去」的小障碍，
  * 而对非锚点队员 canStraddle 恒为 false（保留全部障碍）——若按队员取会得到与锚点不同的
  * 折线，队形会散。故整队统一用锚点 id 取一份折线。
  */
@@ -229,13 +235,14 @@ export function objectRoute(state: DirectorState, objectId: string): ObjectRoute
   const segs = state.segments
     .filter((s) => s.object === objectId)
     .sort((a, b) => a.timeStart - b.timeStart);
-  const rects = routeObstacles(state, objectId);
 
   const pts: Vec2[] = [];
   const cum: number[] = [];
   const segEnds: number[] = [];
   for (const seg of segs) {
-    for (const p of segmentRoutePoints(seg, rects)) {
+    // 每段用自己的障碍集合（`routeObstaclesFor`）—— 与 `basePosition` 同一份，
+    // 否则编队的弧长参数化会与真正走的路线分叉。
+    for (const p of segmentRoutePoints(seg, routeObstaclesFor(state, seg))) {
       const last = pts[pts.length - 1];
       if (!last) {
         pts.push(p);
@@ -634,9 +641,8 @@ export function baseHeading(state: DirectorState, id: string, time: number): num
   const segments = obj
     ? state.segments.filter((s) => s.object === id).sort((a, b) => a.timeStart - b.timeStart)
     : [];
-  const obstacles = routeObstacles(state, id);
   const segDir = (seg: MoveSegment): { x: number; z: number } => {
-    const route = segmentRoutePoints(seg, obstacles);
+    const route = segmentRoutePoints(seg, routeObstaclesFor(state, seg));
     const a0 = route[0];
     const b0 = route[route.length - 1];
     return { x: b0.x - a0.x, z: b0.z - a0.z };

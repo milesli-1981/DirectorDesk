@@ -301,7 +301,7 @@ export function sampleArcHits(
       if (o.walkable === false && o.blocking === false) continue; // 语义放行
       if (!coversXZ(o, p.x, p.z)) continue;
       const bottom = objectBottom(o);
-      const top = o.topShape === "ramp" ? topAt(o, p.x, p.z) : objectTop(o);
+      const top = topAt(o, p.x, p.z);
       // 轨迹点落在盒内 = 撞上。（贴边不留容差：撞就是撞。）
       if (y > bottom + 1e-6 && y < top - 1e-6) {
         return { object: o, at: { x: p.x, y, z: p.z } };
@@ -333,7 +333,7 @@ export function standingAt(
     if (o.role !== "set" || o.hidden || o.walkable === false) continue;
     if (o.id === selfId) continue;
     if (!coversXZ(o, x, z)) continue;
-    const top = o.topShape === "ramp" ? topAt(o, x, z) : objectTop(o);
+    const top = topAt(o, x, z);
     if (top > best) best = top;
   }
   // 没有任何对象覆盖 → 基准面 0，永远站得住。

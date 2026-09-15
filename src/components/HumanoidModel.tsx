@@ -7,6 +7,7 @@ import { useDirectorStore } from "../state/directorStore";
 import { actionPoseAt, staticPoseWeight } from "../engine/actionPose";
 import { findClip, NOMINAL_SPEED, type ModelConfig } from "../engine/modelConfig";
 import { RUN_SPEED } from "../engine/locomotion";
+import { torsoCompensation } from "../engine/stance";
 import { JointName, Pose } from "../domain/schema";
 
 /** 动作切换的交叉淡入时长（秒）。 */
@@ -61,12 +62,15 @@ export function HumanoidGLB({
   objectId,
   height,
   speedRef,
+  stanceRef,
   config,
   color,
 }: {
   objectId: string;
   height: number;
   speedRef: { current: number };
+  /** 父组件每帧写入的坡面姿态：用来把上半身反向转回竖直（见 `torsoCompensation`）。 */
+  stanceRef?: { current: { pitch: number; roll: number } | null };
   config: ModelConfig;
   /** 角色颜色：用来区分不同演员（每个演员独立材质，互不串色）。 */
   color?: string;
@@ -233,6 +237,15 @@ export function HumanoidGLB({
     apply(idleName, wIdle);
     apply(walkName, wWalk, NOMINAL_SPEED.walk);
     apply(runName, wRun, NOMINAL_SPEED.run);
+
+    // 坡面姿态补偿：整个 group 已按立足面法线倾了 pitch/roll —— 那是为了让**脚**贴在坡面上
+    // （没有逐脚 IK，只能整体转）。这里把上半身（spine）反向转回竖直，于是「脚贴坡」与
+    // 「人站直」同时成立。平地 pitch = roll = 0 ⇒ 补偿为 null，一根骨头都不动。
+    const comp = torsoCompensation(stanceRef?.current);
+    if (comp) {
+      const cur = overrideJoints.spine ?? [0, 0, 0];
+      overrideJoints.spine = [cur[0] + comp[0], cur[1] + comp[1], cur[2] + comp[2]];
+    }
 
     // 把用户自定义关节角度叠加到动画之上（动画 mixer 每帧先复位骨骼，此处后于它执行）。
     for (const joint of Object.keys(overrideJoints) as JointName[]) {

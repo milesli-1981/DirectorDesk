@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { DirectorObject, DirectorState } from "../domain/schema";
 import { coversXZ, objectBottom, objectTop, topAt } from "./ground";
+import { runPlane, stairHitAt, stairRunAt, stairRuns, stairSlopeDeg } from "./stair";
 import { effectiveState, worldModeOf } from "./worldMode";
 
 /**
@@ -178,11 +179,21 @@ export function rayObjectBox(
  */
 export function topPlaneOf(
   object: DirectorObject,
+  x?: number,
+  z?: number,
 ): { nx: number; ny: number; nz: number; c: number } | null {
   const bottom = objectBottom(object);
   const top = objectTop(object);
   const h = top - bottom;
   if (h <= EPS) return null;
+  if (object.topShape === "stair") {
+    // 折线顶面**没有单一平面**：给了 (x, z) 就取该点所在那一段的平面（姿态因此正确）；
+    // 没给就退化成水平面 —— 只在"问不到位置"时发生，不会用于求交（求交走 `rayStairTop`）。
+    const run = x === undefined || z === undefined ? null : stairRunAt(object, x, z);
+    const seg = run ?? stairRuns(object)[0];
+    if (!seg) return { nx: 0, ny: 1, nz: 0, c: -top };
+    return runPlane(seg);
+  }
   if (object.topShape !== "ramp" || object.footprint.d <= EPS) {
     return { nx: 0, ny: 1, nz: 0, c: -top };
   }
@@ -198,23 +209,64 @@ export function topPlaneOf(
   };
 }
 
-/** 对象顶面的坡度（度）：flat = 0，ramp = atan(h / d)。 */
+/** 对象顶面的坡度（度）：flat = 0，ramp = atan(h / d)，stair = 作者给的坡度。 */
 export function topSlopeDeg(object: DirectorObject): number {
+  if (object.topShape === "stair") return stairSlopeDeg(object);
   if (object.topShape !== "ramp" || object.footprint.d <= EPS) return 0;
   const h = objectTop(object) - objectBottom(object);
   return (Math.atan2(h, object.footprint.d) * 180) / Math.PI;
 }
 
-/** 射线与该对象顶面的交（不校验 footprint 归属）；返回沿射线的 t。 */
-function rayTopPlane(ray: THREE.Ray, object: DirectorObject): number | null {
-  const plane = topPlaneOf(object);
-  if (!plane) return null;
+/** 射线与一个平面求交；返回沿射线的 t（仅正值）。 */
+function rayPlaneIntersect(
+  ray: THREE.Ray,
+  plane: { nx: number; ny: number; nz: number; c: number },
+): number | null {
   const o = ray.origin;
   const d = ray.direction;
   const denom = plane.nx * d.x + plane.ny * d.y + plane.nz * d.z;
   if (Math.abs(denom) < EPS) return null;
   const t = -(plane.nx * o.x + plane.ny * o.y + plane.nz * o.z + plane.c) / denom;
   return t > EPS ? t : null;
+}
+
+/**
+ * 楼梯顶面与射线的交：**逐段求交取最近的那个**。
+ *
+ * 平面是无限的、段是有限的，所以命中点还要用高度的权威函数 `stairHitAt` 复核 ——
+ * 它落在别的段上时高度必然对不上，该段就被否掉，由那一段自己的那次迭代接住。
+ */
+function rayStairTop(ray: THREE.Ray, object: DirectorObject): number | null {
+  const o = ray.origin;
+  const d = ray.direction;
+  let best: number | null = null;
+  for (const run of stairRuns(object)) {
+    const plane = runPlane(run);
+    const t = rayPlaneIntersect(ray, plane);
+    if (t === null) continue;
+    if (best !== null && t >= best) continue;
+    const px = o.x + d.x * t;
+    const pz = o.z + d.z * t;
+    const y = stairHitAt(object, px, pz);
+    if (Number.isNaN(y)) continue;
+    // 平面在该点的高度（段内线性）；与权威高度一致 ⇒ 命中的确实是这一段。
+    const s = Math.sin(run.heading);
+    const c = Math.cos(run.heading);
+    const along = (px - run.x) * s + (pz - run.z) * c;
+    const tRise = run.length <= EPS ? 0 : Math.min(1, Math.max(0, along / run.length));
+    if (Math.abs(y - (run.y0 + (run.y1 - run.y0) * tRise)) > 1e-3) continue;
+    best = t;
+  }
+  return best;
+}
+
+/** 射线与该对象顶面的交（不校验 footprint 归属）；返回沿射线的 t。 */
+function rayTopPlane(ray: THREE.Ray, object: DirectorObject): number | null {
+  // 楼梯是折线顶面，没有单一平面 —— 逐段求交。
+  if (object.topShape === "stair") return rayStairTop(ray, object);
+  const plane = topPlaneOf(object);
+  if (!plane) return null;
+  return rayPlaneIntersect(ray, plane);
 }
 
 /** 射线与水平面 `y = y0` 的交；返回沿射线的 t。 */
@@ -227,9 +279,9 @@ export function rayPlaneT(ray: THREE.Ray, y0: number): number | null {
 
 /* ------------------------------------------------------------- 地面拾取 */
 
-/** 取对象在 (x, z) 处的顶面高度。斜坡按局部坐标插值，与 topAt 同源。 */
+/** 取对象在 (x, z) 处的顶面高度。斜坡 / 楼梯按局部坐标插值，与 topAt 同源。 */
 function surfaceY(object: DirectorObject, x: number, z: number): number {
-  return object.topShape === "ramp" ? topAt(object, x, z) : objectTop(object);
+  return topAt(object, x, z);
 }
 
 /**

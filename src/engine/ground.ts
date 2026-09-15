@@ -1,5 +1,6 @@
 import { DirectorObject, DirectorState } from "../domain/schema";
 import { locomotionOf } from "./locomotion";
+import { stairCoversXZ, stairHalfExtents, stairHitAt, stairPathOf } from "./stair";
 
 /**
  * 地面查询：**整个 3D 扩展的唯一支点。**
@@ -35,6 +36,8 @@ const CELL = 4;
  * 桶索引与射线拾取的包围范围都用它 —— 它必须是**真**超集，否则查询会漏对象。
  */
 export function objectHalfExtents(object: DirectorObject): { hx: number; hz: number } {
+  // 抽象楼梯的外接盒由**实际梯跑**反推（拐弯楼梯的 AABB 未必等于 footprint）。
+  if (object.topShape === "stair") return stairHalfExtents(object);
   const hw = object.footprint.w / 2;
   const hd = object.footprint.d / 2;
   if (!object.rotation) return { hx: hw, hz: hd };
@@ -69,6 +72,8 @@ export function objectTop(object: DirectorObject): number {
  * 桶索引按 AABB 分桶（旋转矩形的外接盒），是这里的**超集**，所以索引侧无需改动。
  */
 export function coversXZ(object: DirectorObject, x: number, z: number): boolean {
+  // 楼梯是折线，水平占用面不是矩形 —— 逐段判定（见 engine/stair.ts）。
+  if (object.topShape === "stair") return stairCoversXZ(object, x, z);
   const hw = object.footprint.w / 2 + EPS;
   const hd = object.footprint.d / 2 + EPS;
   const dx = x - object.x;
@@ -98,6 +103,12 @@ export function coversXZ(object: DirectorObject, x: number, z: number): boolean 
 export function topAt(object: DirectorObject, x: number, z: number): number {
   const bottom = objectBottom(object);
   const top = objectTop(object);
+  // 抽象楼梯：折线坡面（转弯处为平台）。不在任何梯段上时退回顶面高度 ——
+  // 调用方一律先过 `coversXZ`，所以这一支只在退化情形（未摆好 / 探针落在缝里）兜底。
+  if (object.topShape === "stair") {
+    const y = stairHitAt(object, x, z);
+    return Number.isNaN(y) ? top : y;
+  }
   if (object.topShape !== "ramp" || object.footprint.d <= EPS) return top;
 
   const theta = (object.rotation * Math.PI) / 180;
@@ -315,6 +326,33 @@ export function pathGroundAt(
 ): number {
   const object = state.objects.find((o) => o.id === objectId);
   return object ? standingHeightFor(state, object, x, z) : 0;
+}
+
+/**
+ * 楼梯「连接两个平面」用法的**高差**：终点处支撑面顶面 − 起点处支撑面顶面。
+ *
+ * 与"手填 H"是同一件事的两种来源 —— 作者不必自己去量两层楼差多少，点一下即可。
+ * 排除楼梯自身（否则会量到自己头上）；某一头没有支撑面就记 0（基准面）。
+ *
+ * 这是**一次性取数**（由调用方写进 `footprint.h`），不是持续跟随：支撑面之后被挪动，
+ * 楼梯不会偷偷改高 —— 与"摆放只有一个权威（`baseY` 存绝对值）"同一条原则。
+ */
+export function stairHeightFromPlanes(state: DirectorState, object: DirectorObject): number {
+  const pts = stairPathOf(object);
+  if (pts.length < 2) return 0;
+  const topUnder = (x: number, z: number): number => {
+    let best = 0;
+    for (const o of state.objects) {
+      if (o.id === object.id || o.role !== "set" || o.hidden || o.walkable === false) continue;
+      if (!coversXZ(o, x, z)) continue;
+      const t = topAt(o, x, z);
+      if (t > best) best = t;
+    }
+    return best;
+  };
+  const a = pts[0];
+  const b = pts[pts.length - 1];
+  return topUnder(b.x, b.z) - topUnder(a.x, a.z);
 }
 
 /* ------------------------------------------------- 渲染 / 相机共用的落脚高度 */

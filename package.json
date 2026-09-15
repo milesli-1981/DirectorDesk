@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "check:3d": "node scripts/check-3d.mjs",
+    "check:types": "tsc --noEmit -p tsconfig.scripts.json",
+    "check:3d": "npm run -s check:types && node scripts/check-3d.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

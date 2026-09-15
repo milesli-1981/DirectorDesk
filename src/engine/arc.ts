@@ -16,7 +16,7 @@ import { Locomotion, VerticalArc } from "../domain/schema";
  *
  * ## 时间无关（缓存稳定性的同一根红线）
  *
- * 这些函数**只读弧线自身的参数**（`mode` / `apex` / `fallTo` / `climbSeconds`）
+ * 这些函数**只读弧线自身的参数**（`mode` / `apex` / `climbSeconds`）
  * 与传入的起止高度，**不读 `currentTime`、不读 `state`**。
  * 所以对一条固定弧线，`arcHeightAt` 是纯函数 —— 正反向擦洗一致，可按 revision 缓存，
  * 与 `routeHeightFor`（avoidance.ts）遵守同一条不变量。

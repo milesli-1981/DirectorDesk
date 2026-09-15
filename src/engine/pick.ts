@@ -10,6 +10,7 @@ import {
 } from "../domain/schema";
 import { nearestOnPath, samplePath } from "./path";
 import { objectPosition } from "./solver";
+import { STAIR_HANDLE_LIFT, stairHandleY } from "./stair";
 import { solveCamera } from "./cameraSolver";
 import {
   ENDPOINT_MARKER_LIFT,
@@ -166,6 +167,43 @@ export function hitCameraRay(
       (point.z - ray.origin.z) * ray.direction.z;
     const distance = Math.max(0, along);
     if (!best || distance < best.distance) best = { camera, distance };
+  }
+  return best;
+}
+
+export interface StairPathPointHit {
+  objectId: string;
+  pointId: string;
+  /** 把手球心（= 楼梯表面 + `STAIR_HANDLE_LIFT`）——与渲染同源。 */
+  center: [number, number, number];
+  score: number;
+}
+
+/**
+ * 抽象楼梯路径点的屏幕命中。
+ *
+ * 与相机路径点同一套手感：评分 = 射线到**把手球心**的三维距离 ÷ 该深度下 `radiusPx`
+ * 像素对应的世界长度（见 `markerScore`）。球心高度取 `stairHandleY + STAIR_HANDLE_LIFT`，
+ * 与渲染用同一个数 —— 两边各写一个高度就会出现"看得见、点不中"。
+ */
+export function hitStairPathPointScreen(
+  state: DirectorState,
+  objectId: string,
+  ray: THREE.Ray,
+  radiusPx: number,
+  focalPx: number,
+): StairPathPointHit | null {
+  const object = state.objects.find((o) => o.id === objectId);
+  if (!object || object.topShape !== "stair") return null;
+  const path = object.stair?.path;
+  if (!path || path.length === 0) return null;
+  let best: StairPathPointHit | null = null;
+  for (const p of path) {
+    const y = stairHandleY(object, p.x, p.z) + STAIR_HANDLE_LIFT;
+    const score = markerScore(ray, new THREE.Vector3(p.x, y, p.z), radiusPx, focalPx);
+    if (score <= 1 && (!best || score < best.score)) {
+      best = { objectId, pointId: p.id, center: [p.x, y, p.z], score };
+    }
   }
   return best;
 }

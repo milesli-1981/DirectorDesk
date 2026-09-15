@@ -37,7 +37,10 @@ import { normalizeCamPathShapes } from "../engine/cameraPath";
 import { contentEndTime } from "../engine/timeline";
 import { normalizeCameraKeys, normalizeEase, normalizeSpeedKeys } from "../engine/ease";
 import { ASSET_PRESETS } from "../engine/assetPresets";
+import { objectTop } from "../engine/ground";
 import { placeObject } from "../engine/place";
+import { DEFAULT_STAIR_WIDTH, insertBend, planStairLink } from "../engine/stairLink";
+import { planStairWalk, StairWalkDirection } from "../engine/stairWalk";
 import { settleStack, stackChain } from "../engine/stack";
 import { arraySlots, ArraySpec } from "../engine/array";
 import { DragReachHint } from "../engine/reach";
@@ -280,7 +283,9 @@ export type RadialTarget = { kind: "object" | "point" | "cameraPoint"; id: strin
  *  纯视觉反馈：让「这个把手现在能不能点中」先看得见，命中判定仍由 WorldView 决定。 */
 export type MarkerHover =
   | { kind: "point"; segmentId: string; id: string }
-  | { kind: "endpoint"; segmentId: string; id: "start" | "end" };
+  | { kind: "endpoint"; segmentId: string; id: "start" | "end" }
+  | { kind: "cameraPoint"; id: string }
+  | { kind: "stairPoint"; id: string };
 
 interface DirectorStore {
   state: DirectorState;
@@ -438,6 +443,69 @@ interface DirectorStore {
   setSegmentPoints: (segmentId: string, points: { x: number; z: number }[]) => void;
   /** 手绘路径：为资产创建/复用最后的 MOVE segment，并写入拖拽得到的轨迹点。 */
   drawAssetPath: (objectId: string, points: { x: number; z: number }[]) => void;
+  /**
+   * 手绘路径（**抽象楼梯**）：抽稀后写成这条楼梯自己的水平路线（`stair.path`）。
+   *
+   * 与 `drawAssetPath` **同一套手势、同一个抽稀器**，区别只在"写进哪里"：
+   * 资产画的是"它要走的路"（MOVE segment），楼梯画的是"它自己"（见 docs/3d/00 §9.15）。
+   */
+  drawStairPath: (objectId: string, points: { x: number; z: number }[]) => void;
+
+  /**
+   * 环形菜单「台阶」选中后进入的**选目标**模式：值 = 起点高台的 id，`null` = 未进入。
+   * 进入后画布上的一次点击就是目标（另一个高台或地面），由 `linkStairTo` 生成台阶。
+   */
+  stairLinkFrom: string | null;
+  /**
+   * 选目标模式下的提示 / 拒绝理由（挂在那一处上方）。`null` = 无。
+   * `tone` 只决定画成提示（蓝）还是拒绝（红）—— 拒绝不是失败态，改一下落点就继续。
+   */
+  pickHint: { at: [number, number, number]; text: string; tone: "hint" | "refuse" } | null;
+  /** 进入选目标模式（环形菜单的「台阶」）。 */
+  beginStairLink: (objectId: string) => void;
+  /** 退出（Esc / 生成完成 / 起点已被删）：模式与草稿一起清掉。 */
+  cancelStairLink: () => void;
+  /**
+   * 「走上去 / 走下来」选目标模式：值 = 要安排走路的演员 + 方向，`null` = 未进入。
+   * 进入后画布上的一次点击就是**楼梯**，路线由 `planStairWalk` 生成
+   * （坡度 / 宽度按**他自己的**能力表判，所以同一条楼梯对不同主体结论可能不同）。
+   */
+  walkPick: { actorId: string; direction: StairWalkDirection } | null;
+  /** 进入走楼梯模式（环形菜单的「走上去」/「走下来」挂在演员上）。 */
+  beginWalkPick: (actorId: string, direction: StairWalkDirection) => void;
+  /**
+   * 让 `walkPick` 里那个演员走这条楼梯：复用/新建它最后一条 MOVE 段并写入路线，
+   * 同时把他的**层高**设成路线起点的高度 —— 不设的话向下走会从地面起步、整段穿过楼梯
+   * （见 `engine/stairWalk` 的模块说明）。
+   */
+  assignStairWalk: (stairId: string) => void;
+  /**
+   * 选定目标：`targetId` 非空 = 另一个高台，空 = 地面上的 `(x, z)`。
+   *
+   * 选定后进入**预览**（虚线 + 可加点）而不是直接生成 —— 生成是 `commitStair`。
+   * 只有**语义**问题会挡住（目标是自己 / 可运动资产 / 已是楼梯）；几何问题（太陡等）
+   * 照样进预览，因为"加个转折点拉长它"正是解决它的方式。
+   */
+  pickStairTarget: (targetId: string | null, x: number, z: number) => void;
+  /** 预览里加一个转折点（插在离它最近的那一段之后，与路径点"线上加点"同一手感）。 */
+  addStairBend: (x: number, z: number) => void;
+  /** 改台阶宽度（米）。比人的脚宽还窄会被 `planStairLink` 拒绝生成。 */
+  setStairWidth: (width: number) => void;
+  /** 按当前折线生成台阶。几何不合法时只报告，模式与折线都不变。 */
+  commitStair: () => void;
+  /**
+   * 预览草稿：目标 + 落点 + 作者加的转折点 + 宽度。
+   *
+   * **折线不在这里存** —— 它是 `planStairLink` 每次由这四样重算出来的，于是
+   * "看到的虚线"与"生成的楼梯"不可能分叉（同一样东西只能有一个出处）。
+   */
+  stairDraft: {
+    targetId: string | null;
+    point: { x: number; z: number };
+    bends: Array<{ x: number; z: number }>;
+    /** 走廊宽度（米）= 落库时的 `footprint.w`。人能通过的基本条件。 */
+    width: number;
+  } | null;
   setHandoffMode: (handoffId: string, mode: HandoffMode) => void;
   setCameraJunctionMode: (junctionId: string, mode: HandoffMode) => void;
   deleteSegment: (segmentId: string) => void;
@@ -511,6 +579,7 @@ interface DirectorStore {
         | "style"
         | "stabilize"
         | "followJumpHeight"
+        | "autoFocus"
       >
     >,
   ) => void;
@@ -561,6 +630,19 @@ interface DirectorStore {
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 const round1 = (value: number) => Math.round(value * 10) / 10;
+
+/* ---------------------------------------- 高台连台阶（对象环形菜单的「台阶」） */
+
+/** 连出来的台阶的 id（与 `addAsset` 同一套前缀风格，一眼看得出是"连出来的"）。 */
+function nextStairId(state: DirectorState): string {
+  let index = state.objects.filter((o) => o.id.startsWith("AST_STAIR_")).length + 1;
+  let id = `AST_STAIR_${String(index).padStart(2, "0")}`;
+  while (state.objects.some((o) => o.id === id)) {
+    index += 1;
+    id = `AST_STAIR_${String(index).padStart(2, "0")}`;
+  }
+  return id;
+}
 
 function nextCustomActionId(state: DirectorState): string {
   const list = state.customActions ?? [];
@@ -886,6 +968,10 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
     activeCameraId: "CAM_A",
     viewLocked: false,
     pathDrawMode: false,
+    stairLinkFrom: null,
+    pickHint: null,
+    stairDraft: null,
+    walkPick: null,
     dragging: false,
     terrainGesture: false,
     dragReach: null,
@@ -2068,6 +2154,236 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
       // 手绘是逐帧采样的，先抽稀再落库：只保留真正拐弯的关键点，避免几十个控制点堆在画布上。
       get().setSegmentPoints(segment.id, simplifyPath(points, HAND_DRAW_EPSILON));
       set({ selectedItem: segment.id });
+    },
+
+    drawStairPath: (objectId, points) => {
+      const object = get().state.objects.find((o) => o.id === objectId);
+      if (!object) return;
+      // 与 `drawAssetPath` 同一个抽稀器、同一个容差 —— 两处的手感必须一致。
+      const thin = simplifyPath(points, HAND_DRAW_EPSILON);
+      if (thin.length < 2) return;
+      const stamp = Date.now().toString(36);
+      get().updateAsset(objectId, {
+        // 手绘路径 = 作者在说"这是楼梯"：顶面形状一并在**这个唯一写入点**改掉。
+        // 新拖进来的「台阶」默认是平顶，少了这一步就是"画了不生效"。
+        topShape: "stair",
+        stair: {
+          path: thin.map((p, i) => ({
+            id: `SP_${stamp}_${i}`,
+            x: round1(p.x),
+            z: round1(p.z),
+          })),
+        },
+      });
+    },
+
+    beginStairLink: (objectId) => {
+      const source = get().state.objects.find((o) => o.id === objectId);
+      if (!source) return;
+      set({
+        stairLinkFrom: objectId,
+        // 进入模式立刻给一句"下一步点哪儿、怎么退"，否则画布上没有任何"我已经在等目标"的信号。
+        pickHint: {
+          at: [source.x, objectTop(source), source.z],
+          text: "台阶：点另一个高台或地面生成 · Esc 取消",
+          tone: "hint",
+        },
+      });
+    },
+
+    cancelStairLink: () =>
+      set({ stairLinkFrom: null, pickHint: null, stairDraft: null, walkPick: null }),
+
+    pickStairTarget: (targetId, x, z) => {
+      const store = get();
+      const { state } = store;
+      const source = state.objects.find((o) => o.id === store.stairLinkFrom);
+      // 起点已经不存在（被删 / 换了场景）→ 顺手退出模式，别把菜单挂在空气上。
+      if (!source) {
+        set({ stairLinkFrom: null, pickHint: null, stairDraft: null });
+        return;
+      }
+      const target = targetId ? state.objects.find((o) => o.id === targetId) : undefined;
+      // 几何、拒绝文案、折线都在 engine（可被守卫，见 engine/stairLink.ts）—— store 只管落库。
+      const result = planStairLink(state, source, target, x, z);
+      // 语义问题：没有可画的折线，只报告，留在"选目标"状态让作者重点。
+      if (!result.ok && !result.plan) {
+        set({
+          pickHint: { at: result.problem.at, text: result.problem.text, tone: "refuse" },
+        });
+        return;
+      }
+      // 进预览。几何问题（太陡）也进 —— 预览里加个转折点就能把它拉缓，这是唯一的修法。
+      set({
+        stairDraft: {
+          targetId: target?.id ?? null,
+          point: { x: round1(x), z: round1(z) },
+          bends: [],
+          width: DEFAULT_STAIR_WIDTH,
+        },
+        pickHint: result.ok
+          ? null
+          : { at: result.problem.at, text: result.problem.text, tone: "refuse" },
+      });
+    },
+
+    addStairBend: (x, z) => {
+      const store = get();
+      const { state, stairLinkFrom, stairDraft } = store;
+      if (!stairDraft) return;
+      const source = state.objects.find((o) => o.id === stairLinkFrom);
+      if (!source) return;
+      const target = stairDraft.targetId
+        ? state.objects.find((o) => o.id === stairDraft.targetId)
+        : undefined;
+      const result = planStairLink(
+        state,
+        source,
+        target,
+        stairDraft.point.x,
+        stairDraft.point.z,
+        stairDraft.bends,
+        stairDraft.width,
+      );
+      if (!result.plan) return;
+      set({
+        stairDraft: { ...stairDraft, bends: insertBend(result.plan, { x: round1(x), z: round1(z) }) },
+        pickHint: result.ok
+          ? null
+          : { at: result.problem.at, text: result.problem.text, tone: "refuse" },
+      });
+    },
+
+    setStairWidth: (width) => {
+      const { stairDraft } = get();
+      if (!stairDraft) return;
+      // 夹在一个说得通的区间里：太窄的不是台阶，太宽的只是白费几何。
+      set({ stairDraft: { ...stairDraft, width: Math.min(6, Math.max(0.2, round1(width))) } });
+    },
+
+    commitStair: () => {
+      const store = get();
+      const { state, stairLinkFrom, stairDraft } = store;
+      if (!stairDraft) return;
+      const source = state.objects.find((o) => o.id === stairLinkFrom);
+      if (!source) {
+        set({ stairLinkFrom: null, pickHint: null, stairDraft: null });
+        return;
+      }
+      const target = stairDraft.targetId
+        ? state.objects.find((o) => o.id === stairDraft.targetId)
+        : undefined;
+      const result = planStairLink(
+        state,
+        source,
+        target,
+        stairDraft.point.x,
+        stairDraft.point.z,
+        stairDraft.bends,
+        stairDraft.width,
+      );
+      if (!result.ok) {
+        set({
+          pickHint: { at: result.problem.at, text: result.problem.text, tone: "refuse" },
+        });
+        return;
+      }
+      const { start, startY, rise, run, points, width } = result.plan;
+
+      const id = nextStairId(state);
+      const stamp = Date.now().toString(36);
+      const stair: DirectorObject = {
+        id,
+        name: `台阶：${source.name || source.id} → ${target ? target.name || target.id : "地面"}`,
+        type: "prop",
+        category: "structure",
+        role: "set",
+        x: round1(start.x),
+        z: round1(start.z),
+        rotation: 0,
+        topShape: "stair",
+        stair: {
+          // **预览里看到的那条折线**（含作者加的转折点）原样落库 —— 不重算，免得两者分叉。
+          path: points.map((p, i) => ({ id: `SP_${stamp}_${i}`, x: round1(p.x), z: round1(p.z) })),
+        },
+        // h = 两端**实测**高差（派生量，不是作者填的）；w = 作者在预览里定的宽度；
+        // D = 折线水平长（没画路径时的退路）。
+        footprint: { w: round1(width), d: round1(run), h: round1(rise) },
+        // 底面 = 起点处的地面高度：于是楼梯从这一步的地面起、正好爬到目标面。
+        baseY: round1(startY),
+        color: "#8b9bb0",
+      };
+      // 刻意**不做水平分离**：台阶两端本来就贴住两座高台的墙，被推开就断了。
+      set({
+        state: { ...state, revision: state.revision + 1, objects: [...state.objects, stair] },
+        selectedKind: "object",
+        selectedId: id,
+        selectedItem: null,
+        selectedPoint: null,
+        stairLinkFrom: null,
+        pickHint: null,
+        stairDraft: null,
+      });
+    },
+
+    beginWalkPick: (actorId, direction) => {
+      const actor = get().state.objects.find((o) => o.id === actorId);
+      if (!actor) return;
+      set({
+        walkPick: { actorId, direction },
+        // 与连台阶同一套提示：先说清"下一步点哪儿、怎么退"。
+        pickHint: {
+          at: [actor.x, objectTop(actor), actor.z],
+          text: `${direction === "up" ? "走上去" : "走下来"}：点一条楼梯 · Esc 取消`,
+          tone: "hint",
+        },
+      });
+    },
+
+    assignStairWalk: (stairId) => {
+      const store = get();
+      const { state, walkPick } = store;
+      const actor = state.objects.find((o) => o.id === walkPick?.actorId);
+      const stair = state.objects.find((o) => o.id === stairId);
+      if (!actor || !stair || !walkPick) {
+        set({ walkPick: null, pickHint: null });
+        return;
+      }
+      const result = planStairWalk(state, stair, actor, walkPick.direction);
+      if (!result.ok) {
+        // 拒绝 = 报告：模式保持不动，作者换一条楼梯即可。
+        set({
+          pickHint: { at: [stair.x, objectTop(stair), stair.z], text: result.text, tone: "refuse" },
+        });
+        return;
+      }
+      // 复用它最后一条 MOVE 段（没有就新建）—— 与手绘路径 `drawAssetPath` 同一套：
+      // "这个演员要走的路"只有一条，反复安排应当覆盖它，而不是堆出第二条。
+      const moves = get()
+        .state.segments.filter((s) => s.object === actor.id && s.type === "MOVE")
+        .sort((a, b) => a.timeStart - b.timeStart);
+      let segment = moves[moves.length - 1];
+      if (!segment) {
+        get().addSegment(actor.id, undefined);
+        const after = get()
+          .state.segments.filter((s) => s.object === actor.id)
+          .sort((a, b) => a.timeStart - b.timeStart);
+        segment = after[after.length - 1];
+      }
+      if (!segment) return;
+      // **层高必须跟着路线起点的落脚面**：向下走时起点在楼顶，`baseY` 若留在地面，
+      // 落脚链条会从 0 起步 ⇒ 人贴地穿过整座楼梯（见 engine/stairWalk 模块说明）。
+      get().updateAsset(actor.id, { baseY: round1(result.plan.startY) });
+      // 路线点直接来自楼梯的路径（含接近段）—— 没有第二份几何。
+      get().setSegmentPoints(segment.id, result.plan.points);
+      set({
+        walkPick: null,
+        pickHint: null,
+        selectedKind: "object",
+        selectedId: actor.id,
+        selectedItem: segment.id,
+        selectedPoint: null,
+      });
     },
 
     setHandoffMode: (handoffId, mode) => {

@@ -13,7 +13,7 @@ import { locomotionOf, RUN_SPEED } from "./locomotion";
 import { segmentRoutePoints } from "./path";
 import { arcActive, arcEndHeights } from "./pathHeight";
 import { curveVal, normalizeEase } from "./ease";
-import { routeObstacles } from "./solver";
+import { routeObstaclesFor } from "./solver";
 import { worldModeOf } from "./worldMode";
 
 /**
@@ -185,7 +185,7 @@ function profileAlong(
       if (o.walkable === false) continue;
       if (!coversXZ(o, p.x, p.z)) continue;
       if (objectBottom(o) > head) continue; // 头顶上方的面 → 桥，不是脚下
-      const t = o.topShape === "ramp" ? topAt(o, p.x, p.z) : objectTop(o);
+      const t = topAt(o, p.x, p.z);
       if (t > best) {
         best = t;
         bestId = o.id;
@@ -287,7 +287,7 @@ export function previewArc(kind: GapKind, dh: number, loco: Locomotion): Vertica
 /**
  * 把一条 MOVE 段的**实际行走路线**按可达性切成若干段。
  *
- * 折线来源与运动求解**完全共用**（`routeObstacles` + `segmentRoutePoints`），
+ * 折线来源与运动求解**完全共用**（`routeObstaclesFor` + `segmentRoutePoints`），
  * 所以这条线就是 agent 真正走的路线 —— 不共用就会出现
  * "线绕开了、人却直穿过去"（`WorldView` 里已注释过的约束）。
  *
@@ -299,7 +299,7 @@ export function segmentSpans(state: DirectorState, segment: MoveSegment): ReachS
   if (worldModeOf(state) !== "terrain") return [];
 
   const loco = locomotionOf(state, object);
-  const route = segmentRoutePoints(segment, routeObstacles(state, segment.object));
+  const route = segmentRoutePoints(segment, routeObstaclesFor(state, segment));
   if (route.length < 2) return [];
 
   const { ys, ids } = profileAlong(state, route, object.id, object.baseY ?? 0, loco);
@@ -329,8 +329,20 @@ export function segmentSpans(state: DirectorState, segment: MoveSegment): ReachS
     const i1 = end + 1;
     const dh = ys[i1] - ys[i0];
     const dx = cum[i1] - cum[i0];
-    const { tier, reach } = tierOfGap(dh, dx, loco);
     const kind = kinds[start];
+    let { tier, reach } = tierOfGap(dh, dx, loco);
+    // **连续坡面**（楼梯 / 斜坡）不是"落差"。这些边逐条都迈得上（合并的全是 flat / step），
+    // 但合并后的总量会被 `tierOfGap` 拿去问"能不能攀爬" —— 一条 11m 长的楼梯因此被报成
+    // "落差 1.80m 超过攀爬能力 1.60m"，画布上平白一个红叉。
+    // 能不能走的判据是**坡度**（与 `avoidance.isPassable` 同一套：看坡脚 + 比 maxSlopeDeg）。
+    if (
+      (kind === "flat" || kind === "step") &&
+      dx > 1e-6 &&
+      (Math.atan2(Math.abs(dh), dx) * 180) / Math.PI <= loco.maxSlopeDeg
+    ) {
+      tier = 0;
+      reach = 0;
+    }
 
     const preview = useArc ? null : previewArc(kind, dh, loco);
     const spanLen = cum[i1] - cum[i0] || 1;
@@ -488,7 +500,7 @@ export function takeoffSpeedRatio(state: DirectorState, segment: MoveSegment): n
   const duration = segment.timeEnd - segment.timeStart;
   // 零时长段：速度无从谈起。按全速处理 —— 不凭空造一条"没有助跑"的假警告。
   if (!(duration > 1e-6)) return 1;
-  const route = segmentRoutePoints(segment, routeObstacles(state, segment.object));
+  const route = segmentRoutePoints(segment, routeObstaclesFor(state, segment));
   let len = 0;
   for (let i = 1; i < route.length; i += 1) {
     len += Math.hypot(route[i].x - route[i - 1].x, route[i].z - route[i - 1].z);

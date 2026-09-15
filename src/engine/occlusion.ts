@@ -1,5 +1,6 @@
 import { DirectorObject, DirectorState, Vec2 } from "../domain/schema";
 import { objectBottom, objectTop } from "./ground";
+import { stairRect } from "./stair";
 import { worldModeOf } from "./worldMode";
 
 export interface Rect {
@@ -17,6 +18,8 @@ export interface Vec3 {
 }
 
 export function assetRect(asset: DirectorObject): Rect {
+  // 抽象楼梯的水平占用面由**实际梯跑**反推（拐弯楼梯的 AABB 与 footprint 无关）。
+  if (asset.topShape === "stair") return stairRect(asset);
   return { x: asset.x, z: asset.z, w: asset.footprint.w, d: asset.footprint.d };
 }
 

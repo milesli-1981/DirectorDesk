@@ -13,10 +13,11 @@ import {
   hitObjectRay,
   hitPath,
   hitPathPointScreen,
+  hitStairPathPointScreen,
   pathPolyline,
 } from "../engine/pick";
 import { nearestOnCamPath } from "../engine/cameraPath";
-import { baseHeading, formationForwardShift, formationSlotOf, objectFacing, objectPosition, routeObstacles } from "../engine/solver";
+import { baseHeading, formationForwardShift, formationSlotOf, objectFacing, objectPosition, routeObstaclesFor } from "../engine/solver";
 import {
   ENDPOINT_MARKER_LIFT,
   FOLLOW_LINK_LIFT,
@@ -30,6 +31,7 @@ import {
 } from "../engine/ground";
 import { raycastGround } from "../engine/raycast";
 import { pathHeightAt, arcPolyline, arcEndHeights, arcActive } from "../engine/pathHeight";
+import { STAIR_HANDLE_LIFT, stairHandleY, stairTreads } from "../engine/stair";
 import { stanceOf } from "../engine/stance";
 import { arcAtU, arcHeightAt, arcIsFlat } from "../engine/arc";
 import { sampleArcHits } from "../engine/jump";
@@ -75,19 +77,22 @@ import {
 } from "../domain/schema";
 import { RadialRing, PointRadialRing, CameraPointRadialRing } from "./RadialRing";
 import { LockBadge } from "./LockBadge";
+import { hasObjectActions } from "../engine/objectActions";
+import { planStairLink } from "../engine/stairLink";
 
 const GROUND_PLANE = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 const TARGET = new THREE.Vector3(0, 0, 0);
 const BASE_DISTANCE = 26;
 const DIRECTOR_FOV = 40;
-/** 径向意图环暂未匹配到合适的操作，暂时关闭（置 true 即可恢复点击对象弹出）。 */
-const RING_ENABLED = false;
+
 /** 路径标记（转折点 / 起终点把手）的屏幕命中半径：比图形本身大一圈，鼠标不必精确压在标记上。
  *  按像素而非世界单位给，缩放与移机都不会改变手感；端点是公认最难点的那个，故单独放大。 */
 const POINT_PICK_PX = 24;
 const ENDPOINT_PICK_PX = 26;
 /** 相机 PATH 路径点（含首尾端点）的屏幕命中半径（px）。 */
 const CAM_POINT_PICK_PX = 26;
+/** 相机 PATH 路径线（拖动加点）的屏幕命中带宽（px）。 */
+const CAM_LINE_PICK_PX = 12;
 
 /** 高度手柄的标高吸附半径（世界米）：拖到另一个盒子的顶面附近就自动对齐。
  *  没有它就只能靠落点自动吸附去堆叠，手工微调差几厘米就是穿模或悬空。 */
@@ -96,6 +101,11 @@ const HEIGHT_SNAP = 0.35;
 /** 悬停标记是否已经是同一个：省掉每次 pointermove 都写一遍 store。 */
 function sameMarker(a: MarkerHover | null, b: MarkerHover | null): boolean {
   if (!a || !b) return a === b;
+  // 相机 / 楼梯的把手没有 segmentId（挂在相机 / 对象上），只比 kind + id。
+  if (a.kind === "cameraPoint" || a.kind === "stairPoint") {
+    return b.kind === a.kind && b.id === a.id;
+  }
+  if (b.kind === "cameraPoint" || b.kind === "stairPoint") return false;
   return a.kind === b.kind && a.segmentId === b.segmentId && a.id === b.id;
 }
 
@@ -122,6 +132,8 @@ type DragState =
   | { kind: "new"; segmentId: string; origin: Vec2; current: Vec2 }
   | { kind: "draw"; objectId: string }
   | { kind: "camerapoint"; moveId: string; pointId: string; moved: boolean; origin: Vec2 }
+  // 拖抽象楼梯的路径点：只改这一个点的 x/z，坡度 / 平台 / 踏步全部自动重算。
+  | { kind: "stairpoint"; objectId: string; pointId: string; moved: boolean; origin: Vec2 }
   // 按住相机路径线拖动加点：insertAt = 插入位置，y = 落点高度（取被按线段中点高度）。
   | {
       kind: "cameraNew";
@@ -169,6 +181,91 @@ function planePointAtHeight(event: ThreeEvent<PointerEvent>, h: number): Vec2 | 
   const hit = new THREE.Vector3();
   if (!event.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), -h), hit)) return null;
   return { x: hit.x, z: hit.z };
+}
+
+/** 地面网格的格子边长（米）。与旧 `gridHelper` 一致：1m 一格，作者用步子就能估距离。 */
+const GROUND_GRID_CELL = 1;
+/** 网格开始淡出 / 完全消失的半径（米）。**必须明显小于地面平面**，否则又会在别处露出边。 */
+const GROUND_GRID_FADE_FROM = 18;
+const GROUND_GRID_FADE_TO = 55;
+/**
+ * 地面平面半径（米）。取的比网格大一个量级 —— 网格是**淡出**的（没有边），
+ * 地面却是实心的：它一断就又是一条边，所以让它远到正常取景里根本看不到。
+ */
+const GROUND_HALF = 300;
+
+/**
+ * 地面网格：程序化的 1m 格线 + 距离淡出。
+ *
+ * ## 为什么不用 `gridHelper`（原来就是它）
+ *
+ * `gridHelper` 是**有限**的：`args = [40, 40]` 意味着网格在 ±20m 整齐断掉 —— 地面上
+ * 于是出现一条人造的"世界边界"，作者一缩小就看见。而"把它放大到盖住整块地面"并不能解决：
+ * 远处的格线挤到亚像素，整片会糊成摩尔纹（比一条直边更难看）。
+ *
+ * 所以这里自己画：格线按屏幕导数（`fwidth`）抗锯齿，不透明度随距离衰减，
+ * **在到达地面边缘之前就已经淡没** —— 边界不是被藏起来，而是根本不成立。
+ *
+ * 轴心的两条线（x=0 / z=0）保留更亮的颜色：那是有用的定位参照，不是装饰。
+ */
+function GroundGrid() {
+  const material = useMemo(
+    () =>
+      new THREE.ShaderMaterial({
+        transparent: true,
+        depthWrite: false,
+        uniforms: {
+          uLine: { value: new THREE.Color("#182132") },
+          uAxis: { value: new THREE.Color("#2f3d57") },
+          uCell: { value: GROUND_GRID_CELL },
+          uFadeFrom: { value: GROUND_GRID_FADE_FROM },
+          uFadeTo: { value: GROUND_GRID_FADE_TO },
+        },
+        vertexShader: /* glsl */ `
+          varying vec2 vXZ;
+          void main() {
+            // 平面几何在本地是 XY；绕 X 转 -90° 后即世界 XZ（本地 +y → 世界 −z，取反补偿）。
+            vXZ = vec2(position.x, -position.y);
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: /* glsl */ `
+          uniform vec3 uLine;
+          uniform vec3 uAxis;
+          uniform float uCell;
+          uniform float uFadeFrom;
+          uniform float uFadeTo;
+          varying vec2 vXZ;
+
+          void main() {
+            vec2 g = vXZ / uCell;
+            // 到最近格线的距离，单位是"像素"：除以屏幕导数 ⇒ 线宽恒定、永不摩尔纹。
+            vec2 w = max(fwidth(g), vec2(1e-5));
+            vec2 d = abs(fract(g - 0.5) - 0.5) / w;
+            float line = 1.0 - clamp(min(d.x, d.y), 0.0, 1.0);
+
+            // 轴心两条：宽度按屏幕给（缩放时不会跟着变粗），亮度更高。
+            vec2 onAxis = step(abs(g), max(w * 1.5, vec2(0.02)));
+            float axisLine = max(onAxis.x, onAxis.y);
+
+            // 距离淡出：到 FADE_TO 处彻底消失 —— 于是"网格的边"这件事不存在。
+            float fade = 1.0 - smoothstep(uFadeFrom, uFadeTo, length(vXZ));
+            float alpha = max(line, axisLine) * fade;
+            if (alpha < 0.003) discard;
+
+            gl_FragColor = vec4(mix(uLine, uAxis, axisLine), alpha);
+            #include <colorspace_fragment>
+          }
+        `,
+      }),
+    [],
+  );
+  return (
+    <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.01, 0]} material={material}>
+      {/* 网格几何只需盖住淡出半径；更远的地方它已经透明了。 */}
+      <planeGeometry args={[GROUND_GRID_FADE_TO * 2 + 10, GROUND_GRID_FADE_TO * 2 + 10]} />
+    </mesh>
+  );
 }
 
 /** 地面交点的最大可信距离（世界单位）。
@@ -535,6 +632,60 @@ function NameTag({ text, height }: { text: string; height: number }) {
   );
 }
 
+/**
+ * 抽象楼梯的**视觉**网格。
+ *
+ * 物理是连续折线坡面（`engine/stair.ts`），这里只把每一段画成踏步 ——
+ * 与 `ramp` 一样是"视觉近似、物理精确"，只是这次的近似更贴近实物。
+ * 踏步级高只是渲染细分（`STAIR_VISUAL_STEP`），**不参与任何判定**。
+ *
+ * 局部坐标：父 group 已经把对象摆到「底面中心 + rotation」上，所以这里把楼梯按
+ * `x=0 / z=0 / rotation=0 / bottom=0` 求一遍，得到的恰好就是局部坐标（y 从底面起算）。
+ */
+function StairMesh({ object }: { object: DirectorObject }) {
+  // 踏步的**展开**由 `engine/stair.stairTreads` 统一算（中心 + 朝向，世界坐标）——
+  // 渲染层只做「世界 → 局部」的换算。方向不能再在这里算：曾经这里把步子沿垂直于
+  // 梯跑的轴排开（盒子长边在 Z、位置却沿 X 递增），楼梯就画成了一堆错位的方块。
+  // 父 group 已经把对象摆到「底面中心 + rotation」上（世界→局部的逆旋转与 coversXZ 同源）。
+  const rot = (object.rotation * Math.PI) / 180;
+  const cos = Math.cos(rot);
+  const sin = Math.sin(rot);
+  const bottom = objectBottom(object);
+  const treads = stairTreads(object).map((tread) => {
+    const dx = tread.x - object.x;
+    const dz = tread.z - object.z;
+    return {
+      x: dx * cos - dz * sin,
+      z: dx * sin + dz * cos,
+      heading: tread.heading - rot,
+      width: tread.halfWidth * 2,
+      depth: tread.length,
+      // 实体台阶：从对象底面一直砌到该级顶面（真实楼梯就是实心的）。
+      height: Math.max(tread.top - bottom, 0.02),
+    };
+  });
+  return (
+    <group>
+      {treads.map((tread, index) => (
+        <mesh
+          key={index}
+          position={[tread.x, tread.height / 2, tread.z]}
+          rotation={[0, tread.heading, 0]}
+        >
+          <boxGeometry args={[tread.width, tread.height, tread.depth]} />
+          <meshStandardMaterial
+            color={object.color}
+            roughness={0.7}
+            metalness={0.05}
+            transparent
+            opacity={0.82}
+          />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
 function ActorView({ objectId }: { objectId: string }) {
   const object = useDirectorStore((s) => s.state.objects.find((o) => o.id === objectId));
   const isSelected = useDirectorStore((s) => {
@@ -554,6 +705,20 @@ function ActorView({ objectId }: { objectId: string }) {
   const facingRef = useRef(0);
   // 把当前速度共享给骨骼组件，由其按速度摆腿摆臂（Body Motion 与位移分离）。
   const speedRef = useRef(0);
+  // 把坡面姿态也共享给它：骨骼组件据此把**上半身**反向转回竖直（见 `torsoCompensation`）。
+  // 整个 group 的 pitch/roll 是为了让脚贴住坡面（没有逐脚 IK），躯干不该跟着歪。
+  const stanceRef = useRef<{ pitch: number; roll: number } | null>(null);
+  /**
+   * 欧拉序必须是 **YXZ**（= `R = Ry·Rx·Rz`，yaw 先作用）：
+   *
+   * `tiltFor` 算出的 pitch / roll 是**角色自己的轴**上的角度（pitch 绕角色的右手、roll 绕角色
+   * 的正前方）。three.js 默认序 `XYZ` 把 `rotation.x` 施加在**世界轴**上 —— 于是只有 yaw = 0
+   * 的角色才恰好对；朝 +X 的角色（楼梯第二段就是这样）会被绕世界 X 转，实际效果是**侧倾**，
+   * 画面上就是"人歪了"。
+   */
+  useEffect(() => {
+    if (groupRef.current) groupRef.current.rotation.order = "YXZ";
+  }, []);
 
   useFrame((_, delta) => {
     if (!object) return;
@@ -626,6 +791,8 @@ function ActorView({ objectId }: { objectId: string }) {
   const blockBody =
     object.category === "human" ? (
       <HumanoidRig w={w} d={d} h={h} color={color} speedRef={speedRef} pose={object.pose} objectId={objectId} />
+    ) : object.topShape === "stair" ? (
+      <StairMesh object={object} />
     ) : (
       <mesh position={[0, h / 2, 0]}>
         <boxGeometry args={[w, h, d]} />
@@ -655,6 +822,7 @@ function ActorView({ objectId }: { objectId: string }) {
             objectId={objectId}
             height={h}
             speedRef={speedRef}
+            stanceRef={stanceRef}
             config={modelConfig}
             color={color}
           />
@@ -978,6 +1146,171 @@ function DragReachTip() {
 }
 
 /**
+ * 「选目标」流程的提示（连台阶 / 走楼梯共用）：一句话挂在那一处上方 —— 点哪儿、怎么退。
+ * 被拒时改挂在**被拒的那一处**上方（与 `DragReachTip` 同一手法：问题本身有位置，
+ * 指在那里才说得清）。文案全部由 store 生成（说人话、带数字），这里只负责画。
+ *
+ * 只要 `pickHint` 有值就画 —— 两个流程的进入 / 退出都会设置或清空它，所以不必再判模式。
+ */
+function PickHint() {
+  const note = useDirectorStore((s) => s.pickHint);
+  if (!note) return null;
+  const refuse = note.tone === "refuse";
+  return (
+    <Html
+      position={[note.at[0], note.at[1] + 0.8, note.at[2]]}
+      center
+      style={{ pointerEvents: "none" }}
+      zIndexRange={[55, 0]}
+    >
+      <span
+        className="reach-tip"
+        style={{
+          borderColor: refuse ? "#ff453a" : "#0a84ff",
+          color: refuse ? "#ff453a" : "#8ad1ff",
+        }}
+      >
+        {refuse ? "✕ " : ""}
+        {note.text}
+      </span>
+    </Html>
+  );
+}
+
+/**
+ * 「台阶」预览层：虚线折线 + 转折点 + 生成 / 取消 + **实时坡度读数**。
+ *
+ * 线就是 `planStairLink` 算出来的折线 —— 与最终写进 `stair.path` 的**是同一份**，
+ * 所以"看到的"就是"会生成的"，不存在预览与结果分叉。
+ *
+ * 坡度超限时线变红、生成按钮禁用，并把"折线要拉多长"写在徽标里；作者在画布上往旁边点
+ * 两下（加点拉长折线）就能看着读数变绿 —— 这是"太陡"唯一的修法，也是这一层存在的理由。
+ */
+function StairDraftLayer() {
+  const draft = useDirectorStore((s) => s.stairDraft);
+  const stairLinkFrom = useDirectorStore((s) => s.stairLinkFrom);
+  const state = useDirectorStore((s) => s.state);
+  const commitStair = useDirectorStore((s) => s.commitStair);
+  const cancelStairLink = useDirectorStore((s) => s.cancelStairLink);
+  const setStairWidth = useDirectorStore((s) => s.setStairWidth);
+
+  const source = state.objects.find((o) => o.id === stairLinkFrom);
+  const target = draft?.targetId
+    ? state.objects.find((o) => o.id === draft.targetId)
+    : undefined;
+  const result = useMemo(
+    () =>
+      draft && source
+        ? planStairLink(state, source, target, draft.point.x, draft.point.z, draft.bends)
+        : null,
+    [draft, source, target, state],
+  );
+  if (!draft || !result || !result.plan) return null;
+
+  const bad = !result.ok;
+  const color = bad ? "#ff453a" : "#5ad1c4";
+  const plan = result.plan;
+  const line = plan.points.map((p) => [p.x, p.y + 0.12, p.z] as [number, number, number]);
+  // 转折点（不含两端锚点）：直接取折线的中间点，位置与线严格同源。
+  const bends = plan.points.slice(1, -1);
+  const middle = line[Math.floor(line.length / 2)];
+
+  return (
+    <group>
+      {line.length >= 2 ? (
+        <Line
+          points={line}
+          color={color}
+          lineWidth={2.5}
+          dashed
+          dashSize={0.4}
+          gapSize={0.28}
+        />
+      ) : null}
+      {/* 走廊的两条边界：宽度是"人能不能通过"的基本条件，得看得见（仅预览，不参与判定）。 */}
+      {plan.edges.map((edge, index) => (
+        <Line
+          key={`stairEdge_${index}`}
+          points={edge.map((p) => [p.x, p.y + 0.1, p.z] as [number, number, number])}
+          color={color}
+          lineWidth={1}
+          dashed
+          dashSize={0.22}
+          gapSize={0.22}
+          transparent
+          opacity={0.5}
+        />
+      ))}
+      {bends.map((bend, index) => (
+        <mesh
+          key={index}
+          position={[bend.x, bend.y + 0.14, bend.z]}
+          rotation={[-Math.PI / 2, 0, 0]}
+        >
+          <circleGeometry args={[0.2, 20]} />
+          <meshBasicMaterial color={color} side={THREE.DoubleSide} />
+        </mesh>
+      ))}
+      <Html
+        position={[middle[0], middle[1] + 0.8, middle[2]]}
+        center
+        style={{ pointerEvents: "auto" }}
+        zIndexRange={[46, 0]}
+      >
+        <div
+          onPointerDown={(event) => event.stopPropagation()}
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 2,
+            padding: "4px 8px",
+            borderRadius: 7,
+            background: "rgba(10, 16, 22, 0.88)",
+            border: `1px solid ${color}`,
+            color,
+            fontSize: 11,
+            whiteSpace: "nowrap",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span>
+              {bad ? "✕" : "▲"} 折线 {plan.run.toFixed(1)} m · 坡度 {Math.round(plan.slopeDeg)}°
+            </span>
+            {/* 宽度 = 人能不能通过的基本条件：创建时就能定（之后 Inspector 里也能改）。 */}
+            <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              宽
+              <input
+                type="range"
+                min={0.4}
+                max={4}
+                step={0.1}
+                value={draft.width}
+                onChange={(event) => setStairWidth(Number(event.target.value))}
+                style={{ width: 72 }}
+              />
+              <span style={{ minWidth: 34 }}>{draft.width.toFixed(1)} m</span>
+            </label>
+            <button
+              type="button"
+              disabled={bad}
+              onClick={commitStair}
+              style={{ cursor: bad ? "not-allowed" : "pointer" }}
+            >
+              生成
+            </button>
+            <button type="button" onClick={cancelStairLink}>
+              取消
+            </button>
+          </div>
+          {/* 为什么不能生成 —— 直接在读数旁边说，不必去别处找。 */}
+          {bad ? <span style={{ fontSize: 10 }}>{result.problem.text}</span> : null}
+        </div>
+      </Html>
+    </group>
+  );
+}
+
+/**
  * 跳跃轨迹撞到几何 → 撞点处一个红叉（docs/3d/03 §3）。
  *
  * 只画叉、不弹窗：导演看见形状被挡住了，自己会去 Inspector 里改弧顶或落点。
@@ -1081,7 +1414,7 @@ function SegmentPaths() {
         // 与运动求解共用 segmentRoutePoints **与同一份障碍集合**，因此这条线就是 agent
         // 真正走的路线——群队锚点会把「编队骑得过去」的小障碍排除掉，两边必须一致，
         // 否则会看到橙色线绕行、人却直穿过去。
-        const rects = routeObstacles(state, segment.object);
+        const rects = routeObstaclesFor(state, segment);
         // 可达性分段：`engine/reach.ts` 吃的是**同一份** route + 障碍集合，
         // 所以线上的档位就是求解器眼里的档位，不会分叉。
         const spans = segmentSpans(state, segment);
@@ -1161,7 +1494,7 @@ function OcclusionHighlights() {
   // 高机位从矮墙上方掠过、桥下的视线穿过桥体下方，都不再误报。
   const camPos = { x: resolved.position[0], y: resolved.position[1], z: resolved.position[2] };
   const targetPos = { x: tgt.x, y: resolved.target[1], z: tgt.z };
-  const blockers = blockingAssets(state, camPos, targetPos);
+  const blockers = blockingAssets(state, camPos, targetPos).filter((b) => !b.hidden);
   const occluded = blockers.length > 0;
   const sightColor = occluded ? "#ff5a6a" : "#5fd0c0";
   return (
@@ -1370,6 +1703,45 @@ function PathHandles() {
 }
 
 /**
+ * 抽象楼梯的**路径点把手**（Director View）。
+ *
+ * 与资产路径 / 相机路径同一套交互：把手画在**楼梯表面**上（高度 = `stairHandleY` + 抬升），
+ * 拖它即改这一点的 x/z —— 坡度、转角平台、踏步网格全部随后重算。
+ * 命中判定在 `Interaction` 里用 `hitStairPathPointScreen` 做（屏幕像素，远近手感一致）。
+ */
+function StairPathHandles() {
+  const objectId = useDirectorStore((s) => (s.selectedKind === "object" ? s.selectedId : null));
+  const showHelpers = useDirectorStore((s) => s.viewMode === "director");
+  const hoverId = useDirectorStore((s) =>
+    s.hoverMarker?.kind === "stairPoint" ? s.hoverMarker.id : null,
+  );
+  const object = useDirectorStore((s) =>
+    objectId ? s.state.objects.find((o) => o.id === objectId) : undefined,
+  );
+
+  if (!showHelpers || !object || object.topShape !== "stair") return null;
+  const path = object.stair?.path ?? [];
+  if (path.length < 2) return null;
+
+  const pts = path.map(
+    (p) =>
+      [p.x, stairHandleY(object, p.x, p.z) + STAIR_HANDLE_LIFT, p.z] as [number, number, number],
+  );
+
+  return (
+    <group>
+      <Line points={pts} color="#7ad7ff" lineWidth={2} dashed dashSize={0.35} gapSize={0.25} />
+      {pts.map((p, i) => (
+        <mesh key={path[i].id} position={p}>
+          <sphereGeometry args={[hoverId === path[i].id ? 0.2 : 0.16, 14, 10]} />
+          <meshBasicMaterial color={hoverId === path[i].id ? "#ffffff" : "#7ad7ff"} />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+/**
  * 交接徽标。拆成独立组件只为一件事：让每个徽标**只订阅自己那一个贴地高度数字**，
  * 而不是让整组徽标跟着整个 state 重渲染（那会在播放时每帧重渲染一遍 DOM 按钮）。
  */
@@ -1434,8 +1806,12 @@ function FollowLinks() {
       const line = refs.current[constraint.id];
       if (!line) return;
       const inside = currentTime >= constraint.timeStart && currentTime <= constraint.timeEnd;
-      line.visible = inside;
-      if (!inside) return;
+      // 任一端对象被隐藏时，跟随连线一并隐藏（与对象显隐一致，避免指向看不见的对象）。
+      const hidden =
+        !!state.objects.find((o) => o.id === constraint.subject)?.hidden ||
+        !!state.objects.find((o) => o.id === constraint.target)?.hidden;
+      line.visible = inside && !hidden;
+      if (!inside || hidden) return;
       const a = objectPosition(state, constraint.subject, currentTime);
       const b = objectPosition(state, constraint.target, currentTime);
       // 连线贴地：否则队伍走上台阶后，跟随线还留在地面下。
@@ -1710,6 +2086,9 @@ function CameraPathHandles() {
   const selCamId = useDirectorStore((s) =>
     s.selectedKind === "camera" ? s.selectedId : s.activeCameraId,
   );
+  const hoveredId = useDirectorStore((s) =>
+    s.hoverMarker?.kind === "cameraPoint" ? s.hoverMarker.id : null,
+  );
   const viewMode = useDirectorStore((s) => s.viewMode);
   const moves = useDirectorStore((s) => s.state.cameraMoves);
   if (viewMode !== "director" || !selCamId) return null;
@@ -1722,13 +2101,15 @@ function CameraPathHandles() {
         (m.pathPoints ?? []).map((p, i, arr) => {
           const isStart = i === 0;
           const isEnd = i === arr.length - 1;
+          const hovered = p.id === hoveredId;
           if (isStart || isEnd) {
             const color = isStart ? "#67a7ff" : "#f0a35a";
+            const hoverColor = isStart ? "#a9cdff" : "#ffc79a";
             return (
               <group key={p.id} position={[p.x, p.y, p.z]}>
-                <mesh>
+                <mesh scale={hovered ? 1.35 : 1}>
                   <sphereGeometry args={[0.22, 20, 14]} />
-                  <meshBasicMaterial color={color} />
+                  <meshBasicMaterial color={hovered ? hoverColor : color} />
                 </mesh>
                 <Html
                   center
@@ -1736,8 +2117,9 @@ function CameraPathHandles() {
                   style={{ pointerEvents: "none" }}
                   zIndexRange={[25, 0]}
                 >
-                  <span className="node-label" style={{ color }}>
+                  <span className="node-label" style={{ color: hovered ? hoverColor : color }}>
                     {isStart ? "START" : "END"}
+                    {hovered ? " · 拖动移动" : ""}
                   </span>
                 </Html>
               </group>
@@ -1745,13 +2127,18 @@ function CameraPathHandles() {
           }
           const isArc = p.shape === "ARC";
           return (
-            <mesh key={p.id} position={[p.x, p.y, p.z]} rotation={[-Math.PI / 2, 0, 0]}>
+            <mesh
+              key={p.id}
+              position={[p.x, p.y, p.z]}
+              rotation={[-Math.PI / 2, 0, 0]}
+              scale={hovered ? 1.35 : 1}
+            >
               {isArc ? (
                 <ringGeometry args={[0.18, 0.3, 26]} />
               ) : (
                 <circleGeometry args={[0.24, 26]} />
               )}
-              <meshBasicMaterial color="#7ad7ff" side={THREE.DoubleSide} />
+              <meshBasicMaterial color={hovered ? "#b9e6ff" : "#7ad7ff"} side={THREE.DoubleSide} />
             </mesh>
           );
         }),
@@ -1819,7 +2206,7 @@ function CameraRig() {
       resolved.target[1] - camY,
       resolved.target[2] - camZ,
     );
-    if (!intendedTargetId) {
+    if (!intendedTargetId && camObj?.autoFocus !== false) {
       const tanV = Math.tan((resolved.fovDeg * Math.PI) / 360);
       const tanH = tanV * aspectValue(state.aspectRatio);
       const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
@@ -2056,7 +2443,10 @@ function Interaction() {
     event: ThreeEvent<PointerEvent>,
     state: DirectorState,
     objectId: string,
-  ): MarkerHover | null => {
+  ):
+    | { kind: "point"; segmentId: string; id: string }
+    | { kind: "endpoint"; segmentId: string; id: "start" | "end" }
+    | null => {
     const fov = (camera as THREE.PerspectiveCamera).fov || DIRECTOR_FOV;
     const focalPx = size.height / (2 * Math.tan((fov * Math.PI) / 360));
     const endpoint = hitEndpointScreen(state, objectId, event.ray, ENDPOINT_PICK_PX, focalPx);
@@ -2074,11 +2464,15 @@ function Interaction() {
       if (!drag) return;
       const store = useDirectorStore.getState();
       if (drag.kind === "object" && !drag.moved) {
-        if (RING_ENABLED) store.openRing(drag.id);
+        // 轻点对象：**有可操作的内容才弹环形菜单**（内容驱动，见 engine/objectActions）。
+        // 判空放在这里而不是菜单组件里：否则会留下一个看不见、却仍会吃掉下一次点击的
+        // radialTarget（`handleDown` 见到它就 closeRing 并 return）。
+        const object = store.state.objects.find((o) => o.id === drag.id);
+        if (object && hasObjectActions(store.state, object, store.currentTime)) {
+          store.openRing(drag.id);
+        }
       } else if (drag.kind === "point" && !drag.moved) {
         // 轻点路径点（按下未拖动）：唤起环形菜单做 Line/Curve 切换或删除。
-        // 这里刻意不受 RING_ENABLED 约束：那是旧的对象菜单开关且当前为 false，
-        // 若一并套用，路径点在移除内联按钮后就没有操作入口了。
         store.openPointRing(drag.pointId);
       } else if (drag.kind === "camerapoint" && !drag.moved) {
         // 轻点相机 PATH 中间点：唤起环形菜单（CURVE / DEL）；首尾端点不弹菜单。
@@ -2101,7 +2495,12 @@ function Interaction() {
         if (moved) store.addPathPoint(drag.segmentId, drag.current.x, drag.current.z);
       } else if (drag.kind === "draw") {
         const pts = livePtsRef.current;
-        if (pts.length >= 2) store.drawAssetPath(drag.objectId, pts);
+        if (pts.length >= 2) {
+          // 楼梯与资产共用同一套手绘手势，落笔时才分派：楼梯画的是**它自己**的路线。
+          const target = store.state.objects.find((o) => o.id === drag.objectId);
+          if (target?.topShape === "stair") store.drawStairPath(drag.objectId, pts);
+          else store.drawAssetPath(drag.objectId, pts);
+        }
         livePtsRef.current = [];
         setLivePts([]);
       }
@@ -2120,6 +2519,29 @@ function Interaction() {
     if (store.viewMode !== "director") return;
     if (store.radialTarget) {
       store.closeRing();
+      return;
+    }
+
+    // 「台阶」：选目标 → 预览（虚线 + 加点）。这一次点击属于它，不属于选择 / 拖拽。
+    // 必须排在最前 —— 否则点到的高台会先被当成"选中并开始拖它"。
+    if (store.stairLinkFrom) {
+      if (store.stairDraft) {
+        // 预览阶段：点击 = 往折线上加一个转折点（把折线拉长就变缓 —— "太陡"的唯一修法）。
+        if (point) store.addStairBend(point.x, point.z);
+        return;
+      }
+      const hitTolerance = 0.7 / store.zoom;
+      const hit = hitObjectRay(store.state, store.currentTime, event.ray, hitTolerance);
+      if (!hit && !point) return;
+      store.pickStairTarget(hit?.object.id ?? null, point?.x ?? 0, point?.z ?? 0);
+      return;
+    }
+
+    // 「走上去 / 走下来」：这一次点击是**楼梯**。同样必须走在选择 / 拖拽之前。
+    if (store.walkPick) {
+      const walkTolerance = 0.7 / store.zoom;
+      const hitStair = hitObjectRay(store.state, store.currentTime, event.ray, walkTolerance);
+      if (hitStair) store.assignStairWalk(hitStair.object.id);
       return;
     }
 
@@ -2153,6 +2575,31 @@ function Interaction() {
 
     if (!point) return;
 
+    // 抽象楼梯：选中楼梯时，**路径点把手优先于"点到楼梯本体"** ——
+    // 把手就贴在楼梯面上，不先拦下来就会永远点在楼梯的盒子上。
+    if (store.selectedKind === "object") {
+      const fovPx = (camera as THREE.PerspectiveCamera).fov || DIRECTOR_FOV;
+      const focalPx = size.height / (2 * Math.tan((fovPx * Math.PI) / 360));
+      const stairPt = hitStairPathPointScreen(
+        store.state,
+        store.selectedId,
+        event.ray,
+        CAM_POINT_PICK_PX,
+        focalPx,
+      );
+      if (stairPt) {
+        beginDrag({
+          kind: "stairpoint",
+          objectId: stairPt.objectId,
+          pointId: stairPt.pointId,
+          moved: false,
+          origin: point,
+        });
+        capturePointer(event);
+        return;
+      }
+    }
+
     // 相机 PATH：选中相机时，路径点 / 端点（屏幕命中）可拖拽；按住路径线拖动可加点。
     const selCamId = store.selectedKind === "camera" ? store.selectedId : store.activeCameraId;
     if (selCamId && !store.pathDrawMode) {
@@ -2183,7 +2630,12 @@ function Interaction() {
       );
       if (camMove) {
         const near = nearestOnCamPath(camMove.pathPoints ?? [], event.ray);
-        if (near && near.distance < 0.45) {
+        // 命中容差按屏幕像素折算成世界长度（与路径点同一手感，远近一致）。
+        const lineTol = near
+          ? (CAM_LINE_PICK_PX * event.ray.origin.distanceTo(new THREE.Vector3(near.x, near.y, near.z))) /
+            focalPx
+          : 0;
+        if (near && near.distance < lineTol) {
           store.selectCamera(selCamId);
           store.selectItem(camMove.id);
           beginDrag({
@@ -2202,14 +2654,15 @@ function Interaction() {
     }
 
     // 手绘路径模式：在画布上拖拽，把轨迹写入当前选中的资产（无选中资产时不拦截，便于先点选）。
-    // set 资产是静态环境 / 障碍，不参与运动，禁用对其手绘路径。
+    // set 资产是静态环境 / 障碍，不参与运动，禁用对其手绘路径 —— **抽象楼梯例外**：
+    // 它的"路径"就是这条楼梯自己的水平路线，正是该手绘的东西（见 docs/3d/00 §9.15）。
     if (store.pathDrawMode) {
       const targetId = store.selectedKind === "object" ? store.selectedId : null;
-      const targetRole =
+      const target =
         targetId && store.selectedKind === "object"
-          ? store.state.objects.find((o) => o.id === targetId)?.role
+          ? store.state.objects.find((o) => o.id === targetId)
           : undefined;
-      if (targetId && targetRole !== "set") {
+      if (targetId && (target?.role !== "set" || target?.topShape === "stair")) {
         drawingRef.current = true;
         livePtsRef.current = [point];
         setLivePts([point]);
@@ -2288,8 +2741,21 @@ function Interaction() {
       // 空闲时维持悬停反馈：把手能不能被选中，得先让用户看得见（高亮 + 放大 + 光标变抓握）。
       // 手绘路径模式下不提示——那时画布上一切都归「画路径」，标记点了也不作数。
       const objectId = store.selectedKind === "object" ? store.selectedId : null;
-      const next =
+      let next: MarkerHover | null =
         objectId && !store.pathDrawMode ? markerUnder(event, store.state, objectId) : null;
+      // 相机 PATH 路径点同款悬停：命中即设为悬停标记（驱动放大 + 抓握光标）。
+      if (!next && store.selectedKind === "camera" && !store.pathDrawMode) {
+        const fovPx = (camera as THREE.PerspectiveCamera).fov || DIRECTOR_FOV;
+        const focalPx = size.height / (2 * Math.tan((fovPx * Math.PI) / 360));
+        const pt = hitCameraPathPointScreen(
+          store.state,
+          store.selectedId,
+          event.ray,
+          CAM_POINT_PICK_PX,
+          focalPx,
+        );
+        if (pt) next = { kind: "cameraPoint", id: pt.point.id };
+      }
       if (!sameMarker(next, store.hoverMarker)) store.setHoverMarker(next);
       return;
     }
@@ -2370,6 +2836,20 @@ function Interaction() {
       store.movePathPoint(drag.segmentId, drag.pointId, point.x, point.z);
     } else if (drag.kind === "endpoint") {
       store.moveEndpoint(drag.segmentId, drag.which, point.x, point.z);
+    } else if (drag.kind === "stairpoint") {
+      // 拖楼梯路径点：只改这一个点的 x/z，坡度 / 转角平台 / 踏步全部自动重算。
+      const stairObj = store.state.objects.find((o) => o.id === drag.objectId);
+      const stairPath = stairObj?.stair?.path;
+      if (stairObj && stairPath) {
+        if (Math.hypot(point.x - drag.origin.x, point.z - drag.origin.z) > 0.15) drag.moved = true;
+        store.updateAsset(drag.objectId, {
+          stair: {
+            path: stairPath.map((p) =>
+              p.id === drag.pointId ? { ...p, x: point.x, z: point.z } : p,
+            ),
+          },
+        });
+      }
     } else if (drag.kind === "camerapoint") {
       // 只改 XZ，Y 保持把手原有高度；光标投到「把手所在高度的水平面」，把手才贴住光标。
       const mv = store.state.cameraMoves.find((m) => m.id === drag.moveId);
@@ -2413,10 +2893,13 @@ function Interaction() {
           if (!dragRef.current) useDirectorStore.getState().setHoverMarker(null);
         }}
       >
-        <planeGeometry args={[140, 140]} />
+        {/* 地面：既是背板，也是**指针拾取的目标**（点选 / 拖拽都打在这块面上），所以它必须实心。
+            它比网格大一个量级 —— 网格是淡出的（没有边），地面若也停在近处，就会在远处
+            露出一条笔直的边界线（只是把"网格的边"换成"地面的边"，问题没解决）。 */}
+        <planeGeometry args={[GROUND_HALF * 2, GROUND_HALF * 2]} />
         <meshStandardMaterial color="#101725" roughness={0.95} />
       </mesh>
-      <gridHelper args={[40, 40, "#2f3d57", "#182132"]} position={[0, 0.01, 0]} />
+      <GroundGrid />
 
       {heightTarget ? <HeightHandle object={heightTarget} onGrab={grabHeight} /> : null}
       <ArcPreviewLayer onGrabApex={grabApex} />
@@ -2505,6 +2988,11 @@ function ViewPanControls() {
     };
     const down = (e: KeyboardEvent) => {
       if (isTyping()) return;
+      // 「台阶」选目标模式的唯一"不生成"出口（点空白不算：那更像是点歪了，不是放弃）。
+      if (e.key === "Escape" && useDirectorStore.getState().stairLinkFrom) {
+        useDirectorStore.getState().cancelStairLink();
+        return;
+      }
       const k = e.key.toLowerCase();
       if (["w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright"].includes(k)) {
         keys.current[k] = true;
@@ -2660,7 +3148,10 @@ function WorldScene() {
       <Interaction />
       <SegmentPaths />
       <PathHandles />
+      <StairPathHandles />
       <DragReachTip />
+      <PickHint />
+      <StairDraftLayer />
       <HandoffMarkers />
       <FollowLinks />
       <Actors />
@@ -2702,6 +3193,8 @@ function GroupGraph() {
     <>
       {groups.map((g) => {
         if (g.members.length < 2 || !g.dynamics) return null;
+        // 整队成员都被隐藏时不画队伍标记。
+        if (!g.members.some((id) => !state.objects.find((o) => o.id === id)?.hidden)) return null;
         const anchor = objectPosition(state, g.members[0], currentTime);
         // 包围圆：以「静止编队」的质心为心、最远槽位 + 余量为半径。
         // 用编队槽位（不含弹簧偏移）计算，所以圈只随编队/间距/人数变化而变，
@@ -2924,16 +3417,28 @@ export function WorldView() {
       ? s.state.objects.find((o) => o.id === s.selectedId)?.role
       : undefined,
   );
+  // 抽象楼梯虽然 role === "set"，但它的"路径"是它自己的水平路线 —— 手绘对它同样有意义。
+  const selectedDrawableStair = useDirectorStore(
+    (s) =>
+      s.selectedKind === "object" &&
+      s.state.objects.find((o) => o.id === s.selectedId)?.topShape === "stair",
+  );
   const selectedPoint = useDirectorStore((s) => s.selectedPoint);
   const viewLocked = useDirectorStore((s) => s.viewLocked);
   const toggleViewLocked = useDirectorStore((s) => s.toggleViewLocked);
   const pathDrawMode = useDirectorStore((s) => s.pathDrawMode);
+  const updateAsset = useDirectorStore((s) => s.updateAsset);
   // 光标是否停在路径标记上（转折点 / 起终点把手）：命中与否由画布内的判定决定，
   // 这里只负责把它翻译成「抓握」光标与文字提示。只认当前选中对象的标记——
   // 换选中对象后旧悬停立即失效，不会留下一个抓握光标指向看不见的把手。
   const hoverMarker = useDirectorStore((s) => {
     const marker = s.hoverMarker;
-    if (!marker || s.selectedKind !== "object" || !s.selectedId) return null;
+    if (!marker) return null;
+    // 相机 PATH 路径点：选中相机即视作可抓握（画布内已判定命中）。
+    if (marker.kind === "cameraPoint") return s.selectedKind === "camera" ? marker : null;
+    // 抽象楼梯路径点：选中那个楼梯即视作可抓握（画布内已判定命中）。
+    if (marker.kind === "stairPoint") return s.selectedKind === "object" ? marker : null;
+    if (s.selectedKind !== "object" || !s.selectedId) return null;
     const segment = s.state.segments.find((item) => item.id === marker.segmentId);
     return segment && segment.object === s.selectedId ? marker : null;
   });
@@ -2941,6 +3446,11 @@ export function WorldView() {
   // 只有「不可达」才值得变红：需跳跃 / 需攀爬 / 有落差都是"能过，只是要处理"，
   // 不值得拿红色去喊。红色留给真正过不去的。
   const dragReachBlocked = useDirectorStore((s) => s.dragReach?.tier === 3);
+  // 「选目标」流程（连台阶 / 走楼梯）：借手绘路径那套"正在绘制"的画布外观
+  // （十字准星 + 蓝框）—— 三者同义：接下来的一次点击属于画布，不属于选择。
+  const stairLinking = useDirectorStore(
+    (s) => s.stairLinkFrom !== null || s.walkPick !== null,
+  );
   const togglePathDraw = useDirectorStore((s) => s.togglePathDraw);
   const addAsset = useDirectorStore((s) => s.addAsset);
   const addCamera = useDirectorStore((s) => s.addCamera);
@@ -3150,7 +3660,7 @@ export function WorldView() {
       ) : null}
 
       <div
-        className={`canvasWrap${pathDrawMode ? " is-drawing" : ""}${
+        className={`canvasWrap${pathDrawMode || stairLinking ? " is-drawing" : ""}${
           hoverMarker ? " is-handle" : ""
         }${hoverMarker && dragging ? " is-handle-drag" : ""}${
           // 拖到了不可达的位置：光标变红 + 画布压一圈红边（docs/3d/03 §6）。
@@ -3279,13 +3789,22 @@ export function WorldView() {
               <button
                 type="button"
                 className={`vf-tool ${pathDrawMode ? "on" : ""}`}
-                disabled={selectedRole === "set"}
                 title={
-                  selectedRole === "set"
-                    ? "set 为静态环境 / 障碍，不参与运动，禁用路径绘制"
-                    : "手绘路径：开启后在画布上拖拽绘制选中资产的移动轨迹"
+                  selectedDrawableStair
+                    ? "手绘路径：开启后在画布上拖拽 —— 画这条楼梯的水平路线（转角即拐弯，自动铺休息平台）"
+                    : selectedRole === "set"
+                      ? "手绘路径：把选中的 set 当成**抽象楼梯**，在画布上按住拖画出它的水平路线（转角即拐弯、自动铺休息平台）"
+                      : "手绘路径：开启后在画布上拖拽绘制选中资产的移动轨迹"
                 }
-                onClick={togglePathDraw}
+                onClick={() => {
+                  // 对一个还是平顶的 set 开手绘 = 作者在说"这是楼梯"：顺手把顶面形状改掉。
+                  // 少了这一步就会卡在"按钮是灰的 / 画了不生效"——引擎只认 topShape === "stair"，
+                  // 而新拖进来的「台阶」默认是平顶（旧做法是拿阵列拼一摞盒子，已撤，见 Inspector）。
+                  if (selectedRole === "set" && !selectedDrawableStair && selectedId) {
+                    updateAsset(selectedId, { topShape: "stair" });
+                  }
+                  togglePathDraw();
+                }}
               >
                 {pathDrawMode ? "✏️ 绘制中" : "✏️ Path"}
               </button>
