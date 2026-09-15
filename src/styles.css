@@ -1284,6 +1284,29 @@ canvas {
   background-repeat: no-repeat;
   background-size: 100% 100%;
 }
+/* 顶点拖拽把手（Phase 7 §12）：坐在弓形顶点（弧线底边 10px 区间的顶端）上的小圆点。
+   pointer-events:auto 让它可抓，stopPropagation 让它不触发整条片段拖动。 */
+.clip .flight-arc-handle {
+  position: absolute;
+  left: 50%;
+  bottom: 5px;
+  width: 9px;
+  height: 9px;
+  margin-left: -4.5px;
+  border-radius: 50%;
+  background: #55d88a;
+  border: 1px solid #0c1a12;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+  cursor: ns-resize;
+  pointer-events: auto;
+  z-index: 3;
+}
+.clip .flight-arc-handle:hover {
+  background: #7befac;
+}
+.clip .flight-arc-handle:active {
+  background: #9af3c4;
+}
 /* 片段文字要压在底纹之上。 */
 .clip.segment .flight-stripe + * {
   position: relative;

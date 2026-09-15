@@ -161,6 +161,21 @@ export function arcIsFlat(arc: VerticalArc, groundAtStart: number, y1: number): 
 }
 
 /**
+ * 顶点拖拽专用（时间轴 mini 弓形把手 → 改 `apex`，见 `docs/3d/03-UI可达性提示.md` §12）：
+ * **只改写 `apex`，保留 `mode` 与弧线其它字段**，返回新对象、不就地修改。
+ *
+ * 这是 `setSegmentArcApex` 的全部逻辑搬进纯函数 —— 目的是让"拖顶点不会顺手改掉作者
+ * 手感（ease 在 segment 层、本就不在 `arc` 里，但重写必须保证连 `arc` 其它字段都不动）"
+ * 这条契约能被 `scripts/check-3d.ts` §31 直接钉死，而不必把整个 zustand store 拉进 node 自检
+ * （store 用了 `import.meta.glob`，esbuild 打不出来）。
+ *
+ * 注意：`apex` 下限钳到 0 —— 作者把顶点拖到地面以下没有物理意义。
+ */
+export function rewriteArcApex(arc: VerticalArc, apex: number): VerticalArc {
+  return { ...arc, apex: Math.max(0, apex) };
+}
+
+/**
  * 按能力自动挑选垂直弧线的档案（导演没显式给时用）。
  * 阈值全在 `loco` 上 —— 见 `engine/jump.ts` 的 `classifyGap`。
  */

@@ -216,6 +216,8 @@ export function Timeline() {
     return () => observer.disconnect();
   }, []);
   const reorderObject = useDirectorStore((s) => s.reorderObject);
+  // 时间轴 mini 弓形顶点拖拽（Phase 7 §12）：只改 arc.apex，保留作者 ease 与弧线其它字段。
+  const setSegmentArcApex = useDirectorStore((s) => s.setSegmentArcApex);
 
   const items = useMemo(() => buildTimelineItems(state), [state]);
   // 内容排到片长之外时给出提示：这些片段不参与播放 / 导出，但没有被删除。
@@ -275,6 +277,18 @@ export function Timeline() {
     startT: number;
     originX: number;
     span: number;
+  } | null>(null);
+  /**
+   * mini 弓形顶点拖拽状态（Phase 7 §12）：arc.apex 是作者旋钮，每次 pointermove 都触发，
+   * 所以只记"起拖时的屏幕 y + 当时 apex"，拖动时按像素位移线性缩放 apex —— 不读 state，
+   * 不依赖当前帧重算，避免每帧重采样离地曲线。
+   * `metersPerPx` 以"弓形本身占 10px 高"为基准：拖满一个弓形高度 ≈ apex 翻倍，
+   * 拖到地面（向下 10px）≈ apex 归零。这把"像素手势"和"米"对齐到同一个视觉参照。
+   */
+  const apexDragRef = useRef<{
+    segmentId: string;
+    originY: number;
+    originApex: number;
   } | null>(null);
   const [dragRowId, setDragRowId] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -459,6 +473,41 @@ export function Timeline() {
           <span
             className="flight-arc"
             style={{ backgroundImage: arcSpark(flight.lifts, flight.peak) }}
+          />
+        )}
+        {/*
+          mini 弓形顶点拖拽把手（Phase 7 §12）：
+          只在「这段真的离过地 + 是抛物线弧线 + 该片段被选中」时出现，避免满屏把手、也避免误拖。
+          拖动 = 改 arc.apex（作者旋钮）。把手自身 pointer-events:auto 且 stopPropagation，
+          不会触发片段整条拖动（clip.onPointerDown 设 dragRef）。apex 改写走专用 action，
+          不动作者 ease、不读 state、不每帧重算离地曲线。
+        */}
+        {flight && segment?.arc?.mode === "parabola" && selectedItem === item.source && (
+          <span
+            className="flight-arc-handle"
+            title={`拖拽改跳跃高度 · apex = ${(segment?.arc?.apex ?? 0).toFixed(2)}m`}
+            onPointerDown={(event) => {
+              event.stopPropagation();
+              event.preventDefault();
+              const originApex = segment?.arc?.apex ?? flight.peak;
+              apexDragRef.current = {
+                segmentId: segment?.id ?? "",
+                originY: event.clientY,
+                originApex,
+              };
+              (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
+            }}
+            onPointerMove={(event) => {
+              const drag = apexDragRef.current;
+              if (!drag || drag.segmentId !== segment.id) return;
+              // 弓形本身占 clip 底边 10px：以它为基准把像素位移换算成米。
+              const metersPerPx = drag.originApex / 10;
+              const nextApex = Math.max(0, drag.originApex + (drag.originY - event.clientY) * metersPerPx);
+              setSegmentArcApex(drag.segmentId, nextApex);
+            }}
+            onPointerUp={() => {
+              apexDragRef.current = null;
+            }}
           />
         )}
         {moveKeys.map((key, index) => (

@@ -37,6 +37,7 @@ import {
   runupAdjusted,
   runupMarginU,
   JUMP_EASE,
+  rewriteArcApex,
 } from "../src/engine/arc";
 import { pathHeightAt, segmentProgressAt, arcActive } from "../src/engine/pathHeight";
 import { objectsOnTop, restsOn, settleStack, stackChain, translateStack, stackParentMap, isStackBottom } from "../src/engine/stack";
@@ -64,7 +65,7 @@ import {
   surfaceAt,
   tiltFor,
 } from "../src/engine/stance";
-import { DirectorObject, DirectorState, MoveSegment, Locomotion, CameraObject } from "../src/domain/schema";
+import { DirectorObject, DirectorState, MoveSegment, Locomotion, CameraObject, VerticalArc } from "../src/domain/schema";
 
 let pass = 0;
 let fail = 0;
@@ -1785,6 +1786,28 @@ console.log("\n[31] 姿态：坡面 pitch / roll + 骨盆高度自适应（Phase
     const stH: DirectorState = { ...st, segments: [{ ...st.segments[0], object: "H" }] };
     const sH = stanceOf(stH, "H", 0.2, 0, 0.3);
     check("§31 人的 stance 不含弧线俯仰", round6(sH.pitch), 0);
+  }
+
+  // ⑩ 顶点拖拽（时间轴 mini 弓形把手）的契约：改写只动 apex，不动 mode / 其它弧线字段，
+  //    且不就地修改（返回新对象）。store 的 setSegmentArcApex 直接委托这个函数，所以钉死
+  //    它就等于钉死了"拖顶点不会顺手清掉作者手感 / 不会改坏弧线语义"这条红线。
+  {
+    const arc: VerticalArc = { mode: "parabola", apex: 1.5, from: 0.1, to: 0.9 };
+    const next = rewriteArcApex(arc, 3.2);
+    check("§31 apex 改写保留 mode", next.mode, "parabola");
+    check("§31 apex 改写保留 from/to", [next.from, next.to], [0.1, 0.9]);
+    check("§31 apex 改写只改 apex 值", round6(next.apex), 3.2);
+    check("§31 apex 改写返回新对象（不就地改）", next !== arc, true);
+    check("§31 apex 改写不污染原对象", round6(arc.apex), 1.5);
+    // 下限钳到 0：作者把顶点拖到地面以下没有物理意义。
+    const neg = rewriteArcApex(arc, -4);
+    check("§31 apex 拖到负 → 钳到 0", round6(neg.apex), 0);
+    // fall / climb 的其它字段也一并保留（这些模式没有 apex，但顶点把手只挂在 parabola 上，
+    // 这里只是确认纯函数对其它 mode 同样"只动 apex"）。
+    const fall: VerticalArc = { mode: "fall", fallTo: -2 };
+    const fallen = rewriteArcApex(fall, 0);
+    check("§31 fall 改写保留 mode", fallen.mode, "fall");
+    check("§31 fall 改写保留 fallTo", (fallen as { fallTo?: number }).fallTo, -2);
   }
 }
 

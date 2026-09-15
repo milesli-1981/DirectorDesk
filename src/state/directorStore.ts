@@ -41,7 +41,7 @@ import { placeObject } from "../engine/place";
 import { settleStack, stackChain } from "../engine/stack";
 import { arraySlots, ArraySpec } from "../engine/array";
 import { DragReachHint } from "../engine/reach";
-import { JUMP_EASE } from "../engine/arc";
+import { JUMP_EASE, rewriteArcApex } from "../engine/arc";
 import { ANIMAL_MODELS, DEFAULT_ANIMAL_SPECIES } from "../engine/animalModels";
 import {
   AnimalSpecies,
@@ -471,6 +471,13 @@ interface DirectorStore {
    * 这是"跳跃段内强制准线性水平速度"落地为**一个原子 store 动作**的地方（docs/3d/02 §5）。
    */
   setSegmentArc: (segmentId: string, arc: VerticalArc | null) => void;
+
+  /**
+   * 仅改写抛物线弧线的顶点高度 `apex`（作者旋钮），**不动 ease**、不清其他字段。
+   * 时间轴 mini 弓形的顶点拖拽走这里 —— 每次 pointermove 都触发，所以必须轻量：
+   * 不能像 `setSegmentArc` 那样顺手把 ease 覆盖成 JUMP_EASE（那会拖一下就清掉作者调过的手感）。
+   */
+  setSegmentArcApex: (segmentId: string, apex: number) => void;
 
   addCamera: () => void;
   addDroneCamera: () => void;
@@ -2140,6 +2147,13 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
       // 有弧线 → 准线性 ease（保证起跳瞬间有水平速度）；清除弧线 → 恢复默认缓动由调用方决定，
       // 这里只把 arc 抹掉、ease 留原样（免得"取消跳跃"把作者调过的手感也一起改掉）。
       patchSegment(segmentId, arc ? { arc, ease: [...JUMP_EASE] } : { arc: undefined }),
+
+    // 顶点拖拽专用：只动 apex，保留作者 ease 与弧线其它字段。
+    setSegmentArcApex: (segmentId, apex) => {
+      const seg = get().state.segments.find((s) => s.id === segmentId);
+      if (!seg || !seg.arc) return;
+      patchSegment(segmentId, { arc: rewriteArcApex(seg.arc, apex) });
+    },
 
     addCamera: () => {
       const store = get();
