@@ -172,8 +172,11 @@ export function rayObjectBox(
  *         整理即得下面的系数。两者必须同源，否则"画在哪"与"能站哪"会分叉。
  *
  * 返回 null 表示该对象没有可站立的顶面（高度为 0 等退化情形）。
+ *
+ * **导出给 `engine/stance.ts`**：坡面姿态（pitch/roll）需要的法线就是这个平面的法线。
+ * 渲染层另写一份坡面法线会重演红线 5 的坑（屏幕上看在那里、姿态却对不上）。
  */
-function topPlaneOf(
+export function topPlaneOf(
   object: DirectorObject,
 ): { nx: number; ny: number; nz: number; c: number } | null {
   const bottom = objectBottom(object);

@@ -30,6 +30,7 @@ import {
 } from "../engine/ground";
 import { raycastGround } from "../engine/raycast";
 import { pathHeightAt, arcPolyline, arcEndHeights, arcActive } from "../engine/pathHeight";
+import { stanceOf } from "../engine/stance";
 import { arcAtU, arcHeightAt, arcIsFlat } from "../engine/arc";
 import { sampleArcHits } from "../engine/jump";
 import {
@@ -591,6 +592,15 @@ function ActorView({ objectId }: { objectId: string }) {
       diff = Math.atan2(Math.sin(diff), Math.cos(diff));
       facingRef.current += diff * Math.min(1, delta * 12);
       groupRef.current.rotation.y = facingRef.current;
+
+      // ---- 姿态（Phase 7）：坡面 pitch / roll + 骨盆高度自适应 ----
+      // 法线取自立足面（`topPlaneOf` 同源），planar / 平地时 pitch = roll = 0、
+      // pelvisLift = 0 ⇒ 下面全是恒等变换，与扩展前逐像素一致。
+      const stance = stanceOf(state, objectId, currentTime, position.x, position.z);
+      groupRef.current.rotation.x = stance.pitch;
+      groupRef.current.rotation.z = stance.roll;
+      // 骨盆抬升：让脚底贴坡面而不是让原点贴面；`Pose.rootY` 是作者额外偏移。
+      groupRef.current.position.y = groundY + stance.pelvisLift + (object.pose?.rootY ?? 0);
     }
 
     // Body Motion 与整体位移分离：方块简模自己做起伏；

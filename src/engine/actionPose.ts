@@ -1,10 +1,20 @@
 import { ActionKind, DirectorState, JointName, Pose } from "../domain/schema";
 import { POSE_PRESETS, isGaitKind } from "./poses";
+import { airborneOf } from "./stance";
 
 /** 静态姿势类：坐下 / 蹲下时腿部不再走/跑摆动（locomotionScale → 0）。 */
 const STATIC_KINDS = new Set<ActionKind>(["stand", "sit", "crouch"]);
 /** 周期类：在预设基线上叠加随时间振荡（挥手 / 说话手势）。 */
 const CYCLIC_KINDS = new Set<ActionKind>(["wave", "talk"]);
+
+/**
+ * Phase 7：**离地自动姿态**的三段边界（占弧线区间的比例）。
+ *
+ * 起跳段 = 离地后前 15%，落地段 = 落地前 15%，中间是滞空段。
+ * 这不是"物理阶段"，只是让三种关节角在视觉上接得上的时间窗。
+ */
+const TAKEOFF_FRACTION = 0.15;
+const LAND_FRACTION = 0.15;
 
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
 /** 进出缓动，避免姿势/动作突然跳变。 */
@@ -29,6 +39,8 @@ export interface ActionSample {
  * - 静态类（sit/crouch）：以 easing 渐入的关节角度。
  * - 周期类（wave/talk）：在预设基线上叠加随时间振荡。
  * - 多个 clip 叠加（角度累加）；locomotionScale 取静态 clip 的最大渐入量。
+ * - **离地兜底**（Phase 7）：若该对象此刻在空中（`airborneOf`）、且**没有**显式的
+ *   姿态类片段覆盖，则按"起跳 / 滞空 / 落地"三段自动给关节角。
  */
 export function actionPoseAt(
   state: DirectorState,
@@ -39,9 +51,6 @@ export function actionPoseAt(
   const active = actions.filter(
     (a) => a.object === objectId && time >= a.timeStart && time <= a.timeEnd,
   );
-  const empty: ActionSample = { pose: { joints: {} }, locomotionScale: 1, gait: "auto" };
-  if (active.length === 0) return empty;
-
   const joints: Pose["joints"] = {};
   let locoSuppress = 0;
   let gait: GaitMode = "auto";
@@ -79,7 +88,61 @@ export function actionPoseAt(
     if (isGaitKind(clip.kind)) gait = clip.kind as GaitMode;
   }
 
+  // 离地兜底：仅当**没有**显式姿态类片段时才叠加（作者的姿势永远优先）。
+  const hasPoseOverride = active.some(
+    (a) => !isGaitKind(a.kind) && a.kind !== "custom" && a.kind !== "stand",
+  );
+  const airPose = jumpPoseAt(state, objectId, time);
+  if (airPose && !hasPoseOverride) {
+    for (const key of Object.keys(airPose.joints) as JointName[]) {
+      const v = airPose.joints[key]?.[0] ?? 0;
+      const cur = joints[key]?.[0] ?? 0;
+      joints[key] = [cur + v, 0, 0];
+    }
+  }
+
+  if (active.length === 0 && !airPose) {
+    return { pose: { joints: {} }, locomotionScale: 1, gait: "auto" };
+  }
   return { pose: { joints }, locomotionScale: 1 - locoSuppress, gait };
+}
+
+/**
+ * 离地自动姿态（Phase 7）：起跳 / 滞空 / 落地三段。
+ *
+ * 判据与相机跟跳防抖**同源**（`stance.ts` 的 `airborneOf`）—— 同一件事（"人在空中"）
+ * 只该有一个判据。不在空中 → null（调用方跳过）。
+ *
+ * 三段的边界按**段进度**划分（起跳段 = 前 15%、落地段 = 后 15%），
+ * 而不是按离地高度 —— 因为"滞空"是一段持续时间，不是一个高度阈值。
+ */
+function jumpPoseAt(
+  state: DirectorState,
+  objectId: string,
+  time: number,
+): Pose | null {
+  const object = state.objects.find((o) => o.id === objectId);
+  if (!object) return null;
+  const { airborne } = airborneOf(state, object, object.x, object.z, time);
+  if (!airborne) return null;
+  return POSE_PRESETS[airbornePresetAt(state, objectId, time)] ?? null;
+}
+
+/** 按段进度挑"起跳 / 滞空 / 落地"三段之一（无活跃段时判为滞空）。 */
+function airbornePresetAt(
+  state: DirectorState,
+  objectId: string,
+  time: number,
+): "jumpTakeoff" | "jumpAir" | "jumpLand" {
+  const seg = (state.segments ?? []).find(
+    (s) => s.object === objectId && time >= s.timeStart && time <= s.timeEnd,
+  );
+  if (!seg) return "jumpAir";
+  const span = seg.timeEnd - seg.timeStart || 1;
+  const s = (time - seg.timeStart) / span;
+  if (s <= TAKEOFF_FRACTION) return "jumpTakeoff";
+  if (s >= 1 - LAND_FRACTION) return "jumpLand";
+  return "jumpAir";
 }
 
 /** 静态基线姿势淡出的速度下限/上限（m/s）。 */

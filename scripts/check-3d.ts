@@ -54,6 +54,16 @@ import {
   worstTier,
 } from "../src/engine/reach";
 import { cameraAnchorHeight, solveCamera } from "../src/engine/cameraSolver";
+import {
+  AIRBORNE_EPS,
+  airborneOf,
+  arcPitchOf,
+  pelvisLiftOf,
+  slopeDegOf,
+  stanceOf,
+  surfaceAt,
+  tiltFor,
+} from "../src/engine/stance";
 import { DirectorObject, DirectorState, MoveSegment, Locomotion, CameraObject } from "../src/domain/schema";
 
 let pass = 0;
@@ -72,6 +82,8 @@ function check(name: string, actual: unknown, expected: unknown) {
 
 /** 六位小数取整：浮点比较的常规手法（§26 起的地形用例大量使用，故提到模块级）。 */
 const round6 = (n: number) => Math.round(n * 1e6) / 1e6;
+/** 弧度 → 度（保留 6 位），姿态断言用。 */
+const deg = (rad: number) => Math.round(((rad * 180) / Math.PI) * 1e6) / 1e6;
 
 function box(id: string, x: number, z: number, w: number, d: number, h: number, baseY?: number): DirectorObject {
   return {
@@ -1605,6 +1617,175 @@ console.log("\n[30] 相机避障");
   const glass = { ...box("G", 0, 0, 30, 30, 8), occluding: false } as DirectorObject;
   const gs = camScene([actor("H", 0, 0), glass], [cam("C", "H")], [], "terrain");
   check("§30 玻璃（occluding:false）：不避障", round6(solveCamera(gs, "C", 0)!.position[1]), 1.7);
+}
+
+console.log("\n[31] 姿态：坡面 pitch / roll + 骨盆高度自适应（Phase 7）");
+{
+  // ⚠ 用例前提（红线 27）：坡度必须在能力表内。
+  //   12m 深、1m 高的坡 ⇒ slope = atan(1/12) = 4.76°，步幅 0.3m 内只抬 0.025m，
+  //   远小于 human 的 maxStep = 0.35 ⇒ 人真的站在坡面上，不是走出坡面掉下去。
+  //   坡轴沿 +Z：坡脚在 z = −6（bottom = −0.5），坡顶在 z = +6（top = 0.5）。
+  const ramp = { ...box("R", 0, 0, 8, 12, 1, -0.5), topShape: "ramp" } as DirectorObject;
+  const SLOPE_DEG = 4.763642;
+
+  // ① 立足面法线同源：来自 topPlaneOf，且与解析坡度一致。
+  {
+    const st = scene([ramp, actor("H", 0, 0)], "terrain");
+    const info = surfaceAt(st, st.objects[1], 0, 0);
+    check("§31 立足面坡度 = atan(h/d)", round6(info.slopeDeg), round6(SLOPE_DEG));
+    check("§31 法线朝上（ny > 0）", info.normal[1] > 0, true);
+    // 上坡是 +Z，所以法线水平分量指向 −Z（下坡）。
+    check("§31 法线水平分量指向下坡（nz < 0）", info.normal[2] < 0, true);
+    check("§31 aspect = 上坡方向 yaw = 0", round6(info.aspectDeg), 0);
+    // planar / 平地：法线恒为水平面 ⇒ 下游姿态全退化成恒等。
+    const flat = scene([box("P", 0, 0, 6, 6, 1), actor("H", 0, 0)], "terrain");
+    const fi = surfaceAt(flat, flat.objects[1], 0, 0);
+    check("§31 平顶面 → 水平面法线", fi.normal, [0, 1, 0]);
+    check("§31 平顶面 → slope 0", fi.slopeDeg, 0);
+  }
+
+  // ② pitch 符号：面向坡上与面向坡下必须反号。
+  //    单测一个 yaw 会把符号写反却看起来通过，所以两个方向都钉。
+  {
+    const up = scene([ramp, actor("H", 0, 0)], "terrain");       // rotation 0 → 面向 +Z（上坡）
+    const down = scene([ramp, { ...actor("H", 0, 0), rotation: 180 } as DirectorObject], "terrain");
+    const iUp = surfaceAt(up, up.objects[1], 0, 0);
+    const iDown = surfaceAt(down, down.objects[1], 0, 0);
+    const tUp = tiltFor(iUp.normal, 0);
+    const tDown = tiltFor(iDown.normal, Math.PI);
+    // three.js：rotation.x < 0 ⇒ 前方(+Z)抬起。上坡就该抬前脚。
+    check("§31 面向坡上 → pitch < 0（前脚抬起）", tUp.pitch < 0, true);
+    check("§31 面向坡上 → |pitch| = 坡度", round6(-deg(tUp.pitch)), round6(SLOPE_DEG));
+    check("§31 面向坡下 → pitch > 0（前脚下沉）", tDown.pitch > 0, true);
+    check("§31 面向坡下 → |pitch| = 坡度", round6(deg(tDown.pitch)), round6(SLOPE_DEG));
+    check("§31 面向坡上/坡下：roll 都是 0（沿坡轴无侧倾）", [round6(tUp.roll), round6(tDown.roll)], [0, 0]);
+  }
+
+  // ③ roll 符号：横切坡。**这一条是关键** —— three.js 的 Euler("XYZ") 是 R = Rx·Ry·Rz，
+  //    所以 `roll = −asin(dot(n, right))` 要取负。写反了画面里车会朝上坡侧翻。
+  //    面向 +X（yaw = 90°）时右手是 −Z（下坡方向）⇒ 右侧低 ⇒ rotation.z < 0。
+  {
+    const st = scene([ramp, actor("H", 0, 0)], "terrain");
+    const info = surfaceAt(st, st.objects[1], 0, 0);
+    const t = tiltFor(info.normal, Math.PI / 2);
+    check("§31 横切坡 → pitch = 0（沿等高线走）", round6(deg(t.pitch)), 0);
+    check("§31 横切坡 → |roll| = 坡度", round6(-deg(t.roll)), round6(SLOPE_DEG));
+    // 右手朝 −Z = 下坡 ⇒ 右侧必须**降低** ⇒ rotation.z < 0。
+    check("§31 横切坡 → roll < 0（右手在下坡侧，压低）", t.roll < 0, true);
+    // 反方向横切（yaw = −90°）：右手朝 +Z = 上坡 ⇒ 右侧抬高 ⇒ roll > 0。
+    const tOther = tiltFor(info.normal, -Math.PI / 2);
+    check("§31 反向横切 → roll > 0（右手在上坡侧，抬高）", tOther.roll > 0, true);
+    check("§31 两个横切方向 roll 反号", round6(t.roll + tOther.roll), 0);
+  }
+
+  // ④ 平面坡上 pelvisLift 必须 ≈ 0（关键的非直觉点）：
+  //    身体已按坡度 pitch，"绕中点旋转"恰好让两只脚都贴在平面上 ——
+  //    前脚被压低 span·sin(pitch)，而该处地面也正好高出 span·tan(pitch)，两两抵消。
+  {
+    const st = scene([ramp, actor("H", 0, 0)], "terrain");
+    const s = stanceOf(st, "H", 0, 0, 0);
+    check("§31 平面坡上：pitch 生效", round6(deg(s.pitch)), -round6(SLOPE_DEG));
+    check("§31 平面坡上：pelvisLift ≈ 0（平面抵消）", Math.abs(s.pelvisLift) < 1e-3, true);
+    check("§31 平面坡上：不判离地", s.airborne, false);
+  }
+
+  // ⑤ 平面假设失效时才真正抬升：**坡脚**。人站在 z = −5.9、面向 +Z 上坡时，
+  //    前脚已经伸出坡外（落在基准面 0），身体却仍按坡面 pitch 倾斜 ⇒ 前脚悬空。
+  {
+    const st = scene([ramp, actor("H", 0, -5.9)], "terrain");
+    const info = surfaceAt(st, st.objects[1], 0, -5.9);
+    const t = tiltFor(info.normal, 0);
+    check("§31 坡脚：立足面仍是坡", round6(info.slopeDeg), round6(SLOPE_DEG));
+    const lift = pelvisLiftOf(st, st.objects[1], 0, -5.9, 0, t.pitch);
+    check("§31 坡脚：pelvisLift > 0（前脚伸出坡外）", lift > 0.3, true);
+    check("§31 坡脚：pelvisLift = 实测值", round6(lift), 0.51658);
+  }
+
+  // ⑥ planar 恒等 —— 姿态层不许让 planar 逐像素改变（红线 1）。
+  //    靠的是能力表退化：planar 下 supportUnder 只返回基准面 ⇒ 水平面 ⇒ pitch/roll/lift 全 0。
+  {
+    const flat = scene([box("P", 0, 0, 6, 6, 1), actor("H", 0, 0)], "planar");
+    const s = stanceOf(flat, "H", 0, 0, 0);
+    check("§31 planar：pitch = 0", s.pitch, 0);
+    check("§31 planar：roll = 0", s.roll, 0);
+    check("§31 planar：pelvisLift = 0", s.pelvisLift, 0);
+    check("§31 planar：不判离地", s.airborne, false);
+    check("§31 planar：法线是水平面", s.surface.normal, [0, 1, 0]);
+    // 就算场景里有个坡，planar 也够不着它 —— 显式短路（`topPlaneOf` 读 topShape
+    // 却不看世界模式，所以这里必须有守卫；见 stance.ts 不变量 3）。
+    const pRamp = scene([ramp, actor("H", 0, 0)], "planar");
+    const ps = stanceOf(pRamp, "H", 0, 0, 0);
+    check("§31 planar 无视坡：pitch = 0", ps.pitch, 0);
+    check("§31 planar 无视坡：roll = 0", ps.roll, 0);
+    check("§31 planar 无视坡：法线仍是水平面", surfaceAt(pRamp, pRamp.objects[1], 0, 0).normal, [0, 1, 0]);
+  }
+
+  // ⑦ 载具：跟 pitch/roll，但**不做骨盆高度自适应**（车轴是刚体，抬车身会悬浮）。
+  {
+    const car = { ...actor("V", 0, 0), category: "vehicle", type: "prop" } as DirectorObject;
+    const st = scene([ramp, car], "terrain");
+    const s = stanceOf(st, "V", 0, 0, 0);
+    check("§31 载具：拿到坡面 pitch", round6(deg(s.pitch)), -round6(SLOPE_DEG));
+    check("§31 载具：pelvisLift 恒 0", s.pelvisLift, 0);
+    // 横切的载具（rotation 90）拿到 roll。
+    const carT = { ...car, rotation: 90 } as DirectorObject;
+    const stT = scene([ramp, carT], "terrain");
+    const sT = stanceOf(stT, "V", 0, 0, 0);
+    check("§31 载具横切：roll ≠ 0", Math.abs(sT.roll) > 0.01, true);
+    check("§31 载具横切：pelvisLift 仍恒 0", sT.pelvisLift, 0);
+  }
+
+  // ⑧ 离地判据（airborneOf）—— 跳跃姿势 / 相机跟跳 / 时间轴底纹三处共用的唯一出处。
+  {
+    const crate = box("K", 0, 2, 1, 1, 0.6);
+    const st: DirectorState = {
+      ...scene([crate, actor("H", 0, 0)], "terrain"),
+      segments: [seg("s1", "H", [0, 0], [0, 2], { timeEnd: 1.5, arc: { mode: "parabola", apex: 0.75 } } as Partial<MoveSegment>)],
+    };
+    const obj = st.objects[1];
+    check("§31 跳跃：起跳瞬间贴地", airborneOf(st, obj, 0, 0, 0).airborne, false);
+    check("§31 跳跃：弧顶离地", airborneOf(st, obj, 0, 1, 0.75).airborne, true);
+    check("§31 跳跃：弧顶离地量 = apex（地面 0）", round6(airborneOf(st, obj, 0, 1, 0.75).lift), 0.75);
+    check("§31 跳跃：落地贴地", airborneOf(st, obj, 0, 2, 1.5).airborne, false);
+    check("§31 落地后姿态不离地", stanceOf(st, "H", 1.5, 0, 2).airborne, false);
+    check("§31 容差常数：1cm（与 cameraSolver 同值）", AIRBORNE_EPS, 0.01);
+  }
+
+  // ⑧b 坡上行走无弧线：全程不离地（"站在坡上"不该被判成"在空中"）。
+  //     用与 §29 同一个缓坡（12m 深 1m 高），确保步幅内抬升在 maxStep 内。
+  {
+    const walk: DirectorState = {
+      ...scene([ramp, actor("H", 0, -4)], "terrain"),
+      segments: [seg("s1", "H", [0, -4], [0, 4], { timeEnd: 2 })],
+    };
+    const wobj = walk.objects[1];
+    let maxAir = 0;
+    for (let i = 0; i <= 10; i += 1) {
+      const t = (i / 10) * 2;
+      const z = -4 + 8 * (i / 10);
+      maxAir = Math.max(maxAir, airborneOf(walk, wobj, 0, z, t).lift);
+    }
+    check("§31 坡上步行：全程不离地", round6(maxAir), 0);
+    check("§31 坡上步行：立足面仍是坡", round6(slopeDegOf(walk, "H", 0, 0)), round6(SLOPE_DEG));
+  }
+
+  // ⑨ 弧线俯仰（载具专用）：抛物线上升段仰、下降段俯。
+  {
+    const crate = box("K", 0, 2, 1, 1, 0.6);
+    const st: DirectorState = {
+      ...scene([crate, actor("V", 0, 0)], "terrain"),
+      segments: [seg("s1", "V", [0, 0], [0, 2], { timeEnd: 1.5, arc: { mode: "parabola", apex: 0.75 } } as Partial<MoveSegment>)],
+    };
+    const rising = arcPitchOf(st, "V", 0.2);
+    const falling = arcPitchOf(st, "V", 1.3);
+    check("§31 弧线上升段：仰（> 0）", rising > 0.05, true);
+    check("§31 弧线下降段：俯（< 0）", falling < -0.05, true);
+    check("§31 不在弧线上（段外）→ 0", arcPitchOf(st, "V", 5), 0);
+    // 人（非载具）不吃弧线俯仰 —— 跳跃姿态由三段预设表达。
+    const stH: DirectorState = { ...st, segments: [{ ...st.segments[0], object: "H" }] };
+    const sH = stanceOf(stH, "H", 0.2, 0, 0.3);
+    check("§31 人的 stance 不含弧线俯仰", round6(sH.pitch), 0);
+  }
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败\n`);

@@ -86,6 +86,14 @@ export type JointName =
 /** 姿势 = 各关节相对父关节的本地欧拉角（弧度，[x, y, z]）。未列出的关节默认为 0。 */
 export interface Pose {
   joints: Partial<Record<JointName, Vec3>>;
+  /**
+   * 骨盆（root）的**额外竖直偏移**（米）。默认 0。
+   *
+   * 这是**作者旋钮**，不是"骨盆高度自适应"的替代品：后者由立足面几何每帧算出
+   * （`engine/stance.ts` 的 `pelvisLiftOf`），是几何必然；`rootY` 只用于
+   * "蹲在坡上还想把重心再压低一点"这类微调。
+   */
+  rootY?: number;
 }
 
 /**

@@ -3,6 +3,7 @@ import { useDirectorStore } from "../state/directorStore";
 import {
   AssetCategory,
   CameraKey,
+  DirectorState,
   EaseCurve,
   HandoffMode,
   objectDisplayName,
@@ -11,6 +12,7 @@ import {
 } from "../domain/schema";
 import { buildTimelineItems, itemRange, rawContentEnd } from "../engine/timeline";
 import { CAMERA_CHANNELS, curveVal, normalizeEase } from "../engine/ease";
+import { flightProfileOf } from "../engine/stance";
 import { waypointKeyframes } from "../engine/path";
 
 const MAX_PX_PER_SEC = 100;
@@ -48,6 +50,43 @@ function easeSpark(ease: EaseCurve, keys?: SpeedKey[]): string {
     `<path d='M1 12.5L39 1.5' stroke='#ffffff14' fill='none'/>` +
     `<path d='${d}' stroke='#9fc5ffaa' fill='none' stroke-width='1.5'/></svg>`;
   return `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
+}
+
+/**
+ * mini 弓形（Phase 7，`docs/3d/03-UI可达性提示.md` §12）：
+ * 把该片段里"离地量的时间曲线"画成一条小弧线，贴在 MOVE 片段的**底边**上。
+ *
+ * 采样点来自 `flightProfileOf`（`pathHeightAt − standingHeightFor`，与画面里飞的弧线同源）——
+ * 时间轴这边**不自己算抬升量**（红线 5：渲染与显示必须同源）。
+ * 高度按 `peak` 归一化，所以 timeline 上的弓形只在"形状"上与画面一致。
+ */
+function arcSpark(lifts: number[], peak: number): string {
+  const n = lifts.length - 1 || 1;
+  let d = "";
+  lifts.forEach((lift, index) => {
+    const x = 1 + (index / n) * 38;
+    // 抬高量越大，曲线越往上（14 是画布高，留 2px 下边距）。
+    const y = 12 - (lift / peak) * 10;
+    d += `${index ? "L" : "M"}${x.toFixed(1)} ${y.toFixed(1)}`;
+  });
+  const svg =
+    `<svg xmlns='http://www.w3.org/2000/svg' width='40' height='14' viewBox='0 0 40 14'>` +
+    `<path d='M0 12.6H40' stroke='#ffffff1a' fill='none'/>` +
+    `<path d='${d}' stroke='#55d88acc' fill='none' stroke-width='1.5'/></svg>`;
+  return `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
+}
+
+/** 把 `flightProfileOf` 的采样时刻拼好（17 点覆盖片段区间）。太短的片段不采样。 */
+function flightProfileOfFor(
+  state: DirectorState,
+  objectId: string,
+  range: { start: number; end: number },
+): { peak: number; lifts: number[] } | null {
+  const span = range.end - range.start;
+  if (span < 0.2) return null;
+  const samples: number[] = [];
+  for (let i = 0; i <= 16; i += 1) samples.push(range.start + (span * i) / 16);
+  return flightProfileOf(state, objectId, samples);
 }
 
 type DragMode = "l" | "r" | "m";
@@ -347,6 +386,15 @@ export function Timeline() {
       segment && range.end - range.start >= 0.9
         ? easeSpark(normalizeEase(segment.ease), segment.speedKeys)
         : undefined;
+    /**
+     * mini 弓形 + 离地底纹（Phase 7 §12）：只有"这一段真的离过地"才画。
+     * 判据与画面同源 —— `flightProfileOf` 走 `pathHeightAt − standingHeightFor`，
+     * planar / 无弧线时返回 null，于是时间轴与扩展前逐像素一致。
+     *
+     * 注意：这里**不能**用 useMemo —— `renderClip` 会被 map 调用，Hook 数量随片段数变。
+     * 采样本身很轻（17 次纯函数求值），且只在带移动段的行上跑。
+     */
+    const flight = segment ? flightProfileOfFor(state, segment.object, range) : null;
     const clipWidth = Math.max(28, (range.end - range.start) * pxPerSec);
     // 路径转折点在该片段上的到达时刻：用于把关键帧画在片段条上。
     const keyframes = segment ? waypointKeyframes(segment) : [];
@@ -398,7 +446,21 @@ export function Timeline() {
           addCameraKey(item.source, t);
         }}
       >
+        {/* 离地底纹（Phase 7 §12）：铺在片段底层，盖住才会遮住标签文字。 */}
+        {flight && (
+          <span
+            className="flight-stripe"
+            title={`离地弧线 · 峰值 ${flight.peak.toFixed(2)}m（起跳 / 落差，见 02-跳跃与攀爬）`}
+          />
+        )}
         {item.label}
+        {/* mini 弓形：离地量的时间曲线，贴在片段底边。 */}
+        {flight && (
+          <span
+            className="flight-arc"
+            style={{ backgroundImage: arcSpark(flight.lifts, flight.peak) }}
+          />
+        )}
         {moveKeys.map((key, index) => (
           <span
             key={key.id}

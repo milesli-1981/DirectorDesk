@@ -1261,6 +1261,34 @@ canvas {
   border-color: #c79247;
 }
 
+/* ---- 离地可视化（Phase 7 §12）：mini 弓形 + 底纹 ----
+   只在真的离过地的移动片段上出现（来源 = pathHeightAt − standingHeightFor），
+   平地 / planar 时没有这两个元素，时间轴与扩展前逐像素一致。 */
+.clip .flight-stripe {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: repeating-linear-gradient(
+    115deg,
+    rgba(85, 216, 138, 0.16) 0 2px,
+    transparent 2px 7px
+  );
+}
+.clip .flight-arc {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 10px;
+  pointer-events: none;
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+}
+/* 片段文字要压在底纹之上。 */
+.clip.segment .flight-stripe + * {
+  position: relative;
+}
+
 /* 整队动作带：一条带子代表整队全体成员的动作。
    团队成员不单独成行，队员的动作靠它才在时间轴上可见、可拖。 */
 .clip.team-band {
