@@ -3656,3 +3656,20 @@ header {
   box-shadow: inset 0 0 0 2px rgba(255, 69, 58, 0.5);
   z-index: 3;
 }
+
+/* 相机跟跳开关（Phase 6）：与 .grp-ids .chip 同一套视觉语言，但独立成类避免互相牵连。 */
+.toggle {
+  width: 100%;
+  font-size: 11px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.04);
+  color: #b9c6d4;
+  cursor: pointer;
+}
+.toggle.on {
+  border-color: var(--ap-blue);
+  background: var(--ap-sel);
+  color: #fff;
+}

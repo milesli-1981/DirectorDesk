@@ -53,7 +53,8 @@ import {
   tierOfGap,
   worstTier,
 } from "../src/engine/reach";
-import { DirectorObject, DirectorState, MoveSegment, Locomotion } from "../src/domain/schema";
+import { cameraAnchorHeight, solveCamera } from "../src/engine/cameraSolver";
+import { DirectorObject, DirectorState, MoveSegment, Locomotion, CameraObject } from "../src/domain/schema";
 
 let pass = 0;
 let fail = 0;
@@ -68,6 +69,9 @@ function check(name: string, actual: unknown, expected: unknown) {
     console.log(`  FAIL ${name}\n        实际 ${a}\n        期望 ${e}`);
   }
 }
+
+/** 六位小数取整：浮点比较的常规手法（§26 起的地形用例大量使用，故提到模块级）。 */
+const round6 = (n: number) => Math.round(n * 1e6) / 1e6;
 
 function box(id: string, x: number, z: number, w: number, d: number, h: number, baseY?: number): DirectorObject {
   return {
@@ -1173,7 +1177,6 @@ console.log("\n[22] 校验三条 + 落地 / 轨迹 / 助跑 + planar 退化");
     [seg("s1", "H", [0, 0], [10, 0])],
     "planar",
   );
-  const round6 = (n: number) => Math.round(n * 1e6) / 1e6;
   const tiers = (st: DirectorState) => segmentSpans(st, st.segments[0]).map((s) => s.tier);
   const loco = locomotionOf(flat, actor("H", 0, 0));
 
@@ -1321,7 +1324,6 @@ console.log("\n[22] 校验三条 + 落地 / 轨迹 / 助跑 + planar 退化");
     [seg("s1", "H", [0, 0], [10, 0])],
     "terrain",
   );
-  const round6 = (n: number) => Math.round(n * 1e6) / 1e6;
 
   // ① 没问题就是没提示 —— 平地上拖来拖去不该冒出任何红字。
   check("§27 平地拖拽：无提示", dragReachHint(flat, "s1", "end"), null);
@@ -1393,6 +1395,216 @@ console.log("\n[22] 校验三条 + 落地 / 轨迹 / 助跑 + planar 退化");
   const full = checkJumpArc({ dh: 0.5, dx: 0.4, apex: 0.65, loco, speedRatio: 1 });
   check("§27 全速：不报助跑", full.needsRunup, false);
   check("§27 全速：不缩放", round6(full.reach / jumpReachOf(0.5, loco)), 1);
+}
+
+/* ================================ 相机（Phase 6） ================================ */
+
+/** 建一台相机。 */
+function cam(id: string, targetId: string, extra?: Partial<CameraObject>): CameraObject {
+  return {
+    id,
+    name: id,
+    color: "#c792ea",
+    targetId,
+    framing: "medium",
+    view: "eye_level",
+    side: "back_3_4",
+    lensMm: 50,
+    motion: "FOLLOW",
+    ...extra,
+  };
+}
+
+/** 带相机的场景。 */
+function camScene(
+  objects: DirectorObject[],
+  cameras: CameraObject[],
+  segments: MoveSegment[] = [],
+  worldMode?: "planar" | "terrain",
+): DirectorState {
+  return { ...sceneWith(objects, segments, worldMode), cameras };
+}
+
+console.log("\n[28] 相机体系相对化");
+{
+  // ① 平地（planar）必须逐值等于扩展前的绝对米数。这是本 Phase 的**硬回归**：
+  //    任何相对化写错都会立刻在这里红。
+  {
+    const s = camScene([actor("H", 0, 0)], [cam("C", "H")]);
+    const r = solveCamera(s, "C", 0)!;
+    // eye_level = 1.7，chest = 1.35（原绝对值）
+    check("§28 planar eye_level：机位 y = 1.7", round6(r.position[1]), 1.7);
+    check("§28 planar：注视点 y = 1.55（演员眼高）", round6(r.target[1]), 1.55);
+    const s2 = camScene([actor("H", 0, 0)], [cam("C", "H", { view: "chest" })]);
+    check("§28 planar chest：机位 y = 1.35", round6(solveCamera(s2, "C", 0)!.position[1]), 1.35);
+  }
+
+  // ② 非演员目标：注视点 = 脚下 + 1（原值 1 的相对版本）。
+  {
+    const s = camScene([box("P", 0, 0, 2, 2, 1)], [cam("C", "P")]);
+    check("§28 planar 道具：注视点 y = 1", round6(solveCamera(s, "C", 0)!.target[1]), 1);
+  }
+
+  // ③ 演员站在 3m 平台上（terrain）→ 机位与注视点一起抬 3m。
+  {
+    const s = camScene(
+      [box("P", 0, 0, 4, 4, 3, 0), actor("H", 0, 0, 3)],
+      [cam("C", "H")],
+      [],
+      "terrain",
+    );
+    const r = solveCamera(s, "C", 0)!;
+    check("§28 站在 3m 平台：视高相对化 → 机位 y = 3 + 1.7", round6(r.position[1]), 4.7);
+    check("§28 站在 3m 平台：注视点 y = 3 + 1.55", round6(r.target[1]), 4.55);
+  }
+
+  // ④ 关键陷阱自查：**不能**写成 target[1] + VIEW_HEIGHT —— 
+  //    那会让每个视角凭空多抬一个眼高（1.55）。这里断言"机位 - 地面 == VIEW_HEIGHT"。
+  {
+    const s = camScene(
+      [box("P", 0, 0, 4, 4, 3, 0), actor("H", 0, 0, 3)],
+      [cam("C", "H", { view: "low" })],
+      [],
+      "terrain",
+    );
+    const r = solveCamera(s, "C", 0)!;
+    check("§28 陷阱自查：机位 − 地面 == VIEW_HEIGHT[low] == 0.9", round6(r.position[1] - 3), 0.9);
+    check("§28 陷阱自查：机位 ≠ 注视点 + VIEW_HEIGHT", round6(r.position[1]) === round6(r.target[1] + 0.9), false);
+  }
+
+  // ⑤ POV 眼高相对化。
+  {
+    const s = camScene(
+      [box("P", 0, 0, 4, 4, 3, 0), actor("H", 0, 0, 3)],
+      [cam("C", "H", { targetType: "POV" })],
+      [],
+      "terrain",
+    );
+    const r = solveCamera(s, "C", 0)!;
+    check("§28 POV 在 3m 平台：眼高 = 3 + 1.55", round6(r.position[1]), 4.55);
+  }
+
+  // ⑥ 平地（terrain 但地面 0）与 planar **同值** —— 证明"相对化"在无高差时是恒等变换。
+  {
+    const t = camScene([actor("H", 0, 0)], [cam("C", "H")], [], "terrain");
+    const p = camScene([actor("H", 0, 0)], [cam("C", "H")]);
+    check(
+      "§28 terrain 平地 == planar（恒等）",
+      round6(solveCamera(t, "C", 0)!.position[1]),
+      round6(solveCamera(p, "C", 0)!.position[1]),
+    );
+  }
+}
+
+console.log("\n[29] 跟跳防抖（followJumpHeight）");
+{
+  // 一条"起跳后飞出去"的段：弧线 apex 1.5。
+  // 注意 schema 字段是 `mode`（不是 `kind`）—— 写错会被结构化类型静默忽略，
+  // 于是段上根本没有弧线、所有断言都退化成平地。这正是 §29 曾经假失败的原因。
+  const jumpSeg = seg("s1", "H", [-3, 0], [3, 0], {
+    timeEnd: 2,
+    arc: { mode: "parabola", apex: 1.5 },
+  } as Partial<MoveSegment>);
+  const terrain = camScene([actor("H", -3, 0)], [cam("C", "H")], [jumpSeg], "terrain");
+
+  // ① 默认（跟随）：机位跟弧线一起起伏 —— 起跳前低、最高点高。
+  const before = solveCamera(terrain, "C", 0)!.position[1];
+  const peak = solveCamera(terrain, "C", 1)!.position[1];
+  check("§29 默认跟随：最高点机位高于起点", peak > before + 0.5, true);
+
+  // ② 关掉跟随：最高点机位 == 起跳点机位（锁在同一水平面上）。
+  const lockedState: DirectorState = {
+    ...terrain,
+    cameras: [cam("C", "H", { followJumpHeight: false })],
+  };
+  const lockedBefore = solveCamera(lockedState, "C", 0)!.position[1];
+  const lockedPeak = solveCamera(lockedState, "C", 1)!.position[1];
+  check("§29 关掉跟随：离地期间机位高度不变", round6(lockedPeak), round6(lockedBefore));
+
+  // ③ 锚线就是"起跳高度"：关掉跟随后，任何一个离地时刻的锚线都 == 起跳点锚线。
+  //    （用 cameraAnchorHeight 直接对拍，保证两边同源。）
+  const anchorPeak = cameraAnchorHeight(terrain, "H", 1, 0, 0, false);
+  const anchorStart = cameraAnchorHeight(terrain, "H", 0, -3, 0, false);
+  check("§29 锚线：离地期间 == 起跳高度", round6(anchorPeak), round6(anchorStart));
+
+  // ③b 二分取的是**贴地侧**端点，不是离地侧。抛物线起点斜率极大（apex 1.5 / 半程 1s
+  //     → 起步 ~6 m/s），取错一侧会让锚线凭空高 1cm 量级，而且**越晚的采样越漂**，
+  //     表现为锁定期间镜头缓慢上抬 —— 正是这个功能要消除的东西。10mm 是回归守卫。
+  check("§29 锚线：起跳高度不偏高（二分取贴地侧）", anchorPeak < 0.01, true);
+
+  // ④ 落地后锚线回到地面（不应该"锁"到天荒地老）。
+  //    该段终点是平地（起点/终点地面都是 0），所以落点锚线就是 0。
+  const landed = cameraAnchorHeight(terrain, "H", 2, 3, 0, false);
+  check("§29 锚线：落地后回到落点地面", round6(landed), 0);
+
+  // ⑤ 默认（跟随）下锚线 == 实际高度（定义式），保证与扩展前一致。
+  check(
+    "§29 默认跟随：锚线 == 实际高度",
+    round6(cameraAnchorHeight(terrain, "H", 1, 0, 0, true)),
+    round6(pathHeightAt(terrain, terrain.objects[0], 0, 0, 1)),
+  );
+
+  // ⑥ 缓坡步行（不离地）：关掉跟随**也照跟** —— 否则山坡上会跟丢。
+  //
+  //    关键：坡度必须**缓**。`maxStep = 0.35`（human）意味着每走一步只能抬 0.35m；
+  //    8m 深、2m 高的坡在 1.5m 的水平步幅里要抬 0.75m，人直接走出坡面 →
+  //    `supportUnder` 退回基准面 0，于是"上坡"变成了"掉下坡"，断言毫无意义。
+  //    这里改成 12m 深、1m 高的缓坡（d 方向是坡轴），步幅内抬升 0.29m < 0.35m。
+  {
+    const walk = sceneWith(
+      [
+        { ...box("R", 0, 0, 8, 12, 1, -0.5), topShape: "ramp" } as DirectorObject,
+        actor("H", 0, -4, 0),
+      ],
+      [seg("s1", "H", [0, -4], [0, 4], { timeEnd: 2 })],
+      "terrain",
+    );
+    const a0 = cameraAnchorHeight(walk, "H", 0, 0, -4, false);
+    const a1 = cameraAnchorHeight(walk, "H", 2, 0, 4, false);
+    check("§29 缓坡步行：关掉跟随后仍跟着升高", a1 > a0 + 0.5, true);
+    // 且全程"不离地"—— 否则这条用例会退化成在测跳跃，失去它存在的意义。
+    let maxAir = 0;
+    for (let i = 0; i <= 10; i += 1) {
+      const t = (i / 10) * 2;
+      const z = -4 + 8 * (i / 10);
+      const air =
+        pathHeightAt(walk, walk.objects[1], 0, z, t) -
+        standingHeightFor(walk, walk.objects[1], 0, z);
+      maxAir = Math.max(maxAir, air);
+    }
+    check("§29 缓坡步行：全程不离地（离地量 ≈ 0）", round6(maxAir), 0);
+  }
+}
+
+console.log("\n[30] 相机避障");
+{
+  // 一堵墙正好压住默认机位（eye_level 1.7 的高处盒子）。
+  // back_3_4 方位角 135°，机位落在 target + sin/cos(135°)*distance —— 用一个包住它的盒子。
+  const wall = box("W", 0, 0, 30, 30, 8);
+  const s = camScene([actor("H", 0, 0), wall], [cam("C", "H")], [], "terrain");
+  const r = solveCamera(s, "C", 0)!;
+  // 机位必须被推到盒子外（盒内任何一点都判失败）。
+  const inside =
+    Math.abs(r.position[0]) < 15 - 1e-6 &&
+    Math.abs(r.position[2]) < 15 - 1e-6 &&
+    r.position[1] > 0 &&
+    r.position[1] < 8;
+  check("§30 机位被推出遮挡体", inside, false);
+
+  // planar 短路：同样的几何在 planar 下机位**保持原样**（不被推走）。
+  const p = camScene([actor("H", 0, 0), wall], [cam("C", "H")]);
+  const rp = solveCamera(p, "C", 0)!;
+  check("§30 planar：不避障（机位保持原样）", round6(rp.position[1]), 1.7);
+
+  // 无遮挡物时，避障必须是恒等变换（否则每次求解都会漂）。
+  const clean = camScene([actor("H", 0, 0)], [cam("C", "H")], [], "terrain");
+  const rc = solveCamera(clean, "C", 0)!;
+  check("§30 无遮挡：恒等（不动）", round6(rc.position[1]), 1.7);
+
+  // 没有 occluding 的对象（玻璃）不该触发避障。
+  const glass = { ...box("G", 0, 0, 30, 30, 8), occluding: false } as DirectorObject;
+  const gs = camScene([actor("H", 0, 0), glass], [cam("C", "H")], [], "terrain");
+  check("§30 玻璃（occluding:false）：不避障", round6(solveCamera(gs, "C", 0)!.position[1]), 1.7);
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败\n`);

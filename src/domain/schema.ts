@@ -434,6 +434,17 @@ export interface CameraObject {
   fixedYawDeg?: number;
   /** PATH 默认固定朝向 · 立面俯仰角（度，0–360）：含义同 CameraMove.fixedPitchDeg。 */
   fixedPitchDeg?: number;
+  /**
+   * 跟拍目标**跳跃 / 落差**时，是否让相机跟着上下（默认 `true` = 跟随，与扩展前一致）。
+   *
+   * 设为 `false` 即为 docs/3d/03 §10 的**方案 b**：目标离地期间，相机保持**起跳高度的水平轨道**、
+   * **不跟高度** —— 像真实跟拍（摄影师本来就不会跟着人跳），人跳起来冲出画框又落回来。
+   *
+   * 为什么做成开关而不是"把抖动调小"：这是**电影语言**层面的选择，不是参数调优。
+   * 判"离地"用的是 `pathHeightAt`（实际高度）与 `standingHeightFor`（脚下地面）之差，
+   * 因此对**段上的弧线**与**走出平台边缘的落差**都生效，而不只是 `arc`。
+   */
+  followJumpHeight?: boolean;
 }
 
 /**

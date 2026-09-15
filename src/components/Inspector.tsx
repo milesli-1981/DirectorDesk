@@ -1693,6 +1693,21 @@ export function Inspector() {
               <p className="hint">
                 跟随阻尼：相机对目标瞬变（转向 / 绕障让位 / 扭动）的响应滞后一点；瞬变若很快消失则被忽略。0 = 完全跟手，越大越「拖」。可在单个运镜段覆盖。
               </p>
+              <Field label="跟跳时相机随高度跟随 Follow Jump">
+                <button
+                  type="button"
+                  className={`toggle${camera.followJumpHeight !== false ? " on" : ""}`}
+                  onClick={() =>
+                    updateCamera(camera.id, { followJumpHeight: camera.followJumpHeight === false })
+                  }
+                >
+                  {camera.followJumpHeight !== false ? "跟随（默认）" : "锁在起跳高度"}
+                </button>
+              </Field>
+              <p className="hint">
+                关掉后：目标跳起 / 落差离地期间，**相机保持起跳高度的水平轨道、不跟高度** ——
+                像真实跟拍，人冲出画框又落回来。这是**电影语言**层面的选择，不是参数调优。
+              </p>
             </SubGroup>
           </div>
 

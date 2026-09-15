@@ -503,6 +503,7 @@ interface DirectorStore {
         | "truckDist"
         | "style"
         | "stabilize"
+        | "followJumpHeight"
       >
     >,
   ) => void;
