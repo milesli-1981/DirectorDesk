@@ -123,7 +123,42 @@ export const POSE_PRESETS: Record<string, Pose> = {
   },
 };
 
-// 步态类：没有静态关节角度，只决定走/跑节奏，因此不作为"静态基线姿势"展示。
+/**
+ * **作者可选**的姿势（静态 / 手势）：只有这些能出现在"静态基线姿势"的下拉里。
+ *
+ * 用**白名单**而不是"从 `POSE_PRESET_NAMES` 里排除几个"：那张表里还住着步态与阶段姿势，
+ * 黑名单按定义一定会漏 —— 漏的结果是下拉里出现**选了也不触发**的死选项
+ * （例如选 `jumpAir`，人只会摆出抱膝的姿势站着，并不会跳）。
+ */
+export const AUTHOR_POSE_NAMES = ["stand", "sit", "crouch", "wave", "point", "talk"] as const;
+export type AuthorPoseName = (typeof AUTHOR_POSE_NAMES)[number];
+
+/** 步态类：不是姿势，只决定步频 / 摆幅 / 前倾（没有静态关节角度）。 */
+export const GAIT_POSE_NAMES = ["walk", "run"] as const;
+
+/**
+ * **阶段姿势**：由弧线的进度自动挑，**不可选**。
+ *
+ * 起跳 / 滞空 / 落地的边界在 `actionPose.ts` 的 `airbornePresetAt`（15% / 70% / 15%），
+ * 离地判据在 `stance.ts` 的 `airborneOf` —— 两者才是这几个预设的"开关"，不是下拉框。
+ * 它们与静态姿势共用 `Pose` 这个形状，仅此而已。
+ */
+export const STANCE_POSE_NAMES = [
+  "jumpTakeoff",
+  "jumpAir",
+  "jumpLand",
+  "climbReach",
+  "climbUp",
+  "hang",
+] as const;
+export type StancePoseName = (typeof STANCE_POSE_NAMES)[number];
+
+/**
+ * `POSE_PRESETS` 的**全部**键（作者可选 + 步态 + 阶段）。
+ *
+ * 要"作者可选"那份请用 `AUTHOR_POSE_NAMES` —— 这个常量只用来做完整性校验
+ * （三类不重不漏，见 scripts/check-3d.ts §35）。
+ */
 export const POSE_PRESET_NAMES = Object.keys(POSE_PRESETS);
 
 /** 步态类动作：只影响步频 / 摆幅 / 前倾，不影响静态关节角度。 */

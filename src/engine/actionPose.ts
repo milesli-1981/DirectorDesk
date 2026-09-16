@@ -1,4 +1,4 @@
-import { ActionKind, DirectorState, JointName, Pose } from "../domain/schema";
+import { ActionClip, ActionKind, DirectorState, JointName, Pose } from "../domain/schema";
 import { POSE_PRESETS, isGaitKind } from "./poses";
 import { airborneOf } from "./stance";
 
@@ -35,6 +35,83 @@ export interface ActionSample {
 }
 
 /**
+ * 片段内的**渐入量**（0..1）：进出都缓动，避免姿势突然跳变。
+ *
+ * 单独导出是因为"渐入怎么算"只该有一处 —— 渲染层要用同一个量做别的事
+ * （GLB 里按它驱动动画权重、`actionPoseAt` 用它算 `locomotionScale`）。
+ */
+export function clipBlend(clip: ActionClip, time: number): number {
+  const span = Math.max(0.001, clip.timeEnd - clip.timeStart);
+  return easeInOut((time - clip.timeStart) / span);
+}
+
+/**
+ * 一个动作片段在**关节空间**的角度贡献（已含渐入与 wave / talk 的时间振荡）。
+ *
+ * **这是"这个片段是什么姿势"的唯一出处**：方块简模（`WorldView` 的 `HumanoidRig`）
+ * 与 GLB 骨骼（`HumanoidModel` 里"本模型没有对应动画片段"那一支）都调它。
+ *
+ * 为什么必须合一：GLB 那边曾经**只认动画片段名**，于是 `sit` / `point` / **自定义动作**
+ * 选了完全没反应（`POSE_PRESETS` 与 `customActions` 它根本没读），而方块简模照做 ——
+ * 同一份数据、两条渲染路径、两种结果。凡"同一件事在两处各写一遍"，迟早长歪。
+ *
+ * 不含**离地兜底**：那是"整段都没有作者姿势时"的叠加，不属于某个片段的贡献。
+ */
+export function clipJointAngles(
+  state: DirectorState,
+  clip: ActionClip,
+  time: number,
+): Pose["joints"] {
+  // custom：关节角完全取自「自定义动作库」里那条命名记录；customId 悬空时按标准站姿处理。
+  const customPose =
+    clip.kind === "custom"
+      ? (state.customActions ?? []).find((p) => p.id === clip.customId)
+      : undefined;
+  const preset = customPose ? { joints: customPose.joints } : POSE_PRESETS[clip.kind] ?? { joints: {} };
+  // 片段自带的关节覆盖优先于 kind 预设。
+  const override = clip.pose?.joints ?? {};
+  const map: Pose["joints"] = { ...preset.joints, ...override };
+  const blend = clipBlend(clip, time);
+  const cyclic = CYCLIC_KINDS.has(clip.kind);
+  const out: Pose["joints"] = {};
+
+  for (const key of Object.keys(map) as JointName[]) {
+    const base = preset.joints[key]?.[0] ?? 0;
+    const over = override[key];
+    let v: number;
+    if (cyclic) {
+      const omega = clip.kind === "wave" ? 7.5 : 9.5;
+      v = (over ? over[0] : base) + Math.sin(time * omega) * 0.4;
+    } else {
+      v = over ? over[0] : base;
+    }
+    out[key] = [v * blend, 0, 0];
+  }
+  return out;
+}
+
+/**
+ * 该片段算不算"**作者显式写的姿态**"（决定离地兜底要不要给它让位）。
+ *
+ * 步态（walk / run）不是姿态；`stand` 是"标准站姿"、`custom` 的关节躺在库里 ——
+ * 这两者由渲染层各自叠加，所以不在此列。**采样与渲染共用这一个判据。**
+ */
+function isAuthorPoseClip(clip: ActionClip): boolean {
+  return !isGaitKind(clip.kind) && clip.kind !== "custom" && clip.kind !== "stand";
+}
+
+/** 此刻是否有作者显式的姿态片段在生效（GLB 也问这一句，免得出现第二个答案）。 */
+export function authorPoseActive(
+  state: DirectorState,
+  objectId: string,
+  time: number,
+): boolean {
+  return (state.actions ?? []).some(
+    (a) => a.object === objectId && time >= a.timeStart && time <= a.timeEnd && isAuthorPoseClip(a),
+  );
+}
+
+/**
  * 采样某演员在 time 时刻由 ActionClip 贡献的姿势。
  * - 静态类（sit/crouch）：以 easing 渐入的关节角度。
  * - 周期类（wave/talk）：在预设基线上叠加随时间振荡。
@@ -56,76 +133,55 @@ export function actionPoseAt(
   let gait: GaitMode = "auto";
 
   for (const clip of active) {
-    // custom：关节角完全取自「自定义动作库」里那条命名记录；customId 悬空时按标准站姿处理。
-    const customPose =
-      clip.kind === "custom"
-        ? (state.customActions ?? []).find((p) => p.id === clip.customId)
-        : undefined;
-    const preset = customPose ? { joints: customPose.joints } : POSE_PRESETS[clip.kind] ?? { joints: {} };
-    // 片段自带的关节覆盖优先于 kind 预设。
-    const override = clip.pose?.joints ?? {};
-    const map: Pose["joints"] = { ...preset.joints, ...override };
-    const tLocal =
-      (time - clip.timeStart) / Math.max(0.001, clip.timeEnd - clip.timeStart);
-    const blend = easeInOut(tLocal);
-    const cyclic = CYCLIC_KINDS.has(clip.kind);
-
-    for (const key of Object.keys(map) as JointName[]) {
-      const base = preset.joints[key]?.[0] ?? 0;
-      const over = override[key];
-      let v: number;
-      if (cyclic) {
-        const omega = clip.kind === "wave" ? 7.5 : 9.5;
-        v = (over ? over[0] : base) + Math.sin(time * omega) * 0.4;
-      } else {
-        v = over ? over[0] : base;
-      }
+    // 角度来自唯一出处（kind 预设 / 自定义库 + 渐入 + 振荡），这里只负责累加。
+    const angles = clipJointAngles(state, clip, time);
+    for (const key of Object.keys(angles) as JointName[]) {
       const cur = joints[key]?.[0] ?? 0;
-      joints[key] = [cur + v * blend, 0, 0];
+      joints[key] = [cur + (angles[key]?.[0] ?? 0), 0, 0];
     }
-    if (STATIC_KINDS.has(clip.kind)) locoSuppress = Math.max(locoSuppress, blend);
+    if (STATIC_KINDS.has(clip.kind)) locoSuppress = Math.max(locoSuppress, clipBlend(clip, time));
     // 步态类片段指定"怎么走"；多个时以最后一个为准。
     if (isGaitKind(clip.kind)) gait = clip.kind as GaitMode;
   }
 
   // 离地兜底：仅当**没有**显式姿态类片段时才叠加（作者的姿势永远优先）。
-  const hasPoseOverride = active.some(
-    (a) => !isGaitKind(a.kind) && a.kind !== "custom" && a.kind !== "stand",
-  );
-  const airPose = jumpPoseAt(state, objectId, time);
-  if (airPose && !hasPoseOverride) {
-    for (const key of Object.keys(airPose.joints) as JointName[]) {
-      const v = airPose.joints[key]?.[0] ?? 0;
+  const airJoints = airborneJointAngles(state, objectId, time);
+  if (airJoints && !active.some(isAuthorPoseClip)) {
+    for (const key of Object.keys(airJoints) as JointName[]) {
+      const v = airJoints[key]?.[0] ?? 0;
       const cur = joints[key]?.[0] ?? 0;
       joints[key] = [cur + v, 0, 0];
     }
   }
 
-  if (active.length === 0 && !airPose) {
+  if (active.length === 0 && !airJoints) {
     return { pose: { joints: {} }, locomotionScale: 1, gait: "auto" };
   }
   return { pose: { joints }, locomotionScale: 1 - locoSuppress, gait };
 }
 
 /**
- * 离地自动姿态（Phase 7）：起跳 / 滞空 / 落地三段。
+ * 离地自动姿态（Phase 7）：起跳 / 滞空 / 落地三段 —— 返回**关节角**，不在空中则 null。
  *
  * 判据与相机跟跳防抖**同源**（`stance.ts` 的 `airborneOf`）—— 同一件事（"人在空中"）
  * 只该有一个判据。不在空中 → null（调用方跳过）。
  *
  * 三段的边界按**段进度**划分（起跳段 = 前 15%、落地段 = 后 15%），
  * 而不是按离地高度 —— 因为"滞空"是一段持续时间，不是一个高度阈值。
+ *
+ * 导出是因为 GLB 骨骼也要叠它：方块简模与它在同一段跳跃里必须是同一个姿势，
+ * 否则"跳起来收不收腿"取决于用哪种身形渲染。
  */
-function jumpPoseAt(
+export function airborneJointAngles(
   state: DirectorState,
   objectId: string,
   time: number,
-): Pose | null {
+): Pose["joints"] | null {
   const object = state.objects.find((o) => o.id === objectId);
   if (!object) return null;
   const { airborne } = airborneOf(state, object, object.x, object.z, time);
   if (!airborne) return null;
-  return POSE_PRESETS[airbornePresetAt(state, objectId, time)] ?? null;
+  return POSE_PRESETS[airbornePresetAt(state, objectId, time)]?.joints ?? null;
 }
 
 /** 按段进度挑"起跳 / 滞空 / 落地"三段之一（无活跃段时判为滞空）。 */

@@ -42,6 +42,13 @@ export type PathPointShape = "LINE" | "ARC";
 export type EaseCurve = [number, number, number, number];
 
 /**
+ * 名字显示的场景级三态。**场景是更高一级的权威**：
+ * `"on"` / `"off"` 压过个体，只有 `"default"` 才把控制权交给个体。
+ * 判定只有一处实现：`engine/nameVisibility.ts` 的 `nameVisible`。
+ */
+export type NameVisibility = "on" | "off" | "default";
+
+/**
  * 速度曲线关键点 = 一条「何时走到哪儿」的控制点。
  * t = 归一化时刻 0..1（落在片段 [timeStart, timeEnd] 内的比例）
  * v = 该时刻已完成的路径进度 0..1。首点恒为 0、末点恒为 1 —— 进度曲线必须走完全程，
@@ -208,6 +215,12 @@ export interface DirectorObject {
   stair?: StairSpec;
   /** 是否可站上去。默认 true（由 maxStep 与坡度推导）。水面 / 沼泽设 false。 */
   walkable?: boolean;
+  /**
+   * 是否显示这个名字（**个体级覆盖**）。缺省 = 跟随场景开关 `DirectorState.showNames`。
+   * 三态语义：`true` = 无论如何都显示（哪怕场景关着）；`false` = 无论如何都不显示；
+   * 不写 = 跟随场景。于是"少显示几个"和"只突出一个"都能表达。
+   */
+  showName?: boolean;
   /**
    * 遇障时的**作者意图**：默认（`"auto"`）按能力表决定 —— 迈得上就迈、跳得过就跳
    * （见 docs/3d/04 §3：画了一条直线说明作者想走直线，绕行才是系统自作主张）。
@@ -384,7 +397,9 @@ export type CameraMotionType =
 export type CameraTargetType = "OBJECT" | "OTS" | "GROUP" | "POV" | "LOCATION";
 
 /**
- * 动作片段的种类（与 engine/poses.ts 的 POSE_PRESETS 键一致）。
+ * 动作片段的种类（= `engine/poses.ts` 的 `AUTHOR_POSE_NAMES` + 步态 walk/run + custom）。
+ * **不含阶段姿势**（`jumpTakeoff` / `jumpAir` / `jumpLand` / `climbReach` / `climbUp` / `hang`）——
+ * 那些由弧线进度自动挑（`actionPose.ts` 的 `airbornePresetAt`），不是可选项。
  * 分两类：
  * - 姿态/手势类（stand/sit/crouch/wave/point/talk）：给出关节角度；
  * - 步态类（walk/run）：本身没有静态关节角度，只决定"怎么走"的节奏与幅度。
@@ -465,6 +480,12 @@ export interface CameraObject {
   roll?: number;
   /** 相机平台：ground = 地面机（默认）；drone = 无人机，自带基础飞行高度、不受地面约束。 */
   kind?: "ground" | "drone";
+  /**
+   * 是否显示这个相机的名字标签（**个体级覆盖**，与 `DirectorObject.showName` 同语义）。
+   * 缺省 = 跟随场景名字开关 `DirectorState.showNames`（"开"全显示 / "关"全隐藏 / "默认"跟随个体）。
+   * 场景级下拉框在画布工具条，个体级眼睛图标在选中本相机或资产时点亮。
+   */
+  showName?: boolean;
   /** 航拍 / 升降高度（米），暂存为相机数据（cameraSolver 当前用 DRONE 基准高度）。 */
   altitude?: number;
   /** 由模板库创建时记下来源模板 id（便于回看 / 再编辑）。 */
@@ -673,6 +694,16 @@ export interface DirectorState {
    * 因此下游不需要任何 `if (worldMode === "planar")` 特判。
    */
   worldMode?: WorldMode;
+  /**
+   * 对象名字的**场景级三态**开关。缺省 `"default"`（= 交给个体）。
+   *
+   * - `"on"` / `"off"`：**场景接管** —— 强制显示 / 强制隐藏，个体的 `showName` 被压过；
+   * - `"default"`：控制权交给个体（`DirectorObject.showName`，缺省显示）。
+   *
+   * 为什么需要它：示例场景为了讲解会给对象起很长的名字，对象一多，名字会盖住画面 ——
+   * 编辑时看不清全貌、播放时干扰信息。
+   */
+  showNames?: NameVisibility;
   /**
    * 场景级能力表 override（按类别覆盖 `engine/locomotion.ts` 的预设）。
    * 用途：骑马的人能跳 1.2m、受伤的人 maxStep 只有 0.2m —— 不必新增资产类别。

@@ -4,7 +4,13 @@ import { useAnimations, useGLTF } from "@react-three/drei";
 import * as THREE from "three";
 import { clone as cloneSkeleton } from "three/examples/jsm/utils/SkeletonUtils.js";
 import { useDirectorStore } from "../state/directorStore";
-import { actionPoseAt, staticPoseWeight } from "../engine/actionPose";
+import {
+  actionPoseAt,
+  airborneJointAngles,
+  authorPoseActive,
+  clipJointAngles,
+  staticPoseWeight,
+} from "../engine/actionPose";
 import { findClip, NOMINAL_SPEED, type ModelConfig } from "../engine/modelConfig";
 import { RUN_SPEED } from "../engine/locomotion";
 import { torsoCompensation } from "../engine/stance";
@@ -151,44 +157,66 @@ export function HumanoidGLB({
     const { state, currentTime } = useDirectorStore.getState();
     const sample = actionPoseAt(state, objectId, currentTime);
 
-    // 关节覆盖 = 静态基线（object.pose）+ 本片段自定义（clip.pose），二者叠加。
-    // 静态基线即 Inspector「Pose（静态基线姿势）」写入的 object.pose：方块简模 HumanoidRig
-    // 一直有叠加，但 GLB 这边此前完全没读它 → 角色上 Pose 按钮无效。Xbot 自带片段里并没有
-    // sitting（只有 sneak_pose 对应 crouch），这类静态姿势只能靠关节角表达，故必须补上。
+    /** kind → 本模型上**真实存在**的动画片段名。找不到 ⇒ undefined ⇒ 走关节角兜底。 */
+    const clipForKind = (kind: string) => {
+      const candidates = (config.clips.poses as Record<string, string[] | undefined>)[kind];
+      return candidates ? findClip(names, candidates) : undefined;
+    };
+
+    // 关节叠加 = 静态基线（object.pose）+ 动作片段的关节角。
+    // **与方块简模共用同一个出处**（`clipJointAngles`）—— 这里只做 GLB 特有的两件事：
+    // ① 能映射到动画片段的 kind 由动画表达，不再重复叠一次关节角（会双重施加）；
+    // ② 静态基线按速度衰减（见 staticPoseWeight）。
     const overrideJoints: Pose["joints"] = {};
-    // 静态基线只对站定的角色生效：起步后随速度衰减到 0，让位给步态（见 staticPoseWeight）。
-    const sw = staticPoseWeight(speed);
-    if (sw > 0.001) {
-      const baseline = state.objects.find((o) => o.id === objectId)?.pose?.joints;
-      if (baseline) {
-        for (const key of Object.keys(baseline) as JointName[]) {
-          const v = baseline[key];
-          if (v) overrideJoints[key] = [v[0] * sw, v[1] * sw, v[2] * sw];
-        }
-      }
-    }
-    for (const clip of state.actions ?? []) {
-      if (clip.object !== objectId) continue;
-      if (currentTime < clip.timeStart || currentTime > clip.timeEnd) continue;
-      const o = clip.pose?.joints;
-      if (!o) continue;
-      for (const key of Object.keys(o) as JointName[]) {
-        const v = o[key];
+    const addJoints = (source: Pose["joints"] | undefined | null) => {
+      if (!source) return;
+      for (const key of Object.keys(source) as JointName[]) {
+        const v = source[key];
         if (!v) continue;
         const cur = overrideJoints[key] ?? [0, 0, 0];
         overrideJoints[key] = [cur[0] + v[0], cur[1] + v[1], cur[2] + v[2]];
       }
+    };
+
+    // 静态基线即 Inspector「Pose（静态基线姿势）」写入的 object.pose：方块简模 HumanoidRig
+    // 一直有叠加，但 GLB 这边此前完全没读它 → 角色上 Pose 按钮无效。
+    // 只对站定的角色生效：起步后随速度衰减到 0，让位给步态（见 staticPoseWeight）。
+    const sw = staticPoseWeight(speed);
+    if (sw > 0.001) {
+      const baseline = state.objects.find((o) => o.id === objectId)?.pose?.joints;
+      if (baseline) {
+        const scaled: Pose["joints"] = {};
+        for (const key of Object.keys(baseline) as JointName[]) {
+          const v = baseline[key];
+          if (v) scaled[key] = [v[0] * sw, v[1] * sw, v[2] * sw];
+        }
+        addJoints(scaled);
+      }
     }
 
-    // 姿态 / 手势类动作：找到对应 clip 就覆盖步态（后出现的片段优先）。
+    // 姿态 / 手势类动作：**动画能映射就用动画**（覆盖步态，后出现的片段优先）；
+    // 映射不到（sit / point / 自定义动作 / 换模型后缺项）→ **退回关节角**，
+    // 保证"选了就有反应"，而且每个 kind 各不相同（不再都演同一段代理手势）。
     let override: string | null = null;
     for (const clip of state.actions ?? []) {
       if (clip.object !== objectId) continue;
       if (currentTime < clip.timeStart || currentTime > clip.timeEnd) continue;
       if (clip.kind === "walk" || clip.kind === "run") continue;
-      const candidates = (config.clips.poses as Record<string, string[] | undefined>)[clip.kind];
-      const name = candidates ? findClip(names, candidates) : undefined;
-      if (name) override = name;
+      const mapped = clipForKind(clip.kind);
+      if (mapped) {
+        override = mapped;
+        // 这一段身体交给动画：只叠作者显式写的关节微调（clip.pose）。
+        addJoints(clip.pose?.joints);
+      } else {
+        // 没有对应动画 → 关节角兜底（kind 预设 / 自定义动作库 + 渐入 + 振荡）。
+        addJoints(clipJointAngles(state, clip, currentTime));
+      }
+    }
+
+    // 离地兜底：与方块简模**同源同规则**（有作者姿态时让位）。少了它，GLB 角色跳跃时
+    // 不收腿、攀爬时不举手 —— 而方块简模会，同一段动作两种身形两种姿势。
+    if (!authorPoseActive(state, objectId, currentTime)) {
+      addJoints(airborneJointAngles(state, objectId, currentTime));
     }
 
     // 覆盖切换：交叉淡入 / 淡出。

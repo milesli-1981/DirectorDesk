@@ -124,6 +124,15 @@ export function tierOfGap(
   }
 }
 
+/**
+ * 3 档（过不去）的出路。
+ *
+ * 这是一个**影视**工具，不是仿真器：「过不去」不是物理断言，而是一句调度结论
+ * —— 它必须同时给出三条出路（改路由 / 换主体 / 这一段就是超能力，要走特效）。
+ * 见 `docs/3d/00-总纲.md` 的「速度与镜头：世界是舞台，不是地图」。
+ */
+export const BLOCKED_OPTIONS = "　→ 改路由 / 换主体 / 或这是特效段";
+
 /** 说人话、带数字的文案（docs/3d/03 §6）。 */
 export function reachMessage(tier: ReachTier, dh: number, dx: number, reach: number, loco: Locomotion): string {
   const up = `${dh >= 0 ? "+" : "−"}${Math.abs(dh).toFixed(2)}m`;
@@ -136,15 +145,15 @@ export function reachMessage(tier: ReachTier, dh: number, dx: number, reach: num
       return `下落 ${Math.abs(dh).toFixed(2)}m`;
     case 3:
       if (dh > 0 && dh > loco.maxClimbHeight) {
-        return `这里落差 ${dh.toFixed(2)} 米，超过攀爬能力 ${loco.maxClimbHeight.toFixed(2)} 米`;
+        return `这里落差 ${dh.toFixed(2)} 米，超过攀爬能力 ${loco.maxClimbHeight.toFixed(2)} 米${BLOCKED_OPTIONS}`;
       }
       if (dh < 0) {
-        return `下落 ${Math.abs(dh).toFixed(2)} 米太高，最多 ${dropLimit(loco).toFixed(2)} 米`;
+        return `下落 ${Math.abs(dh).toFixed(2)} 米太高，最多 ${dropLimit(loco).toFixed(2)} 米${BLOCKED_OPTIONS}`;
       }
       if (dx > reach + 1e-6) {
-        return `跨度 ${dx.toFixed(2)} 米，最远只能跳 ${reach.toFixed(2)} 米`;
+        return `跨度 ${dx.toFixed(2)} 米，最远只能跳 ${reach.toFixed(2)} 米${BLOCKED_OPTIONS}`;
       }
-      return "过不去";
+      return `过不去${BLOCKED_OPTIONS}`;
     default:
       return "";
   }

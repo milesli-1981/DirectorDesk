@@ -19,6 +19,7 @@ import {
   HandoffMode,
   IntentAction,
   MoveSegment,
+  NameVisibility,
   OtsSide,
   PathPoint,
   SpeedKey,
@@ -38,6 +39,7 @@ import { contentEndTime } from "../engine/timeline";
 import { normalizeCameraKeys, normalizeEase, normalizeSpeedKeys } from "../engine/ease";
 import { ASSET_PRESETS } from "../engine/assetPresets";
 import { objectTop } from "../engine/ground";
+import { nameVisible } from "../engine/nameVisibility";
 import { placeObject } from "../engine/place";
 import { DEFAULT_STAIR_WIDTH, insertBend, planStairLink } from "../engine/stairLink";
 import { planStairWalk, StairWalkDirection } from "../engine/stairWalk";
@@ -105,9 +107,43 @@ function loadSceneState(id: string): DirectorState | null {
   }
 }
 
+/**
+ * 顶面形状（flat / ramp / stair）与抽象楼梯是**盒子几何**的一部分，只对环境资产
+ * （`role: "set"`）有意义：它和 `bottom` 一起定义那个盒子怎么占空间，下游由
+ * `ground` / `raycast` / `occlusion` / `stack` / `stair*` 一起读。
+ *
+ * human / animal / vehicle 是人物与载具，渲染走骨骼 / 模型（`WorldView` 的 `blockBody`），
+ * 挂着 `topShape` / `stair` 只会让"看到的盒子"和"实际的物理"两套说法打架
+ * （载具甚至会被真画成一段楼梯网格）。UI 已不再提供入口，这里把**任何来源**的历史数据
+ * 一并清掉，使下游不必再各自判一次。
+ */
+function stripAgentTopShape(objects: DirectorObject[]): DirectorObject[] {
+  let changed = false;
+  const next = objects.map((object) => {
+    if (object.role === "set" || (object.topShape === undefined && object.stair === undefined)) {
+      return object;
+    }
+    changed = true;
+    return { ...object, topShape: undefined, stair: undefined };
+  });
+  // 没脏数据就返回原引用：zustand 选择器按引用比较，凭空造新数组会引发整树重渲染。
+  return changed ? next : objects;
+}
+
+/** 上面那条规则的**状态级**包装：没有脏数据时不产生新对象。 */
+function stripAgentTopShapeFromState(s: DirectorState): DirectorState {
+  if (!Array.isArray(s.objects)) return s;
+  const objects = stripAgentTopShape(s.objects);
+  return objects === s.objects ? s : { ...s, objects };
+}
+
 function saveSceneState(id: string, state: DirectorState): void {
   try {
-    if (typeof localStorage !== "undefined") localStorage.setItem(sceneKey(id), JSON.stringify(state));
+    if (typeof localStorage !== "undefined") {
+      // 写盘是**唯一**出口：在这一刀清干净，任何来源的脏数据都进不了存档
+      // （读盘侧 `sanitizeState` 再清一道，两边各自独立成立，不互相依赖）。
+      localStorage.setItem(sceneKey(id), JSON.stringify(stripAgentTopShapeFromState(state)));
+    }
   } catch {
     /* ignore */
   }
@@ -146,7 +182,9 @@ function collectExamples(): {
     for (const tab of mod.manifest.order) {
       const st = mod.scenes[tab.id];
       if (!st || scenes[tab.id]) continue;
-      scenes[tab.id] = st;
+      // 示例源也过一遍清洗：老示例若带脏数据，写进存档的内容才与记录的"写入指纹"一致
+      // （否则 saveSceneState 那一刀会让指纹与实际内容对不上，被误判成"用户改过"）。
+      scenes[tab.id] = stripAgentTopShapeFromState(st);
       order.push({ id: tab.id, name: tab.name });
     }
   }
@@ -225,6 +263,38 @@ function syncExamples(order: StageManifest["order"], force = false): StageManife
 }
 
 /**
+ * 本地场景一次性清扫：历史版本允许给**任意**对象设「顶面形状 / 抽象楼梯」，而它只对环境资产
+ * （`role: "set"`）有意义（见 `stripAgentTopShape`）。这里把 manifest 里的**每一页**都过一遍 ——
+ * 只清"当前打开的那一页"会把其它页面的脏数据留着。
+ *
+ * **只动真的脏了的页**：干净的页一个字都不写。重写内容会让示例页的"写入指纹"对不上，
+ * 而 `syncExamples` 正是据此判定"用户改过"并**永久停止自动同步** —— 一个纯粹的清理动作
+ * 不该有这个副作用。
+ *
+ * 标记位保证只跑一次；此后新数据在写盘那一刻就被 `saveSceneState` 清掉了。
+ */
+const TOP_SHAPE_SWEEP_KEY = "director-desk-sweep-topshape-v1";
+
+function sweepAgentTopShape(order: StageManifest["order"]): void {
+  if (lsGet(TOP_SHAPE_SWEEP_KEY)) return;
+  for (const tab of order) {
+    const raw = lsGet(sceneKey(tab.id));
+    if (raw === null) continue;
+    let parsed: DirectorState;
+    try {
+      parsed = JSON.parse(raw) as DirectorState;
+    } catch {
+      continue;
+    }
+    if (!parsed || !Array.isArray(parsed.objects)) continue;
+    const objects = stripAgentTopShape(parsed.objects);
+    if (objects === parsed.objects) continue; // 干净 → 一个字都不动
+    saveSceneState(tab.id, { ...parsed, objects });
+  }
+  lsSet(TOP_SHAPE_SWEEP_KEY, "1");
+}
+
+/**
  * 启动时装配片场：
  * - 已有 manifest（用户继续编辑）→ 保留现状，并同步示例（陈旧/未改动的示例页自动更新）。
  * - 首屏（无 manifest）→ 以 scene_examples 目录下所有示例片场作为默认片场。
@@ -237,6 +307,8 @@ function initStage(): { manifest: StageManifest; activeState: DirectorState } {
   if (manifest && manifest.order.length > 0) {
     // 保留用户片场，同时同步示例：缺失的补建，陈旧且未被改动的自动更新。
     const order = syncExamples(manifest.order);
+    // 历史存档里「非环境资产却带顶面形状 / 楼梯」的脏页一次性清掉（只跑一次，见该函数）。
+    sweepAgentTopShape(order);
     const nextManifest = order.length !== manifest.order.length ? { ...manifest, order } : manifest;
     if (nextManifest !== manifest) saveManifest(nextManifest);
     const activeId =
@@ -336,6 +408,15 @@ interface DirectorStore {
   setViewMode: (mode: ViewMode) => void;
   /** 切换平面 / 立体世界。planar = 老行为（一切在 y=0），terrain = 启用堆叠与落脚高度。 */
   setWorldMode: (mode: WorldMode) => void;
+  /**
+   * 场景级名字开关（三态，见 `DirectorState.showNames`）：
+   * `"on"` / `"off"` = 场景接管；`"default"` = 把控制权交给个体。
+   */
+  setShowNames: (show: NameVisibility) => void;
+  /** 个体级：切换某个对象的 `showName`（三态里只写 true / false，不写回"跟随场景"）。 */
+  toggleShowName: (objectId: string) => void;
+  /** 个体级：切换某个相机的 `showName`（与对象同语义，见 CameraObject.showName）。 */
+  toggleCameraShowName: (cameraId: string) => void;
   setActiveCamera: (cameraId: string) => void;
   toggleViewLocked: () => void;
   togglePathDraw: () => void;
@@ -774,6 +855,8 @@ function sanitizeState(s: DirectorState): DirectorState {
     );
   return {
     ...s,
+    // 非环境资产不该带顶面形状 / 抽象楼梯（见 stripAgentTopShape）：历史存档与手工 JSON 都可能残留。
+    objects: stripAgentTopShape(s.objects),
     segments,
     cameraMoves: s.cameraMoves.map((move) =>
       move.speedKeys
@@ -1002,6 +1085,45 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
       set((store) => ({
         state: { ...store.state, revision: store.state.revision + 1, worldMode: mode },
       })),
+
+    setShowNames: (show) =>
+      set((store) => ({
+        state: { ...store.state, revision: store.state.revision + 1, showNames: show },
+      })),
+
+    toggleShowName: (objectId) =>
+      set((store) => {
+        const target = store.state.objects.find((o) => o.id === objectId);
+        if (!target) return {};
+        // 反相写入时从"当前实际是否可见"出发 —— 否则在场景处于「默认」且个体没写时，
+        // 点一下会写成 false 却看不出变化。判定走唯一出口 engine/nameVisibility（场景三态优先）。
+        const current = nameVisible(store.state.showNames, target);
+        return {
+          state: {
+            ...store.state,
+            revision: store.state.revision + 1,
+            objects: store.state.objects.map((o) =>
+              o.id === objectId ? { ...o, showName: !current } : o,
+            ),
+          },
+        };
+      }),
+
+    toggleCameraShowName: (cameraId) =>
+      set((store) => {
+        const target = store.state.cameras.find((c) => c.id === cameraId);
+        if (!target) return {};
+        const current = nameVisible(store.state.showNames, target);
+        return {
+          state: {
+            ...store.state,
+            revision: store.state.revision + 1,
+            cameras: store.state.cameras.map((c) =>
+              c.id === cameraId ? { ...c, showName: !current } : c,
+            ),
+          },
+        };
+      }),
 
     setActiveCamera: (cameraId) => set({ activeCameraId: cameraId }),
 

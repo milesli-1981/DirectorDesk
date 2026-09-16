@@ -35,13 +35,15 @@ export const MODEL_CONFIG: Partial<Record<AssetCategory, ModelConfig>> = {
       walk: ["walking", "walk"],
       run: ["running", "run"],
       poses: {
+        // 只保留**诚实的**映射：模型真有这个状态才映射。
         stand: ["standing", "idle"],
-        sit: ["sitting", "sit"],
         crouch: ["crouch", "crouching", "sneak_pose"],
-        // Xbot 没有 wave / point 片段，用 agree(点头) 作为「打招呼」的代理手势。
-        wave: ["wave", "agree"],
-        talk: ["agree", "headShake", "yes", "no", "thumbsup"],
-        point: ["thumbsup", "punch"],
+        // Xbot 没有 sit / wave / point / talk 的专用片段。
+        //
+        // **不拿别的片段顶替**：曾经 wave→agree、talk→agree，于是"挥手"和"说话"演成
+        // 同一段点头 —— 作者看到的正是"选哪个都一个样"。缺片段时退回**关节角**
+        // （见 `actionPose.ts` 的 `clipJointAngles` + `HumanoidModel` 的兜底分支），
+        // 这样每个动作各不相同，且与方块简模的姿势一致。
       },
     },
   },

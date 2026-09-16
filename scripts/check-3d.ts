@@ -93,15 +93,22 @@ import {
 } from "../src/engine/stance";
 import {
   ActionClip,
+  ActionKind,
   CameraMove,
   CameraObject,
   DirectorObject,
   DirectorState,
   Locomotion,
   MoveSegment,
+  Pose,
   VerticalArc,
 } from "../src/domain/schema";
 import { contentEndCause, rawContentEnd } from "../src/engine/timeline";
+import { BLOCKED_OPTIONS } from "../src/engine/reach";
+import { nameVisible, sceneTakesOverNames } from "../src/engine/nameVisibility";
+import { AUTHOR_POSE_NAMES, POSE_PRESETS, POSE_PRESET_NAMES, STANCE_POSE_NAMES } from "../src/engine/poses";
+import { actionPoseAt, clipJointAngles } from "../src/engine/actionPose";
+import { MODEL_CONFIG } from "../src/engine/modelConfig";
 
 let pass = 0;
 let fail = 0;
@@ -1312,12 +1319,19 @@ console.log("\n[22] 校验三条 + 落地 / 轨迹 / 助跑 + planar 退化");
   check("§26 全局体检：两条段各一处", scan.length, 2);
   check("§26 全局体检：按开始时间排序", scan.map((f) => f.segmentId), ["early", "late"]);
   // 往下掉 3m 报的是"太高会摔"（dropLimit = H + 1.0 = 1.9），不是"超过攀爬能力"。
-  check("§26 不可达文案：说人话带数字", scan[0].message, "下落 3.00 米太高，最多 1.90 米");
+  // 3 档（过不去）除了数字，还必须给出**三条出路** —— 这是影视工具不是仿真器：
+  // 文案常量与引擎共用一份，见 docs/3d/00「速度与镜头：世界是舞台，不是地图」。
+  check("§26 不可达文案：说人话带数字", scan[0].message, `下落 3.00 米太高，最多 1.90 米${BLOCKED_OPTIONS}`);
+  check(
+    "§26 不可达文案：给出三条出路（改路由 / 换主体 / 特效段）",
+    ["改路由", "换主体", "特效段"].every((word) => scan[0].message.includes(word)),
+    true,
+  );
   check("§26 落差文案：", reachMessage(6, -1.5, 0.6, 0, loco), "下落 1.50m");
   check(
     "§26 往上不可达文案：点名攀爬能力",
     reachMessage(3, 2.5, 0.3, 0, loco),
-    "这里落差 2.50 米，超过攀爬能力 1.60 米",
+    `这里落差 2.50 米，超过攀爬能力 1.60 米${BLOCKED_OPTIONS}`,
   );
 
   // ⑩ 编队归并：徽标只画在锚点的段上，否则一队 5 人冒出 5 个徽标。
@@ -1388,7 +1402,7 @@ console.log("\n[22] 校验三条 + 落地 / 轨迹 / 助跑 + planar 退化");
   // ③ 不可达优先于其它一切，且文案与 Inspector / 徽标同源。
   const tallHint = dragReachHint(tallScene, "s1", "start");
   check("§27 拖下 3m 台：报不可达", tallHint?.tier, 3);
-  check("§27 拖下 3m 台：文案说人话带数字", tallHint?.message, "下落 3.00 米太高，最多 1.90 米");
+  check("§27 拖下 3m 台：文案说人话带数字", tallHint?.message, `下落 3.00 米太高，最多 1.90 米${BLOCKED_OPTIONS}`);
 
   // ④ 不带 segmentId = 全场景扫描（拖 set 对象时那块一动，所有 agent 的路都可能被改）。
   const scanHint = dragReachHint(
@@ -3088,6 +3102,132 @@ console.log("\n[34] 内容末尾：报数必须同时报名（「内容到 Xs」
     "[34] 空场景：末尾 0、没有出处（调用点回退到片长）",
     [round6(contentEndCause(scene([], "terrain")).end), contentEndCause(scene([], "terrain")).id],
     [0, ""],
+  );
+}
+
+console.log("\n[35] 姿势：作者可选 vs 阶段（自动）");
+
+// `POSE_PRESETS` 是一张**按数据形状**分组的表（都是关节角），里面住着三类东西：
+// 作者可选（静态/手势）、步态、以及**阶段姿势**（由弧线进度自动挑，不可选）。
+// 下拉框曾经用"排除 walk/run"来过滤 —— 于是 6 个阶段姿势全漏成了"选了也不触发"的死选项。
+// 这三条守卫把"三类不重不漏 + 可选项里绝不含阶段"钉死。
+{
+  const stance = new Set<string>(STANCE_POSE_NAMES);
+  check(
+    "[35] 作者可选的姿势里不含任何阶段姿势",
+    AUTHOR_POSE_NAMES.filter((name) => stance.has(name)),
+    [],
+  );
+  check(
+    "[35] 阶段姿势确实都在预设表里（自动叠加要用）",
+    STANCE_POSE_NAMES.every((name) => name in POSE_PRESETS),
+    true,
+  );
+  check(
+    "[35] 三类不重不漏（新增预设必须归类）",
+    [...AUTHOR_POSE_NAMES, ...STANCE_POSE_NAMES, "walk", "run"].sort(),
+    [...POSE_PRESET_NAMES].sort(),
+  );
+}
+
+// 关节空间的「这个片段是什么姿势」只该有**一个**出处：方块简模与 GLB 骨骼共用
+// `clipJointAngles`。曾经 GLB 只认动画片段名 —— `sit` / `point` / **自定义动作** 选了
+// 完全没反应（`POSE_PRESETS` 与 `customActions` 它根本没读），而方块简模照做。
+{
+  const clip = (kind: ActionKind, extra?: Partial<ActionClip>): ActionClip => ({
+    id: `A_${kind}`,
+    object: "H1",
+    timeStart: 0,
+    timeEnd: 2,
+    kind,
+    ...extra,
+  });
+  const bare: DirectorState = { ...createBlankState(), actions: [], customActions: [] };
+
+  // ① 每个**作者可选**的姿势都要能算出角度（`stand` = 标准站姿，本来就是全 0，故排除）。
+  check(
+    "[35] 每个可选姿势都能算出关节角（GLB 缺动画时的兜底）",
+    AUTHOR_POSE_NAMES.filter(
+      (kind) => kind !== "stand" && Object.keys(clipJointAngles(bare, clip(kind), 1)).length === 0,
+    ),
+    [],
+  );
+
+  // ② 自定义动作取的是「动作库」里那条记录 —— 漏了它，GLB 上的自定义动作永远是空姿势。
+  const withLib: DirectorState = {
+    ...bare,
+    customActions: [{ id: "POSE_01", name: "敬礼", joints: { shoulderR: [-1, 0, 0] } }],
+  };
+  check(
+    "[35] 自定义动作的角度取自动作库（不是空姿势）",
+    Object.keys(clipJointAngles(withLib, clip("custom", { customId: "POSE_01" }), 1)),
+    ["shoulderR"],
+  );
+
+  // ③ 合成 = 逐片段相加：`actionPoseAt` 只是把 `clipJointAngles` 累加，两边不会各自长歪。
+  const stacked: DirectorState = { ...bare, actions: [clip("wave"), clip("crouch")] };
+  const sum: Record<string, [number, number, number]> = {};
+  for (const c of stacked.actions) {
+    for (const [key, v] of Object.entries(clipJointAngles(stacked, c, 1))) {
+      const cur = sum[key] ?? [0, 0, 0];
+      sum[key] = [cur[0] + (v?.[0] ?? 0), cur[1] + (v?.[1] ?? 0), cur[2] + (v?.[2] ?? 0)];
+    }
+  }
+  check(
+    "[35] actionPoseAt = 逐片段 clipJointAngles 相加（唯一出处）",
+    actionPoseAt(stacked, "H1", 1).pose.joints,
+    sum,
+  );
+
+  // ④ 手势 kind 不得拿**代理片段**顶替：wave / talk 都映射到 agree 时，两者演成同一段点头。
+  check(
+    "[35] 手势不拿代理片段顶替（否则不同动作演成同一段）",
+    (["wave", "point", "talk"] as const).filter(
+      (kind) => (MODEL_CONFIG.human?.clips.poses as Record<string, unknown>)[kind],
+    ),
+    [],
+  );
+}
+
+console.log("\n[36] 名字显示：场景三态 vs 个体（**场景更高一级**）");
+
+// 导演定的规则：场景有更大的控制 —— 开会压过个体、关也压过个体，只有「默认」才把
+// 控制权交给个体。这张真值表就是 engine/nameVisibility.ts 的全部语义，逐行钉死。
+{
+  check(
+    "[36] 场景=开 → 压过个体（哪怕个体写 false）",
+    [nameVisible("on", undefined), nameVisible("on", { showName: false })],
+    [true, true],
+  );
+  check(
+    "[36] 场景=关 → 压过个体（哪怕个体写 true）",
+    [nameVisible("off", undefined), nameVisible("off", { showName: true })],
+    [false, false],
+  );
+  check(
+    "[36] 场景=默认 → 个体说话；个体不写 = 显示",
+    [
+      nameVisible("default", { showName: false }),
+      nameVisible("default", { showName: true }),
+      nameVisible("default", undefined),
+      nameVisible(undefined, {}),
+    ],
+    [false, true, true, true],
+  );
+  check(
+    "[36] 旧数据：布尔 true/false 按 开/关 解释",
+    [nameVisible(true, { showName: true }), nameVisible(false, { showName: true })],
+    [true, false],
+  );
+  check(
+    "[36] 「场景是否接管」判据（个体开关据此置灰）",
+    [
+      sceneTakesOverNames("on"),
+      sceneTakesOverNames("off"),
+      sceneTakesOverNames("default"),
+      sceneTakesOverNames(undefined),
+    ],
+    [true, true, false, false],
   );
 }
 

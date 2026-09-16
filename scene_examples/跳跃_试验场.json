@@ -1,0 +1,292 @@
+{
+  "manifest": {
+    "name": "跳跃试验场",
+    "order": [{ "id": "SCN_JUMP", "name": "跳跃试验场 · 五条跑道（三种弧线 + 两种「故意越界」）" }],
+    "activeSceneId": "SCN_JUMP"
+  },
+  "scenes": {
+    "SCN_JUMP": {
+      "revision": 2,
+      "duration": 8,
+      "aspectRatio": "16:9",
+      "worldMode": "terrain",
+      "objects": [
+        {
+          "id": "HEDGE_A",
+          "name": "① 矮障 h=0.5m（跨过去，不是迈过去：0.5 > maxStep 0.35）。语义放行 = 别绕行，我从它上面过",
+          "type": "prop",
+          "category": "structure",
+          "role": "set",
+          "x": 0,
+          "z": 8,
+          "rotation": 0,
+          "footprint": { "w": 1, "d": 3, "h": 0.5 },
+          "walkable": false,
+          "blocking": false,
+          "color": "#4f9d69"
+        },
+        {
+          "id": "LEDGE",
+          "name": "② 高台 h=1.2m（台面边界 x=-0.1：落下必须从边缘起算）",
+          "type": "prop",
+          "category": "structure",
+          "role": "set",
+          "x": -3.05,
+          "z": 4,
+          "rotation": 0,
+          "footprint": { "w": 5.9, "d": 3, "h": 1.2 },
+          "color": "#8b9bb0"
+        },
+        {
+          "id": "WALL_C",
+          "name": "③ 平台 h=1.2m · 正面 x=0.4（= 段长 2m 的 0.7 处：climb 的竖直段正好贴在面上）",
+          "type": "prop",
+          "category": "structure",
+          "role": "set",
+          "x": 3.4,
+          "z": 0,
+          "rotation": 0,
+          "footprint": { "w": 6, "d": 3, "h": 1.2 },
+          "color": "#9fb4cc"
+        },
+        {
+          "id": "TOWER_D",
+          "name": "④【故意失败】高墙 h=2.2m > 攀爬上限 1.6m —— 用来看系统怎么报「不可达」",
+          "type": "prop",
+          "category": "structure",
+          "role": "set",
+          "x": 2.2,
+          "z": -4,
+          "rotation": 0,
+          "footprint": { "w": 4, "d": 3, "h": 2.2 },
+          "color": "#b0a08b"
+        },
+        {
+          "id": "HEDGE_E",
+          "name": "⑤ 与 ① 同一个缺口（2.2m）—— 但起跳是站定的，看它怎么报「跨度太远」。同样语义放行",
+          "type": "prop",
+          "category": "structure",
+          "role": "set",
+          "x": 0,
+          "z": -8,
+          "rotation": 0,
+          "footprint": { "w": 1, "d": 3, "h": 0.5 },
+          "walkable": false,
+          "blocking": false,
+          "color": "#4f9d69"
+        },
+        {
+          "id": "J1",
+          "name": "① 全速跳（与 ⑤ 同一缺口，对照）：起跳斜率拉满 ⇒ 助跑比 1 ⇒ 跳远 2.5m ≥ 2.2m",
+          "type": "actor",
+          "category": "human",
+          "role": "agent",
+          "x": -1.1,
+          "z": 8,
+          "rotation": 90,
+          "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 },
+          "color": "#67a7ff"
+        },
+        {
+          "id": "J2",
+          "name": "② 从 1.2m 台走下边缘，落地后继续往前走（fall：加速下坠）",
+          "type": "actor",
+          "category": "human",
+          "role": "agent",
+          "x": -1,
+          "z": 4,
+          "rotation": 90,
+          "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 },
+          "baseY": 1.2,
+          "color": "#f0a35a"
+        },
+        {
+          "id": "J3",
+          "name": "③ 攀上 1.2m 平台（climb：L 形贴墙，落点面 = 台面）",
+          "type": "actor",
+          "category": "human",
+          "role": "agent",
+          "x": -1,
+          "z": 0,
+          "rotation": 90,
+          "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 },
+          "baseY": 1.2,
+          "color": "#63d39b"
+        },
+        {
+          "id": "J4",
+          "name": "④【故意失败】走向 2.2m 高墙（超出攀爬上限，系统只报告不硬拦）",
+          "type": "actor",
+          "category": "human",
+          "role": "agent",
+          "x": -1,
+          "z": -4,
+          "rotation": 90,
+          "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 },
+          "color": "#d38b8b"
+        },
+        {
+          "id": "J5",
+          "name": "⑤【故意失败】站定起跳：段上用 UI 默认缓动 ease-in-out（起跳瞬间速度为 0）⇒ 有效跳远只剩 1.25m",
+          "type": "actor",
+          "category": "human",
+          "role": "agent",
+          "x": -1.1,
+          "z": -8,
+          "rotation": 90,
+          "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 },
+          "color": "#c792ea"
+        }
+      ],
+      "segments": [
+        {
+          "id": "SEG_J1",
+          "type": "MOVE",
+          "object": "J1",
+          "startX": -1.1,
+          "startZ": 8,
+          "endX": 1.1,
+          "endZ": 8,
+          "points": [],
+          "timeStart": 0.5,
+          "timeEnd": 2.5,
+          "ease": [0.15, 0.15, 0.85, 0.85],
+          "speedKeys": [
+            { "id": "K1_A", "t": 0, "v": 0, "ease": [0, 0, 1, 1] },
+            { "id": "K1_B", "t": 0.06, "v": 0.35, "ease": [0, 0, 1, 1] },
+            { "id": "K1_C", "t": 0.7, "v": 0.9, "ease": [0, 0, 1, 1] },
+            { "id": "K1_D", "t": 1, "v": 1, "ease": [0, 0, 1, 1] }
+          ],
+          "arc": { "mode": "parabola", "apex": 0.85 }
+        },
+        {
+          "id": "SEG_J2",
+          "type": "MOVE",
+          "object": "J2",
+          "startX": -1,
+          "startZ": 4,
+          "endX": 1.5,
+          "endZ": 4,
+          "points": [],
+          "timeStart": 3,
+          "timeEnd": 4.2,
+          "ease": [0.15, 0.15, 0.85, 0.85],
+          "speedKeys": [
+            { "id": "K2_A", "t": 0, "v": 0, "ease": [0, 0, 1, 1] },
+            { "id": "K2_B", "t": 0.2, "v": 0.5, "ease": [0, 0, 1, 1] },
+            { "id": "K2_C", "t": 0.6, "v": 0.95, "ease": [0, 0, 1, 1] },
+            { "id": "K2_D", "t": 1, "v": 1, "ease": [0, 0, 1, 1] }
+          ],
+          "arc": { "mode": "fall", "from": 0.36, "to": 1 }
+        },
+        {
+          "id": "SEG_J2B",
+          "type": "MOVE",
+          "object": "J2",
+          "startX": 1.5,
+          "startZ": 4,
+          "endX": 5.5,
+          "endZ": 4,
+          "points": [],
+          "timeStart": 4.2,
+          "timeEnd": 8,
+          "ease": [0.15, 0.15, 0.85, 0.85],
+          "speedKeys": [
+            { "id": "K2B_A", "t": 0, "v": 0, "ease": [0, 0, 1, 1] },
+            { "id": "K2B_B", "t": 0.5, "v": 0.95, "ease": [0, 0, 1, 1] },
+            { "id": "K2B_C", "t": 1, "v": 1, "ease": [0, 0, 1, 1] }
+          ]
+        },
+        {
+          "id": "SEG_J3",
+          "type": "MOVE",
+          "object": "J3",
+          "startX": -1,
+          "startZ": 0,
+          "endX": 1,
+          "endZ": 0,
+          "points": [],
+          "timeStart": 4.5,
+          "timeEnd": 8,
+          "ease": [0.15, 0.15, 0.85, 0.85],
+          "speedKeys": [
+            { "id": "K3_A", "t": 0, "v": 0, "ease": [0, 0, 1, 1] },
+            { "id": "K3_B", "t": 0.35, "v": 1, "ease": [0, 0, 1, 1] },
+            { "id": "K3_C", "t": 1, "v": 1, "ease": [0, 0, 1, 1] }
+          ],
+          "arc": { "mode": "climb" }
+        },
+        {
+          "id": "SEG_J4",
+          "type": "MOVE",
+          "object": "J4",
+          "startX": -1,
+          "startZ": -4,
+          "endX": 0.5,
+          "endZ": -4,
+          "points": [],
+          "timeStart": 5.8,
+          "timeEnd": 8,
+          "ease": [0.15, 0.15, 0.85, 0.85],
+          "speedKeys": [
+            { "id": "K4_A", "t": 0, "v": 0, "ease": [0, 0, 1, 1] },
+            { "id": "K4_B", "t": 0.4, "v": 0.9, "ease": [0, 0, 1, 1] },
+            { "id": "K4_C", "t": 1, "v": 1, "ease": [0, 0, 1, 1] }
+          ]
+        },
+        {
+          "id": "SEG_J5",
+          "type": "MOVE",
+          "object": "J5",
+          "startX": -1.1,
+          "startZ": -8,
+          "endX": 1.1,
+          "endZ": -8,
+          "points": [],
+          "timeStart": 0.5,
+          "timeEnd": 2.5,
+          "ease": [0.42, 0, 0.58, 1],
+          "arc": { "mode": "parabola", "apex": 0.85 }
+        }
+      ],
+      "handoffs": [],
+      "constraints": [],
+      "cameras": [
+        {
+          "id": "CAM_SIDE",
+          "name": "侧视 · 三条弧线的剖面（跳 / 落 / 攀 的区别一眼看完）",
+          "color": "#7bd88f",
+          "targetId": "J1",
+          "framing": "wide",
+          "view": "eye_level",
+          "side": "side",
+          "lensMm": 35,
+          "motion": "FOLLOW"
+        },
+        {
+          "id": "CAM_WIDE",
+          "name": "高位 · 五条跑道一览（哪一格报红就看这里）",
+          "color": "#8ad1ff",
+          "targetId": "J1",
+          "framing": "wide",
+          "view": "high",
+          "side": "front_3_4",
+          "lensMm": 24,
+          "motion": "FOLLOW"
+        }
+      ],
+      "cameraMoves": [],
+      "cameraJunctions": [],
+      "actions": [
+        { "id": "ACT_J1", "object": "J1", "timeStart": 0.5, "timeEnd": 2.5, "kind": "run", "intensity": 1 },
+        { "id": "ACT_J2", "object": "J2", "timeStart": 3, "timeEnd": 4.2, "kind": "walk", "intensity": 1 },
+        { "id": "ACT_J2B", "object": "J2", "timeStart": 4.2, "timeEnd": 8, "kind": "walk", "intensity": 1 },
+        { "id": "ACT_J3", "object": "J3", "timeStart": 4.5, "timeEnd": 8, "kind": "walk", "intensity": 1 },
+        { "id": "ACT_J4", "object": "J4", "timeStart": 5.8, "timeEnd": 8, "kind": "walk", "intensity": 1 },
+        { "id": "ACT_J5", "object": "J5", "timeStart": 0.5, "timeEnd": 2.5, "kind": "walk", "intensity": 1 }
+      ],
+      "groups": [],
+      "customActions": []
+    }
+  }
+}

@@ -4,8 +4,9 @@ import { setCaptureCanvas } from "../engine/videoExport";
 import { Html, Line, OrbitControls, PerspectiveCamera } from "@react-three/drei";
 import * as THREE from "three";
 import { MarkerHover, useDirectorStore } from "../state/directorStore";
-import { AssetCategory, DirectorObject, DirectorState, Handoff, HandoffMode, JointName, MoveSegment, PathPoint, Pose, Vec2 } from "../domain/schema";
+import { AssetCategory, DirectorObject, DirectorState, Handoff, HandoffMode, JointName, MoveSegment, NameVisibility, PathPoint, Pose, Vec2 } from "../domain/schema";
 import { buildArcLut, pathChain, pointAtArcLength, samplePath } from "../engine/path";
+import { nameVisible, sceneTakesOverNames } from "../engine/nameVisibility";
 import {
   hitCameraRay,
   hitCameraPathPointScreen,
@@ -75,6 +76,7 @@ import {
   SIDE_LABELS,
   VIEW_LABELS,
 } from "../domain/schema";
+import { ArrayPanel } from "./ArrayPanel";
 import { RadialRing, PointRadialRing, CameraPointRadialRing } from "./RadialRing";
 import { LockBadge } from "./LockBadge";
 import { hasObjectActions } from "../engine/objectActions";
@@ -566,6 +568,136 @@ function roundRectPath(
  * ② 关 mipmap + Linear 过滤，近处保持锐利；③ anisotropy 让斜看也不糊；
  * ④ 半透明深色圆角背板 + 黑描边白字，亮 / 杂背景上都读得清。
  */
+/**
+ * 对象名字（头顶名牌 / 标签）的**唯一出口**，两个开关在这里合成：
+ *   - 场景级：`DirectorState.showNames`（缺省开）
+ *   - 个体级：`DirectorObject.showName`（三态覆盖，缺省跟随场景）
+ *
+ * 必须是组件而不是渲染点里的一行表达式 —— 它要读 store，写在条件分支里会变成"条件调用 hook"。
+ * 动机：示例场景的名字很长（是讲解手段），对象一多就盖住画面：编辑时看不清全貌、播放时干扰。
+ */
+/**
+ * 场景级名字开关：**三选一**（不是二态切换），所以用下拉框而不是循环按钮。
+ *   开（全部显示）/ 关（全部隐藏）/ 默认（把控制权交回每个对象的个体开关）。
+ * 个体级覆盖在它后面的眼睛图标里（ObjectNameToggle）。
+ */
+function NameModeSelect() {
+  const scene = useDirectorStore((s) => s.state.showNames ?? "default");
+  const setShowNames = useDirectorStore((s) => s.setShowNames);
+  return (
+    <select
+      className="vf-camera"
+      value={scene}
+      onChange={(event) => setShowNames(event.target.value as NameVisibility)}
+      title={
+        "对象名字（场景级）：开 = 全部显示；关 = 全部隐藏；默认 = 交给每个对象自己的开关。\n" +
+        "选「开 / 关」时场景会压过每个对象的眼睛图标开关；选「默认」才由个体决定。"
+      }
+    >
+      <option value="on">名字 · 开</option>
+      <option value="off">名字 · 关</option>
+      <option value="default">名字 · 默认</option>
+    </select>
+  );
+}
+
+/** 眼睛图标：睁眼 = 显示名字，斜杠眼 = 隐藏名字。 */
+function EyeGlyph({ hidden }: { hidden: boolean }) {
+  return (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z" />
+      <circle cx="12" cy="12" r="3" />
+      {hidden ? <line x1="2" y1="2" x2="22" y2="22" /> : null}
+    </svg>
+  );
+}
+
+/**
+ * 个体级名字开关，**紧跟在场景级「名字」按钮后面**（同一个画布工具条）。
+ * 点一下切换当前选中项（资产对象 / 相机）的 `showName`：睁眼 = 显示，斜杠眼 = 隐藏；用图标而非文字。
+ * 场景处于「开 / 关」接管态时置灰（此时个体被压过，见 engine/nameVisibility）。
+ * 仅当选中一个对象或相机时可用；选中组 / 段等时无意义，禁用。
+ */
+function ObjectNameToggle() {
+  const kind = useDirectorStore((s) => s.selectedKind);
+  const selId = useDirectorStore((s) => s.selectedId);
+  const target = useDirectorStore((s) => {
+    if (!s.selectedId) return undefined;
+    if (s.selectedKind === "object") return s.state.objects.find((o) => o.id === s.selectedId);
+    if (s.selectedKind === "camera") return s.state.cameras.find((c) => c.id === s.selectedId);
+    return undefined;
+  });
+  const scene = useDirectorStore((s) => s.state.showNames ?? "default");
+  const toggleShowName = useDirectorStore((s) => s.toggleShowName);
+  const toggleCameraShowName = useDirectorStore((s) => s.toggleCameraShowName);
+
+  const takesOver = sceneTakesOverNames(scene);
+  const disabled = !target || takesOver;
+  const hidden = !(target?.showName ?? true); // 个体缺省 = 显示
+
+  const noun = kind === "camera" ? "相机" : "对象";
+  const title = !target
+    ? "选中一个对象或相机后，可单独开关它的名字"
+    : takesOver
+      ? "场景已接管名字（场景为 开 / 关），个体开关暂不可用；把场景的「名字」按钮点回「默认」即可单独控制"
+      : hidden
+        ? `当前${noun}：名字已隐藏。点击显示这个名字`
+        : `当前${noun}：名字已显示。点击隐藏这个名字`;
+
+  const active = !hidden && !takesOver;
+  const onToggle = () => {
+    if (!selId) return;
+    if (kind === "camera") toggleCameraShowName(selId);
+    else toggleShowName(selId);
+  };
+  return (
+    <button
+      type="button"
+      className={`vf-tool vf-eye ${active ? "on" : ""}${hidden && !takesOver ? " is-off" : ""}`}
+      onClick={onToggle}
+      disabled={disabled}
+      title={title}
+      aria-pressed={!hidden}
+    >
+      <EyeGlyph hidden={hidden} />
+    </button>
+  );
+}
+
+function ObjectName({
+  object,
+  height,
+  selected,
+}: {
+  object: DirectorObject;
+  height: number;
+  selected: boolean;
+}) {
+  const scene = useDirectorStore((s) => s.state.showNames);
+  if (!nameVisible(scene, object)) return null;
+  // 人物：画进场景（导演视图与成片里都可见）；其它资产沿用 DOM 标签（仅导演视图）。
+  if (object.category === "human") {
+    return <NameTag text={objectDisplayName(object)} height={height} />;
+  }
+  return (
+    <Html position={[0, height + 0.4, 0]} center style={{ pointerEvents: "none" }} zIndexRange={[20, 0]}>
+      <span className="obj-label" style={{ color: selected ? "#ffffff" : "#cdd8e2" }}>
+        {objectDisplayName(object)}
+      </span>
+    </Html>
+  );
+}
+
 function NameTag({ text, height }: { text: string; height: number }) {
   const texture = useMemo(() => {
     const w = 512;
@@ -855,20 +987,10 @@ function ActorView({ objectId }: { objectId: string }) {
         </mesh>
       ) : null}
 
-      {/* 人物：名牌画进场景，导演视图与成片里都可见；其它资产沿用 DOM 标签（仅导演视图） */}
-      {object.category === "human" ? (
-        <NameTag text={objectDisplayName(object)} height={h} />
-      ) : showHelpers ? (
-        <Html
-          position={[0, h + 0.4, 0]}
-          center
-          style={{ pointerEvents: "none" }}
-          zIndexRange={[20, 0]}
-        >
-          <span className="obj-label" style={{ color: isSelected ? "#ffffff" : "#cdd8e2" }}>
-            {objectDisplayName(object)}
-          </span>
-        </Html>
+      {/* 名字：人物画进场景（导演视图 + 成片都可见），其它资产用 DOM 标签（仅导演视图）。
+          两条路都走 `ObjectName` —— 场景级 / 个体级两个开关在那儿合成。 */}
+      {object.category === "human" || showHelpers ? (
+        <ObjectName object={object} height={h} selected={isSelected} />
       ) : null}
 
       {object.locked && showHelpers ? (
@@ -950,10 +1072,10 @@ function HumanoidRig({
     const actionSample = actionPoseAt(state, objectId, currentTime);
     const aJ = actionSample.pose.joints;
     const j = pose?.joints ?? {};
-    const combinedX = (n: JointName) => (j[n]?.[0] ?? 0) * sw + (aJ[n]?.[0] ?? 0);
-    const loco = actionSample.locomotionScale;
     // 静态基线只对站定的角色生效：起步后随速度衰减到 0，让位给步态（见 staticPoseWeight）。
     const sw = staticPoseWeight(speed);
+    const combinedX = (n: JointName) => (j[n]?.[0] ?? 0) * sw + (aJ[n]?.[0] ?? 0);
+    const loco = actionSample.locomotionScale;
 
     // 步态：显式 walk/run 片段优先；否则按 MOVE 的速度自动判定（低速走、高速跑）。
     // 注意 MOVE 决定"去哪里"，步态只决定身体怎么动，二者互不覆盖。
@@ -1972,6 +2094,7 @@ function CameraProxy({ cameraId }: { cameraId: string }) {
   );
   const isActive = useDirectorStore((s) => s.activeCameraId === cameraId);
   const selectCamera = useDirectorStore((s) => s.selectCamera);
+  const showName = useDirectorStore((s) => nameVisible(s.state.showNames ?? "default", camera));
   const groupRef = useRef<THREE.Group>(null);
 
   useFrame(() => {
@@ -2025,12 +2148,15 @@ function CameraProxy({ cameraId }: { cameraId: string }) {
         </>
       )}
       <CameraFrustum cameraId={cameraId} />
-      <Html position={[0, 0.62, 0]} center style={{ pointerEvents: "none" }} zIndexRange={[22, 0]}>
-        <span className="obj-label" style={{ color: camera.color }}>
-          {camera.name}
-          {isActive ? " ●" : ""}
-        </span>
-      </Html>
+      {/* 名字标签走场景级 + 个体级两级开关（与资产对象同语义，见 engine/nameVisibility）。 */}
+      {showName ? (
+        <Html position={[0, 0.62, 0]} center style={{ pointerEvents: "none" }} zIndexRange={[22, 0]}>
+          <span className="obj-label" style={{ color: camera.color }}>
+            {camera.name}
+            {isActive ? " ●" : ""}
+          </span>
+        </Html>
+      ) : null}
     </group>
   );
 }
@@ -3458,6 +3584,25 @@ export function WorldView() {
   const addCameraFromTemplate = useDirectorStore((s) => s.addCameraFromTemplate);
   const addGroupAt = useDirectorStore((s) => s.addGroupAt);
   const [tplOpen, setTplOpen] = useState(false);
+  // 阵列参数面板的开合。与模板下拉同处一排，故互斥 —— 不会同时铺开两行。
+  const [arrOpen, setArrOpen] = useState(false);
+  // 阵列 / 批量复制是**通用操作**，挂在画布顶部的操作条上，不再占用右侧属性面板
+  // （属性面板只回答"这个对象**是**什么"）。目标 = 当前选中的对象。
+  // 团队（dynamics 组）不参与：整队的编辑单位是组本身，单独复制某个队员会立刻脱离编队。
+  const arrayTarget = useDirectorStore((s) => {
+    if (s.selectedKind !== "object" || !s.selectedId) return undefined;
+    const object = s.state.objects.find((o) => o.id === s.selectedId);
+    if (!object) return undefined;
+    const inTeam = (s.state.groups ?? []).some(
+      (g) => g.dynamics && g.members.length >= 2 && g.members.includes(object.id),
+    );
+    return inTeam ? undefined : object;
+  });
+  // 选中项一变就收起参数面板：里面的参数属于上一个对象，留着会让人以为改的是新对象
+  // （阵列生成后选中会自动落到最后一个副本上，这一步同时把面板收掉）。
+  useEffect(() => {
+    setArrOpen(false);
+  }, [arrayTarget?.id]);
   // 拖入「团队」时先弹面板配置人数 / 类型 / 编队，确认后一次性生成整队。
   const [groupDraft, setGroupDraft] = useState<{
     at: { x: number; z: number };
@@ -3550,10 +3695,31 @@ export function WorldView() {
             type="button"
             className="add-icon tpl-btn"
             title="从机位模板库新建机位"
-            onClick={() => setTplOpen((open) => !open)}
+            onClick={() => {
+              setArrOpen(false);
+              setTplOpen((open) => !open);
+            }}
           >
             🎬 模板
           </button>
+          {/* 阵列 / 批量复制：通用操作，常驻在操作条末尾；点开在下方整行弹层里设参数。 */}
+          <button
+            type="button"
+            className={`add-icon arr-btn${arrOpen ? " on" : ""}`}
+            disabled={!arrayTarget}
+            title={
+              arrayTarget
+                ? `把「${objectDisplayName(arrayTarget)}」批量复制成一排 / 一片 / 一圈`
+                : "先选中一个对象，再按排布规格批量复制（团队不参与阵列）"
+            }
+            onClick={() => {
+              setTplOpen(false);
+              setArrOpen((v) => !v);
+            }}
+          >
+            ▦ 阵列
+          </button>
+          {arrOpen && arrayTarget ? <ArrayPanel object={arrayTarget} /> : null}
           {tplOpen ? (
             <div className="tpl-picker">
               {templateGroups.map((group) => (
@@ -3774,6 +3940,8 @@ export function WorldView() {
               >
                 3D
               </button>
+              <NameModeSelect />
+              <ObjectNameToggle />
               <div className="vf-sep" />
               <div className="vf-zoom" title="滚轮 / ± 缩放，WASD 或方向键平移视角">
                 <button type="button" title="Zoom out" onClick={() => setZoom(zoom - 0.1)}>

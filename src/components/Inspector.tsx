@@ -29,12 +29,11 @@ import {
   VIEW_LABELS,
   DirectorObject,
 } from "../domain/schema";
-import { ArrayKind, ArraySpec, arrayCount } from "../engine/array";
 import { ANIMAL_MODELS, ANIMAL_SPECIES } from "../engine/animalModels";
 import { EaseEditor } from "./EaseEditor";
 import { JumpEnvelope } from "./JumpEnvelope";
 import { PoseCustomizeModal } from "./PoseCustomizeModal";
-import { clonePose, POSE_PRESETS, POSE_PRESET_NAMES } from "../engine/poses";
+import { AUTHOR_POSE_NAMES, clonePose, POSE_PRESETS } from "../engine/poses";
 import { moveChannelsAt, solveCamera } from "../engine/cameraSolver";
 import { CAMERA_CHANNELS, CameraChannel } from "../engine/ease";
 import { axisSide, cameraAxis } from "../engine/axis";
@@ -83,8 +82,15 @@ const ACTION_KINDS: ActionKind[] = [
 const CUSTOM_PREFIX = "custom:";
 /** 「＋ 自定义…」哨兵值：选中它不是取值，而是打开编辑弹窗。 */
 const NEW_CUSTOM = "__new_custom__";
-// 对象面板只展示静态基线姿势；步态类（walk/run）没有静态关节角度，只在动作片段里选。
-const STATIC_POSE_NAMES = POSE_PRESET_NAMES.filter((name) => name !== "walk" && name !== "run");
+/**
+ * 对象面板只展示**作者可选**的静态基线姿势（白名单 `AUTHOR_POSE_NAMES`）。
+ *
+ * 这里**不能**写成"从 `POSE_PRESET_NAMES` 里排除 walk/run"：那张表里还住着 6 个**阶段姿势**
+ * （jumpTakeoff / jumpAir / jumpLand / climbReach / climbUp / hang），它们由弧线进度自动挑、
+ * 不可选 —— 黑名单会漏掉它们，下拉里于是出现**选了也不触发**的死选项
+ * （选了只会让人摆着抱膝的姿势站着走）。守卫见 scripts/check-3d.ts §35。
+ */
+const STATIC_POSE_NAMES = AUTHOR_POSE_NAMES;
 
 /**
  * 关键帧通道定义（单一来源）：中文标签 + 取值范围/步进 + 分组 + 语义说明。
@@ -326,169 +332,6 @@ function SubGroup({
     </div>
   );
 }
-
-/**
- * 阵列（Phase 8 的"批量编辑"）：选中一个对象，按排布规格批量复制。
- *
- * **为什么 UI 只动几个数字**：排布本身是几何问题（`engine/array.ts` 的纯函数），
- * UI 不该重复那段几何。这里只收集作者的意图参数，落点交给 engine 算、
- * 落地交给 `placeObject` 逐个做。
- *
- * `sub` 预览直接问 `arrayCount()`，不自己乘 —— 预览和实际生成同源，
- * 不会出现"写着 12 个、出来 6 个"。
- */
-function ArrayPanel({ object }: { object: DirectorObject }) {
-  const arrayAsset = useDirectorStore((s) => s.arrayAsset);
-  // 台阶是高度语义，planar 世界里没有 —— 那里直接禁用，而不是"点了没反应"。
-  // 判定与 moveObject / placeObject 是同一条：`placeObject` 在非 terrain 不写 baseY。
-  const isTerrain = useDirectorStore((s) => (s.state.worldMode ?? "planar") === "terrain");
-  const [kind, setKind] = useState<ArrayKind>("line");
-  const [count, setCount] = useState(4);
-  const [spacing, setSpacing] = useState(1.5);
-  const [rows, setRows] = useState(2);
-  const [cols, setCols] = useState(3);
-  const [rise, setRise] = useState(0.15);
-  const [run, setRun] = useState(0.3);
-  const [radius, setRadius] = useState(3);
-  const [alongRotation, setAlongRotation] = useState(false);
-
-  // 只带"当前排布真正在用"的字段：多余的 key 会让默认兜底被覆盖成错值
-  // （例如从 grid 切到 line 时若带着 rows，engine 里 line 不看 rows 才没出问题，
-  //  但反过来 ui 显示与几何不一致就无从排查）。
-  const spec: ArraySpec = (() => {
-    switch (kind) {
-      case "grid":
-        return { kind, rows, cols, spacing, alongRotation };
-      case "stair":
-        return { kind, count, rise, run, alongRotation };
-      case "ring":
-        return { kind, count, radius };
-      case "line":
-      default:
-        return { kind, count, spacing, alongRotation };
-    }
-  })();
-  // count / rows×cols 都是**总数（含源对象自身）** → 实际新增 = total − 1。
-  const total = arrayCount(spec);
-  const added = Math.max(0, total - 1);
-
-  return (
-    <SubGroup
-      title="阵列 · 批量复制"
-      hint={`当前会新增 ${added} 个副本（共 ${total} 个，含它自己）。副本各自落到脚下的支撑面上。`}
-    >
-      <div className="mini-btns">
-        {(ARRAY_KINDS.map((item) => {
-          const disabled = false;
-          return (
-            <button
-              key={item.k}
-              type="button"
-              className={`ghost-button ${kind === item.k ? "on" : ""}`}
-              onClick={() => {
-                if (disabled) return;
-                setKind(item.k);
-              }}
-              disabled={disabled}
-              title={disabled ? "台阶需要 3D 场景：当前是平面模式，先把世界模式切到 terrain" : item.hint}
-            >
-              {item.label}
-            </button>
-          );
-        }))}
-      </div>
-
-      {kind === "line" ? (
-        <>
-          <Row label={`份数 ${count}`}>
-            <input type="range" min={2} max={24} step={1} value={count} onChange={(e) => setCount(Number(e.target.value))} />
-          </Row>
-          <Row label={`间距 ${spacing} m`}>
-            <input type="range" min={0.2} max={6} step={0.1} value={spacing} onChange={(e) => setSpacing(Number(e.target.value))} />
-          </Row>
-        </>
-      ) : null}
-
-      {kind === "grid" ? (
-        <>
-          <Row label={`行数 ${rows}`}>
-            <input type="range" min={1} max={12} step={1} value={rows} onChange={(e) => setRows(Number(e.target.value))} />
-          </Row>
-          <Row label={`列数 ${cols}`}>
-            <input type="range" min={1} max={12} step={1} value={cols} onChange={(e) => setCols(Number(e.target.value))} />
-          </Row>
-          <Row label={`间距 ${spacing} m`}>
-            <input type="range" min={0.2} max={6} step={0.1} value={spacing} onChange={(e) => setSpacing(Number(e.target.value))} />
-          </Row>
-        </>
-      ) : null}
-
-      {kind === "stair" ? (
-        <>
-          <Row label={`级数 ${count}`}>
-            <input type="range" min={2} max={24} step={1} value={count} onChange={(e) => setCount(Number(e.target.value))} />
-          </Row>
-          <Row label={`每级抬高 ${rise} m`}>
-            <input type="range" min={0.05} max={1} step={0.05} value={rise} onChange={(e) => setRise(Number(e.target.value))} />
-          </Row>
-          <Row label={`每级进深 ${run} m`}>
-            <input type="range" min={0.1} max={2} step={0.05} value={run} onChange={(e) => setRun(Number(e.target.value))} />
-          </Row>
-        </>
-      ) : null}
-
-      {kind === "ring" ? (
-        <>
-          <Row label={`份数 ${count}`}>
-            <input type="range" min={2} max={24} step={1} value={count} onChange={(e) => setCount(Number(e.target.value))} />
-          </Row>
-          <Row label={`半径 ${radius} m`}>
-            <input type="range" min={0.5} max={12} step={0.1} value={radius} onChange={(e) => setRadius(Number(e.target.value))} />
-          </Row>
-        </>
-      ) : null}
-
-      {kind !== "ring" ? (
-        <Row label="排布方向">
-          <button
-            type="button"
-            className={`ghost-button ${alongRotation ? "on" : ""}`}
-            onClick={() => setAlongRotation((v) => !v)}
-            title="开启后沿对象自身的 Rotation 方向排布；关闭则固定沿世界 X 轴"
-          >
-            {alongRotation ? "沿对象朝向" : "沿世界 X"}
-          </button>
-        </Row>
-      ) : null}
-
-      <div className="mini-btns">
-        <button
-          type="button"
-          className="ghost-button"
-          disabled={added === 0}
-          onClick={() => arrayAsset(object.id, spec)}
-          title={`新增 ${added} 个副本`}
-        >
-          ＋ 阵列 {added} 份
-        </button>
-      </div>
-    </SubGroup>
-  );
-}
-
-/**
- * 阵列的排布方式。
- *
- * **刻意不提供「台阶」**：那是抽象楼梯（`topShape: "stair"`）出现之前的旧做法 ——
- * 一摞离散盒子必然带来三个毛病（每级一次 y 突变、得逐块标 `blocking: false`、不能拐弯，
- * 见 docs/3d/00 §9.15）。要做台阶请把顶面形状改成「抽象楼梯」，再用手绘 / 螺旋给路径。
- * 引擎侧 `array.ts` 仍保留 `stair` 分支（老场景可能存过这个 kind），但 UI 不再给入口。
- */
-const ARRAY_KINDS: { k: ArrayKind; label: string; hint: string }[] = [
-  { k: "line", label: "直线", hint: "沿一条直线依次排开（立柱、树、椅子）" },
-  { k: "grid", label: "网格", hint: "矩形阵列 行×列（停车场、观众席）" },
-  { k: "ring", label: "环绕", hint: "等角度绕一圈（围坐、环列）" },
-];
 
 export function Inspector() {
   const state = useDirectorStore((s) => s.state);
@@ -950,9 +793,16 @@ export function Inspector() {
               />
             ))}
           </SubGroup>
+
           {/* 顶面形状：平顶 / 斜坡 / **抽象楼梯**（一个整体，路线用**路径**表达）。
               楼梯的物理是连续折线坡面，踏步只用于渲染 —— 所以它既不会"一级一跳"，
-              也不需要作者逐块标 blocking:false（见 engine/stair.ts 开头的说明）。 */}
+              也不需要作者逐块标 blocking:false（见 engine/stair.ts 开头的说明）。
+
+              **只对环境资产（set）开放**：顶面是**盒子几何**的一部分（与 `bottom` 一起
+              构成那个盒子）。human / animal / vehicle 是人物与载具，顶面不是作者要画的
+              几何，渲染也走骨骼 / 模型（见 WorldView 的 `blockBody`），
+              给这个入口只会让"显示的盒子"和"实际的物理"打架。 */}
+          {object.role === "set" ? (
           <SubGroup
             title="顶面形状"
             hint="平顶 = 盒子；斜坡沿 D 向抬升；抽象楼梯 = 一条路径（转角即拐弯，转角处自动铺方形休息平台）。"
@@ -1141,9 +991,7 @@ export function Inspector() {
                 })()
               : null}
           </SubGroup>
-          {/* 阵列（Phase 8）：按排布规格批量复制当前对象。落在 Block 尺寸之后 ——
-              先定单个盒子的尺寸，再决定复制多少份，是自然的编辑顺序。 */}
-          <ArrayPanel object={object} />
+          ) : null}
           {object.category === "human" ? (
             <SubGroup
               title="Pose（静态基线姿势）"

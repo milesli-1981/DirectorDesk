@@ -80,7 +80,10 @@ button:hover {
   display: grid;
   /* 三栏：左 对象列表(窄, 仅上半) / 中 视口(上半) / 右 检视器(整列, 满高)。
      底部整条时间轴横跨左栏下方与中间视口下方；右侧整列都给检视器（承载时间轴片段等更多信息）。
-     两行顶部为场景 tab 26px + 操作栏 38px；第 3 行为三栏主体(1fr)，第 4 行 264px 放时间轴。 */
+     两行顶部为场景 tab 30px + 操作栏 34px；第 3 行为三栏主体(1fr)，第 4 行 264px 放时间轴。
+    顶栏 30px（而非 26px）是为了给横向滚动条留出高度：场景页多 / 名字长时 tab 会横向溢出，
+    26px 装不下「tab + 滚动条」，滚动条会压住 tab 文字（见 .tabs 的滚动条样式）。
+    操作栏 34px：控件 26px ⇒ 上下各 4px 留白，与 tab 行「22px 控件 + 4px 留白」同一套纵向节奏。 */
   /* 首列宽度由 --left-w 驱动：抓手拖动 / 收起展开都只改这一个变量。
      同时用 min() 兜底：左栏最多只到「窗口 - 右栏 - 视口最小宽」，否则三栏总和超过窗口、
      网格整体右溢，视口右下角的悬浮工具条会被顶出画布、被主区裁掉（它必须原地不动）。 */
@@ -89,7 +92,7 @@ button:hover {
       max(var(--rail-w), calc(100% - var(--right-w) - var(--center-min-w)))
     )
     minmax(var(--center-min-w), 1fr) var(--right-w);
-  grid-template-rows: 26px 38px minmax(200px, 1fr) 264px;
+  grid-template-rows: 30px 34px minmax(200px, 1fr) 264px;
   /* 收起 / 展开走带回弹的缓动（末端轻微过冲）；拖动时由 .is-resizing 关掉动画以便跟手 */
   transition: grid-template-columns 0.44s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
@@ -136,7 +139,7 @@ header {
   white-space: nowrap;
 }
 
-/* —— 片场 / 场景页 tab 栏（压薄到 26px）—— */
+/* —— 片场 / 场景页 tab 栏（压薄到 30px，含薄滚动条空间）—— */
 .scene-tabs {
   grid-column: 1 / -1;
   grid-row: 1;
@@ -156,16 +159,39 @@ header {
   padding: 2px 6px;
   font-size: 10px;
   width: 120px;
+  flex: 0 0 auto;
 }
 .stage-name:focus {
   border-color: #67a7ff;
 }
 
 .tabs {
+  /* 占满 stage-name 之后的剩余宽度，内部横向滚动 —— 而不是把整行撑宽顶出网格。 */
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 4px;
   overflow-x: auto;
+  overflow-y: hidden;
+  /* 场景页变多 / 名字变长时横向滚动。滚动条压薄成 6px 半透明条，
+     否则原生滚动条会在 30px 行里吃掉一块、把 tab 文字盖住。 */
+  scrollbar-width: thin;
+  scrollbar-color: #3a4652 transparent;
+  padding-bottom: 2px;
+}
+.tabs::-webkit-scrollbar {
+  height: 6px;
+}
+.tabs::-webkit-scrollbar-track {
+  background: transparent;
+}
+.tabs::-webkit-scrollbar-thumb {
+  background: #3a4652;
+  border-radius: 3px;
+}
+.tabs::-webkit-scrollbar-thumb:hover {
+  background: #4d5b69;
 }
 
 .tab {
@@ -189,6 +215,11 @@ header {
 }
 .tab-label {
   padding: 0 2px;
+  /* 长场景名不再把单个 tab 撑到吃掉整条栏：超过就省略号，完整名在 title 里。 */
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .tab-rename {
   width: 84px;
@@ -1900,6 +1931,80 @@ pre {
   flex-basis: 100%;
 }
 
+/* 阵列（通用操作）：与「模板」同排常驻；常态虚线描边，展开时实心点亮。
+   它不是可拖拽资产，所以光标是 pointer 而不是继承 .add-icon 的 grab。 */
+.add-icon.arr-btn {
+  border-style: dashed;
+  border-color: rgba(10, 132, 255, 0.5);
+  color: #6cb2ff;
+  cursor: pointer;
+}
+.add-icon.arr-btn:hover:not(:disabled) {
+  background: rgba(10, 132, 255, 0.14);
+  border-color: var(--ap-blue);
+  color: #fff;
+}
+.add-icon.arr-btn.on {
+  background: var(--ap-blue);
+  border-color: transparent;
+  border-style: solid;
+  color: #fff;
+}
+.add-icon.arr-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+/* 置灰时别再被 .add-icon:hover 点亮：禁用就该是禁用的样子。 */
+.add-icon.arr-btn:disabled:hover {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.16);
+  color: var(--ap-text-3);
+}
+
+/* 阵列参数弹层：整行铺开（与 .tpl-picker 同一手法），控件横向排布 ——
+   弹层挂在画布顶部的操作条里，纵向堆叠会把整条栏撑得很高。 */
+.arr-panel {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  margin-top: 4px;
+  padding: 9px 11px;
+  border: 1px solid var(--ap-sep);
+  border-radius: var(--ap-r-md);
+  background: var(--ap-surface);
+}
+.arr-title {
+  font: 600 10px/1 var(--ap-font);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ap-text-2);
+}
+.arr-kinds {
+  display: inline-flex;
+  gap: 5px;
+}
+.arr-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font: 11px/1 var(--ap-font);
+  color: var(--ap-text-2);
+  white-space: nowrap;
+}
+.arr-field input[type="range"] {
+  width: 92px;
+}
+/* 「＋ 阵列 N 份」推到最后：参数在左、执行在右，扫一眼就知道主操作在哪。 */
+.arr-go {
+  margin-left: auto;
+}
+.arr-note {
+  flex-basis: 100%;
+  margin: 0;
+}
+
 /* 从模板新建机位：分类选择器 */
 .tpl-open {
   width: 100%;
@@ -2750,7 +2855,9 @@ pre {
   font-family: var(--ap-mono);
 }
 
-/* ---- 顶栏（毛玻璃） ---- */
+/* ---- 顶栏（毛玻璃 + 与场景 tab 成套的控件规格）----
+   与第一行 tab 行共用同一套：11.5px 正文 / 圆角小控件 / 4px 纵向节奏。
+   行高 34px，控件 26px（上下各 4px）；brand 12px/600，版本号做成小胶囊。 */
 header {
   background: rgba(28, 28, 30, 0.82);
   backdrop-filter: blur(20px) saturate(180%);
@@ -2758,47 +2865,186 @@ header {
   border-bottom: 1px solid var(--ap-sep);
 }
 .brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   color: var(--ap-text);
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font: 600 12px/1 var(--ap-font);
+  letter-spacing: 0.08em;
 }
 .brand span {
   color: var(--ap-text-3);
-  font-weight: 500;
+  font: 600 10px/1 var(--ap-font);
+  letter-spacing: 0.02em;
+  padding: 3px 6px;
+  background: var(--ap-surface-2);
+  border-radius: 999px;
+}
+.actions {
+  gap: 8px;
+}
+/* 操作栏按钮：与场景 tab 同族的圆角小控件，统一 26px 高、11.5px 字 */
+header .actions button {
+  height: 26px;
+  padding: 0 11px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font: 500 11.5px/1 var(--ap-font);
 }
 .render-status {
+  font: 11.5px/1 var(--ap-font);
   color: var(--ap-text-2);
 }
+/* ---- 场景页 tab 栏（圆角胶囊分段控件）----
+   旧基础样式是 10px 微控件 + 半套 Apple 覆盖，这里整套接管：
+   统一 11.5px 字号 / 22px 高度 / 8px 圆角，动作按钮默认隐身，减少视觉噪声。 */
 .scene-tabs {
+  gap: 8px;
+  padding: 0 8px 0 10px;
   border-bottom: 1px solid var(--ap-sep);
   background: rgba(28, 28, 30, 0.6);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
 }
-.tab,
-.tab-add {
+
+/* 片场名：与 tab 同高的低调输入框 */
+.stage-name {
+  width: 136px;
+  height: 22px;
+  padding: 0 9px;
+  background: var(--ap-surface-2);
+  border: 1px solid transparent;
+  border-radius: var(--ap-r-sm);
+  color: var(--ap-text);
+  font: 500 11.5px/1 var(--ap-font);
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+.stage-name::placeholder {
+  color: var(--ap-text-3);
+}
+.stage-name:focus {
+  outline: none;
+  border-color: var(--ap-blue);
+  box-shadow: var(--ap-ring);
+}
+
+/* tab 行：去掉底部留白，滚动条压薄成半透明条 */
+.tabs {
+  gap: 4px;
+  padding-bottom: 0;
+  scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
+}
+.tabs::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+}
+.tabs::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+/* 单个场景页：圆角胶囊；激活页用亮一档的实底 + 高光描边区分于 hover */
+.tab {
+  height: 22px;
+  padding: 0 4px 0 10px;
+  gap: 1px;
   background: transparent;
   border: 1px solid transparent;
   border-radius: var(--ap-r-sm);
   color: var(--ap-text-2);
+  font: 500 11.5px/1 var(--ap-font);
+  transition: background 0.16s ease, color 0.16s ease;
 }
-.tab:hover,
-.tab-add:hover {
-  background: var(--ap-surface-2);
+.tab:hover {
+  background: rgba(255, 255, 255, 0.06);
   color: var(--ap-text);
 }
 .tab.active {
-  background: var(--ap-surface-2);
+  background: var(--ap-surface-3);
   color: var(--ap-text);
-  border-color: transparent;
+  font-weight: 600;
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.08);
 }
-.stage-name {
-  background: var(--ap-surface-2);
+.tab-label {
+  padding: 0 2px;
+  max-width: 180px;
+}
+
+/* 新建 / 重置：与 tab 同高的图标按钮 */
+.tab-add,
+.tab-reset {
+  height: 22px;
+  padding: 0 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
   border: 1px solid transparent;
   border-radius: var(--ap-r-sm);
-  color: var(--ap-text);
-  font: 500 11.5px var(--ap-font);
+  color: var(--ap-text-2);
+  transition: background 0.16s ease, color 0.16s ease;
 }
-.stage-name:focus {
-  border-color: var(--ap-blue);
+.tab-add {
+  font-size: 15px;
+}
+.tab-reset {
+  font-size: 13px;
+  color: var(--ap-text-3);
+}
+.tab-add:hover,
+.tab-reset:hover {
+  background: var(--ap-surface-2);
+  color: var(--ap-text);
+}
+
+/* 行内动作（复制 / 删除）：默认隐身，hover 该页或它是激活页时出现。
+   仍占位 → 不会因为出现 / 消失让 tab 宽度跳动；隐身时禁用命中避免误触。 */
+.tab-dup,
+.tab-del {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--ap-text-3);
+  font-size: 11px;
+  line-height: 1;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.14s ease, background 0.14s ease, color 0.14s ease;
+}
+.tab:hover .tab-dup,
+.tab:hover .tab-del,
+.tab.active .tab-dup,
+.tab.active .tab-del {
+  opacity: 1;
+  pointer-events: auto;
+}
+.tab-dup:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: var(--ap-text);
+}
+.tab-del:hover {
+  background: rgba(255, 69, 58, 0.2);
+  color: var(--ap-red);
+}
+
+/* 改名输入框：嵌在胶囊里 */
+.tab-rename {
+  width: 96px;
+  height: 16px;
+  padding: 0 5px;
+  background: var(--ap-surface);
+  border: 1px solid var(--ap-blue);
+  border-radius: 4px;
+  color: var(--ap-text);
+  font: 500 11.5px/1 var(--ap-font);
+}
+.tab-rename:focus {
+  outline: none;
 }
 
 /* ---- 左右面板 ---- */
@@ -2900,6 +3146,31 @@ header {
 }
 .vf-tool.is-temp:hover {
   border-color: #f0a35a;
+}
+
+/* 个体级名字开关（眼睛图标）：紧跟场景级「名字」按钮。
+   睁眼 = 显示，斜杠眼 + 变暗 = 隐藏；激活（名字可见）沿用主题蓝，与 .vf-tool.on 同一语汇。 */
+.vf-eye {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 6px;
+}
+.vf-eye svg {
+  display: block;
+}
+.vf-eye.on {
+  color: var(--ap-blue);
+  border-color: var(--ap-blue);
+}
+.vf-eye.is-off {
+  opacity: 0.55;
+}
+/* 禁用态（未选中对象 / 场景接管时）：灰掉且不可点。 */
+.vf-tool:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  box-shadow: none;
 }
 
 /* 画布上方的「Shift 3D 堆叠」提示条。只在平面模式下按住 Shift 时出现。
