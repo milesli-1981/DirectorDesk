@@ -94,7 +94,9 @@ button:hover {
     minmax(var(--center-min-w), 1fr) var(--right-w);
   /* 第 4 行 = 时间轴高度。它是「给画布让高度」的唯一旋钮：画布是第 3 行 minmax(200px,1fr)，
      时间轴每矮 1px，画布就高 1px。这里从 264 → 216（矮 48px），视觉密度靠下面 .tlbar 一起收。 */
-  grid-template-rows: 30px 34px minmax(200px, 1fr) 216px;
+  /* 第 4 行 = 时间轴高度。它是「给画布让高度」的唯一旋钮：画布是第 3 行 minmax(200px,1fr)，
+     时间轴每矮 1px，画布就高 1px。216 → 176：行高与顶栏收过之后，这个高度仍够看 5 条轨道。 */
+  grid-template-rows: 30px 34px minmax(200px, 1fr) 176px;
   /* 收起 / 展开走带回弹的缓动（末端轻微过冲）；拖动时由 .is-resizing 关掉动画以便跟手 */
   transition: grid-template-columns 0.44s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
@@ -1245,14 +1247,15 @@ canvas {
 }
 
 .row {
-  height: 36px;
+  /* 行高 36 → 26：轨道行更密，timebar 整体更矮（给画布让空间）。 */
+  height: 26px;
   display: grid;
   grid-template-columns: 190px 1fr auto;
   border-bottom: 1px solid #1d2630;
 }
 
 .label {
-  padding: 10px 8px;
+  padding: 5px 8px;
   border-right: 1px solid #27313b;
   color: #95a4b4;
   /* 过长 id 截断为省略号，不再侵占右侧轨道 */
@@ -1290,12 +1293,13 @@ canvas {
 
 .clip {
   position: absolute;
-  top: 6px;
-  height: 24px;
+  top: 3px;
+  height: 20px;
   border: 1px solid #55718b;
   background: #1b2c3c;
   border-radius: 3px;
-  padding: 5px 7px;
+  padding: 2px 6px;
+  font-size: 10.5px;
   white-space: nowrap;
   overflow: hidden;
   user-select: none;
