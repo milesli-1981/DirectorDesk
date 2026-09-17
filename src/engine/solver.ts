@@ -16,7 +16,10 @@ import {
   tangentAtArcLength,
 } from "./path";
 import { Rect, setRects } from "./occlusion";
+import { blockingRects, blockingRectsForSegment, routeHeightFor } from "./avoidance";
+import { locomotionOfId } from "./locomotion";
 import { curveVal, normalizeEase } from "./ease";
+import { stairBounds } from "./stair";
 
 /**
  * 编队能否「骑过」某障碍：队伍横向跨度足够，障碍两侧都留得下人。
@@ -48,15 +51,30 @@ function canStraddle(state: DirectorState, o: DirectorObject, r: Rect): boolean 
 }
 
 /**
- * 某对象做路径规划时应考虑的静态障碍。
- * 群队锚点要排除「编队骑得过去」的小障碍（见 canStraddle）；其余对象 / 障碍一律照旧。
+ * **一段**做路径规划时应考虑的静态障碍。这是障碍集合的**唯一入口**。
+ *
+ * 顺序（**不能反**）：全集 → 可达性过滤 → 「骑得过去」过滤。
+ * - 可达性过滤（`blockingRectsForSegment`，见 `engine/avoidance`）：迈得上的台阶、穿得过
+ *   的桥下、语义开关标掉的草丛、以及"**这一段就是在它顶上走**"的高台，都不算阻挡 ——
+ *   它们不该掰弯整条路径。这是 3D 化的落点。
+ * - `canStraddle`：编队横向跨度够不够骑过这个障碍。它问的前提是"这本来就是个障碍"，
+ *   所以必须排在可达性过滤**之后**；矮障碍已被上一步接管，它的适用面自然收窄（符合预期）。
+ *
  * **可视化与运动求解都必须走这里**，否则橙色导航层会显示绕行、agent 却直穿过去。
+ *
+ * ## 为什么按「段」而不是按「对象」
+ *
+ * 早先是 `routeObstacles(state, objectId)`：整段生命里只取一个高度 —— **该对象全部段的
+ * 最小起始落脚高度**。这对"一段内从地面爬到高处"是错的：终点落在楼顶的那一段会被整段
+ * 按地面判，3 m 的楼于是成了墙，**作者画的终点根本走不到**（实测被截在楼前）。按段判
+ * 才能问出"他是从这一段的另一端走上来的吗"，从而把那种障碍剔掉（见 `endpointOnTopExempts`）。
+ * 旧的按对象取法**已删除**：两份取法并存正是"线显示绕行、人却直穿"那类分叉的来源。
  */
-export function routeObstacles(state: DirectorState, objectId: string): Rect[] {
-  const all = setRects(state);
-  const o = state.objects.find((item) => item.id === objectId);
-  if (!o) return all;
-  return all.filter((r) => !canStraddle(state, o, r));
+export function routeObstaclesFor(state: DirectorState, segment: MoveSegment): Rect[] {
+  const o = state.objects.find((item) => item.id === segment.object);
+  if (!o) return setRects(state);
+  // planar 下 fromY 恒 0、maxStep = 0 → blockingRects 恒等于 setRects，行为与扩展前逐值一致。
+  return blockingRectsForSegment(state, segment).filter((r) => !canStraddle(state, o, r));
 }
 
 /** 无驱动（Segment / Constraint）时的基础位置。 */
@@ -72,22 +90,21 @@ function basePosition(state: DirectorState, o: DirectorObject, time: number): Ve
   // 环境（set 资产）参与运动求解：路径被挡时 agent 实际走绕行折线。
   // 例外：群队锚点要把「编队骑得过去」的小障碍排除掉——它们不该掰弯整条线路，
   // 而由队员在 local avoidance 里从石头两侧分流绕过（见 canStraddle 注释）。
-  const obstacles = routeObstacles(state, o.id);
-
+  // **按段取**（`routeObstaclesFor`）：停在哪一段就按那一段的端点层高判，见那里的说明。
   const active = ss.find((s) => time >= s.timeStart && time <= s.timeEnd);
-  if (active) return segmentPosition(active, time, obstacles);
+  if (active) return segmentPosition(active, time, routeObstaclesFor(state, active));
 
   // 停留位置同样取绕行折线的端点，避免停在障碍内部。
   const prev = [...ss].reverse().find((s) => time > s.timeEnd);
   if (prev) {
-    const route = segmentRoutePoints(prev, obstacles);
+    const route = segmentRoutePoints(prev, routeObstaclesFor(state, prev));
     const last = route[route.length - 1];
     return { x: last.x, z: last.z };
   }
 
   const next = ss.find((s) => time < s.timeStart);
   if (next) {
-    const route = segmentRoutePoints(next, obstacles);
+    const route = segmentRoutePoints(next, routeObstaclesFor(state, next));
     return { x: route[0].x, z: route[0].z };
   }
 
@@ -207,7 +224,7 @@ const objectRouteCache = new Map<string, ObjectRoute>();
 /**
  * 取对象跨所有 segment 的连续路径 LUT（按 state.revision 缓存，避免每帧重算绕障）。
  *
- * 陷阱：obstacles 必须按【锚点】算。routeObstacles 会剔除「编队骑得过去」的小障碍，
+ * 陷阱：obstacles 必须按【锚点】算。`routeObstaclesFor` 会剔除「编队骑得过去」的小障碍，
  * 而对非锚点队员 canStraddle 恒为 false（保留全部障碍）——若按队员取会得到与锚点不同的
  * 折线，队形会散。故整队统一用锚点 id 取一份折线。
  */
@@ -219,13 +236,14 @@ export function objectRoute(state: DirectorState, objectId: string): ObjectRoute
   const segs = state.segments
     .filter((s) => s.object === objectId)
     .sort((a, b) => a.timeStart - b.timeStart);
-  const rects = routeObstacles(state, objectId);
 
   const pts: Vec2[] = [];
   const cum: number[] = [];
   const segEnds: number[] = [];
   for (const seg of segs) {
-    for (const p of segmentRoutePoints(seg, rects)) {
+    // 每段用自己的障碍集合（`routeObstaclesFor`）—— 与 `basePosition` 同一份，
+    // 否则编队的弧长参数化会与真正走的路线分叉。
+    for (const p of segmentRoutePoints(seg, routeObstaclesFor(state, seg))) {
       const last = pts[pts.length - 1];
       if (!last) {
         pts.push(p);
@@ -338,6 +356,11 @@ function groupInfluenceOffset(state: DirectorState, objectId: string, time: numb
   // 编队那样绕锚点旋转被甩离路径、或在缓动端点（零速）处坍缩到节点。
   const anchor = base(anchorId, time);
   const route = objectRoute(state, anchorId);
+  // 队首**真正在走的位置**（= `basePosition`，有段时就是 `segmentPosition` 的路线点）。
+  // `useArc` 为假（路线为空）时下面要把队员摆在它旁边 —— 若仍用队首的 ORIGIN，
+  // 队员会被摆在"队首的出生点"附近：巨型楼梯实测 z 差 30m ⇒ 脚下没有楼梯面 ⇒ 整队绕行。
+  const anchorObjForRoute = state.objects.find((o) => o.id === anchorId);
+  const anchorRoute = anchorObjForRoute ? basePosition(state, anchorObjForRoute, time) : anchor;
   const useArc = route.segs.length > 0;
   const sAnchor = useArc ? anchorArcLength(route, time) : 0;
 
@@ -357,11 +380,44 @@ function groupInfluenceOffset(state: DirectorState, objectId: string, time: numb
   // 抵消掉（过去未避让的位置被低通记住，生成反向甩动把人拽回障碍里），看着就像没避开。
   const CLEAR = 0.25; // 与障碍间的余量，避免贴边穿模
   const LEAD = 1.0; // 提前量：为「让位」留出渐入渐出的距离，避免一碰障碍就瞬移出去
-  const sets = setRects(state);
+  // —— 两个障碍集合，两种职责（最容易搞错的地方）——
+  //
+  //   intentSets：**可达性过滤后**的集合，供"侧向让位"（意图）用。
+  //     一个该迈上去的台阶不该引发侧让 —— 那是系统自作主张地掰弯了导演画的直线。
+  //   solidSets：**全集**，供"二次兜底 push-out"（防穿模保证）用。
+  //     这是"无论如何不穿模"的地板，不能因为意图过滤而失效。
+  //
+  // 兜底用全集为何不会误伤：它按 3D 语义判定（相切不算冲突）。人站在台阶上时
+  // 与台阶恰好相切 → 不推开；真正插进墙里才推。这条正是堆叠能成立的前提。
+  const sets = blockingRects(state, anchorId, routeHeightFor(state, anchorId), locomotionOfId(state, anchorId));
+  // 楼梯的"矩形"是它的**包围盒**（巨型楼梯 145.7 × 64.2m），而它真实只占一条宽 `footprint.w`
+  // 的走廊。拿包围盒做下面的防穿模兜底，会把站在楼梯上的队员整个推出盒子 —— 实测 z 被推到
+  // 1.7（盒子外）⇒ 脚下没有楼梯面 ⇒ 整队掉在下面、看起来像绕行。
+  // 楼梯不参与这个兜底：它是**可站的面**，不是要躲的实体（注释里的"站在台阶上相切不误伤"
+  // 正是此意，只是此前对楼梯没生效）。
+  const stairBoxes = state.objects
+    .filter((o) => o.topShape === "stair")
+    .map((o) => stairBounds(o));
+  const solidSets = setRects(state).filter(
+    (r) =>
+      !stairBoxes.some(
+        (b) =>
+          Math.abs(r.x - (b.minX + b.maxX) / 2) < 0.05 &&
+          Math.abs(r.z - (b.minZ + b.maxZ) / 2) < 0.05 &&
+          Math.abs(r.w - (b.maxX - b.minX)) < 0.05 &&
+          Math.abs(r.d - (b.maxZ - b.minZ)) < 0.05,
+      ),
+  );
   const meObj = state.objects.find((o) => o.id === objectId);
   const mw = (meObj?.footprint.w ?? 0.5) / 2;
   const md = (meObj?.footprint.d ?? 0.5) / 2;
   const slot = blendedSlot(objectId); // 纯编队槽位（不含避让），供滞后低通使用
+  // 与 `desiredAt` **同一个**走廊夹紧：这里若不夹，惯性低通会把队员拉回未夹紧的位置，
+  // 结果跟没夹一样（巨型楼梯实测队员脚下仍是 0）。
+  const anchorForLat = state.objects.find((o) => o.id === anchorId);
+  const latCapHere =
+    anchorForLat?.topShape === "stair" ? Math.max(0.2, anchorForLat.footprint.w / 2 - 0.35) : Infinity;
+  const latHere = Math.max(-latCapHere, Math.min(latCapHere, slot.right));
 
   // 编队横向跨度（槽位侧向范围）：判断障碍能否被"骑"过去。
   let latMin = Infinity;
@@ -384,11 +440,19 @@ function groupInfluenceOffset(state: DirectorState, objectId: string, time: numb
     const map = useArc ? pointAtArcLength(route.lut, msMe) : null;
     const mh = useArc ? tangentAtArcLength(route.lut, msMe) : baseHeading(state, anchorId, time);
     const mr = { x: Math.cos(mh), z: -Math.sin(mh) };
+    // **锚点在走楼梯时夹住横向槽位**：楼梯走廊只有 `footprint.w` 宽（巨型楼梯 4.4m），
+    // 而横队 / 楔形的侧移是 ±1.2~2.4m —— 不夹就会出现"队员被推到走廊外 ⇒ 脚下没有楼梯面 ⇒
+    // 高度回落到地面"，作者看到的是**整队绕行 / 留在下面**（队首路线其实一直是正确的）。
+    // 只夹横向，前后间距（fwd）照旧。
+    const anchorObj = state.objects.find((o) => o.id === anchorId);
+    const latCap =
+      anchorObj?.topShape === "stair" ? Math.max(0.2, anchorObj.footprint.w / 2 - 0.35) : Infinity;
+    const lat = Math.max(-latCap, Math.min(latCap, mslot.right));
     const mdp = map
-      ? { x: map.x + mr.x * mslot.right, z: map.z + mr.z * mslot.right }
+      ? { x: map.x + mr.x * lat, z: map.z + mr.z * lat }
       : {
-          x: anchor.x + Math.sin(mh) * mslot.fwd + mr.x * mslot.right,
-          z: anchor.z + Math.cos(mh) * mslot.fwd + mr.z * mslot.right,
+          x: anchorRoute.x + Math.sin(mh) * mslot.fwd + mr.x * lat,
+          z: anchorRoute.z + Math.cos(mh) * mslot.fwd + mr.z * lat,
         };
     const mObj = state.objects.find((o) => o.id === memberId);
     const mmw = (mObj?.footprint.w ?? 0.5) / 2;
@@ -542,8 +606,8 @@ function groupInfluenceOffset(state: DirectorState, objectId: string, time: numb
       rax = Math.cos(ha);
       raz = -Math.sin(ha);
     }
-    lx += (pxk + rax * slot.right) * wk;
-    lz += (pzk + raz * slot.right) * wk;
+    lx += (pxk + rax * latHere) * wk;
+    lz += (pzk + raz * latHere) * wk;
     wsum += wk;
   }
   const lagged = { x: lx / wsum, z: lz / wsum };
@@ -579,7 +643,9 @@ function groupInfluenceOffset(state: DirectorState, objectId: string, time: numb
   const finalZ = desired.z + fz;
   let cx = 0;
   let cz = 0;
-  for (const r of sets) {
+  // 兜底用**全集**（solidSets）：一次避让只改期望位，但变线 / 转弯时甩动可达 2m 且方向不可控，
+  // 可能把人甩进障碍 —— 这里按最终落点把它推出去。因为按 3D 语义判定，站在台阶上（相切）不会误伤。
+  for (const r of solidSets) {
     const hw = r.w / 2 + mw + CLEAR;
     const hh = r.d / 2 + md + CLEAR;
     const dxr = finalX - r.x;
@@ -612,9 +678,8 @@ export function baseHeading(state: DirectorState, id: string, time: number): num
   const segments = obj
     ? state.segments.filter((s) => s.object === id).sort((a, b) => a.timeStart - b.timeStart)
     : [];
-  const obstacles = routeObstacles(state, id);
   const segDir = (seg: MoveSegment): { x: number; z: number } => {
-    const route = segmentRoutePoints(seg, obstacles);
+    const route = segmentRoutePoints(seg, routeObstaclesFor(state, seg));
     const a0 = route[0];
     const b0 = route[route.length - 1];
     return { x: b0.x - a0.x, z: b0.z - a0.z };
@@ -708,6 +773,14 @@ export function objectPosition(
       result = basePosition(state, o, time);
     }
   } else if (
+    // 自己正被自己的 MOVE 段驱动、且此刻没有任何约束 ⇒ 位置**就是**那一段的路线，直接返回：
+    // 后面叠加的编队动力学（惯性低通 / 队员分离 / 引力场）会把队首从路线上揉下来 ——
+    // 巨型楼梯实测：x 与路线一致、z 却被拉回对象自身的 z（支撑归 0 ⇒ 整队掉到地面绕行）。
+    !active &&
+    state.segments.some((s) => s.object === objectId && time >= s.timeStart && time <= s.timeEnd)
+  ) {
+    return basePosition(state, o, time);
+  } else if (
     state.segments.some((s) => s.object === objectId && time >= s.timeStart && time <= s.timeEnd)
   ) {
     result = basePosition(state, o, time);
@@ -730,7 +803,19 @@ export function objectPosition(
       const b = objectPosition(state, q.target, q.timeEnd, new Set([...stack, objectId]), undefined, false);
       hold = { end: q.timeEnd, pose: { x: b.x + off.x, z: b.z + off.z } };
     }
-    result = hold ? hold.pose : basePosition(state, o, time);
+    if (hold) {
+      result = hold.pose;
+    } else {
+      // 队员自己没有驱动 ⇒ 基准**取队首的路线位置**，而不是自己的出生点。
+      // 巨型楼梯实测：取出生点时，后面的组引力场只是一根弹簧，把队员拉到"出生点与路线
+      // 之间"（z≈1.7 而路线 z=31.6）⇒ 脚下没有楼梯面 ⇒ 整队掉在下面、看起来像绕行。
+      // 起点就放在路线附近，弹簧只需把队员摆到它的编队槽位上。
+      const grp = (state.groups ?? []).find(
+        (g) => g.dynamics && g.members.includes(o.id) && g.members[0] !== o.id,
+      );
+      const anchorOf = grp ? state.objects.find((x) => x.id === grp.members[0]) : null;
+      result = anchorOf ? basePosition(state, anchorOf, time) : basePosition(state, o, time);
+    }
   }
 
   // 组引力场：在所有基础运动（Segment / FOLLOW / Hold）之上叠加一次。

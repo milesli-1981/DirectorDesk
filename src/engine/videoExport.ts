@@ -9,7 +9,7 @@ import { Muxer, ArrayBufferTarget } from "mp4-muxer";
  *   直接产出 `.mp4`，不再依赖 MediaRecorder（它跨浏览器拿不到 MP4 封装）。
  * - WebM 兜底：当浏览器不支持 WebCodecs（或 VideoEncoder 不支持目标分辨率）时，
  *   回退到 canvas.captureStream + MediaRecorder 实时录制 `.webm`。
- *   无头 / MCP 导出（headlessApi）固定走 WebM 路径（recordCameraPov）。
+ *   无头 / MCP 导出（headlessApi）默认走 MP4（recordCameraMp4），失败再回退 WebM（recordCameraPov）。
  *
  * 设计对齐 Baseline §1352：低模 Preview 很便宜，可全部输出——每台相机一条视频。
  */

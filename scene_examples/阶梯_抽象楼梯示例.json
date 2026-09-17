@@ -1,0 +1,189 @@
+{
+  "manifest": {
+    "name": "抽象楼梯示例",
+    "order": [{ "id": "SCN_STAIR", "name": "抽象楼梯 · 三种做法（直跑 / L 形带平台 / 螺旋）" }],
+    "activeSceneId": "SCN_STAIR"
+  },
+  "scenes": {
+    "SCN_STAIR": {
+      "revision": 5,
+      "duration": 12,
+      "aspectRatio": "16:9",
+      "worldMode": "terrain",
+      "objects": [
+        {
+          "id": "STAIR_STRAIGHT",
+          "name": "① 直跑：不画路径（长度取 D=4 · 坡度 22°）",
+          "type": "prop",
+          "category": "structure",
+          "role": "set",
+          "x": -7,
+          "z": -2,
+          "rotation": 0,
+          "topShape": "stair",
+          "footprint": { "w": 2.4, "d": 4, "h": 1.6 },
+          "color": "#8b9bb0",
+          "locked": true
+        },
+        {
+          "id": "STAIR_L",
+          "name": "② L 形：path 3 点（平台 1.8m 从路径里扣除 · 平均 13° / 梯段 16° · 末端正好到顶）",
+          "type": "prop",
+          "category": "structure",
+          "role": "set",
+          "x": 0,
+          "z": -2,
+          "rotation": 0,
+          "topShape": "stair",
+          "stair": {
+            "path": [
+              { "id": "SP_L1", "x": 0, "z": -2 },
+              { "id": "SP_L2", "x": 0, "z": 2 },
+              { "id": "SP_L3", "x": 4, "z": 2 }
+            ]
+          },
+          "footprint": { "w": 1.8, "d": 2.4, "h": 1.8 },
+          "color": "#9fb4cc",
+          "locked": true
+        },
+        {
+          "id": "STAIR_HELIX",
+          "name": "③ 螺旋：helix 生成 1 圈 · 半径 1.6（坡度 13°）",
+          "type": "prop",
+          "category": "structure",
+          "role": "set",
+          "x": 8,
+          "z": -2,
+          "rotation": 0,
+          "topShape": "stair",
+          "stair": {
+            "path": [
+              { "id": "SP_H0", "x": 8, "z": -2 },
+              { "id": "SP_H1", "x": 8.05, "z": -1.59 },
+              { "id": "SP_H2", "x": 8.21, "z": -1.2 },
+              { "id": "SP_H3", "x": 8.47, "z": -0.87 },
+              { "id": "SP_H4", "x": 8.8, "z": -0.61 },
+              { "id": "SP_H5", "x": 9.19, "z": -0.45 },
+              { "id": "SP_H6", "x": 9.6, "z": -0.4 },
+              { "id": "SP_H7", "x": 10.01, "z": -0.45 },
+              { "id": "SP_H8", "x": 10.4, "z": -0.61 },
+              { "id": "SP_H9", "x": 10.73, "z": -0.87 },
+              { "id": "SP_H10", "x": 10.99, "z": -1.2 },
+              { "id": "SP_H11", "x": 11.15, "z": -1.59 },
+              { "id": "SP_H12", "x": 11.2, "z": -2 },
+              { "id": "SP_H13", "x": 11.15, "z": -2.41 },
+              { "id": "SP_H14", "x": 10.99, "z": -2.8 },
+              { "id": "SP_H15", "x": 10.73, "z": -3.13 },
+              { "id": "SP_H16", "x": 10.4, "z": -3.39 },
+              { "id": "SP_H17", "x": 10.01, "z": -3.55 },
+              { "id": "SP_H18", "x": 9.6, "z": -3.6 },
+              { "id": "SP_H19", "x": 9.19, "z": -3.55 },
+              { "id": "SP_H20", "x": 8.8, "z": -3.39 },
+              { "id": "SP_H21", "x": 8.47, "z": -3.13 },
+              { "id": "SP_H22", "x": 8.21, "z": -2.8 },
+              { "id": "SP_H23", "x": 8.05, "z": -2.41 },
+              { "id": "SP_H24", "x": 8, "z": -2 }
+            ]
+          },
+          "footprint": { "w": 1.4, "d": 1.4, "h": 2.4 },
+          "color": "#b0a08b",
+          "locked": true
+        },
+        {
+          "id": "HERO",
+          "name": "主角：路线 = ② 的路径本身（走动不再需要 baseY —— 落脚高度沿路径从段首累进）",
+          "type": "actor",
+          "category": "human",
+          "role": "agent",
+          "x": 0,
+          "z": -5,
+          "rotation": 0,
+          "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 },
+          "color": "#67a7ff"
+        },
+        {
+          "id": "WATCHER",
+          "name": "配角：**静止**站在 ② 顶端**到达平台**上（static 仍靠摆位层高 baseY = 1.8）",
+          "type": "actor",
+          "category": "human",
+          "role": "agent",
+          "x": 4.9,
+          "z": 2.2,
+          "rotation": 270,
+          "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 },
+          "baseY": 1.8,
+          "color": "#f0a35a"
+        }
+      ],
+      "segments": [
+        {
+          "id": "SEG_HERO",
+          "type": "MOVE",
+          "object": "HERO",
+          "startX": 0,
+          "startZ": -5,
+          "endX": 4,
+          "endZ": 2,
+          "points": [
+            { "id": "HP_1", "type": "path", "shape": "LINE", "x": 0, "z": -2 },
+            { "id": "HP_2", "type": "path", "shape": "LINE", "x": 0, "z": 2 }
+          ],
+          "timeStart": 0,
+          "timeEnd": 12,
+          "ease": [0, 0, 1, 1]
+        }
+      ],
+      "handoffs": [],
+      "constraints": [],
+      "cameras": [
+        {
+          "id": "CAM_SIDE",
+          "name": "侧视 · 看走上坡的剖面（坡度是派生量）",
+          "color": "#7bd88f",
+          "targetId": "HERO",
+          "framing": "wide",
+          "view": "eye_level",
+          "side": "side",
+          "lensMm": 35,
+          "motion": "FOLLOW"
+        },
+        {
+          "id": "CAM_FOLLOW",
+          "name": "跟拍 · 走上 L 形（转角处看画面抖不抖）",
+          "color": "#c792ea",
+          "targetId": "HERO",
+          "framing": "medium",
+          "view": "eye_level",
+          "side": "back_3_4",
+          "lensMm": 50,
+          "motion": "FOLLOW"
+        },
+        {
+          "id": "CAM_HIGH",
+          "name": "高位 · 三种做法一览",
+          "color": "#8ad1ff",
+          "targetId": "WATCHER",
+          "framing": "wide",
+          "view": "high",
+          "side": "front_3_4",
+          "lensMm": 24,
+          "motion": "FOLLOW"
+        }
+      ],
+      "cameraMoves": [],
+      "cameraJunctions": [],
+      "actions": [
+        {
+          "id": "ACT_HERO",
+          "object": "HERO",
+          "timeStart": 0,
+          "timeEnd": 12,
+          "kind": "walk",
+          "intensity": 1
+        }
+      ],
+      "groups": [],
+      "customActions": []
+    }
+  }
+}

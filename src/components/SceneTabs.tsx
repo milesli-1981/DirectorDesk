@@ -42,7 +42,7 @@ export function SceneTabs() {
               if (dragId) reorderScene(dragId, tab.id);
               setDragId(null);
             }}
-            title="单击切换 · 双击重命名 · 拖动排序"
+            title={`${tab.name} · 单击切换 · 双击重命名 · 拖动排序`}
           >
             {editingId === tab.id ? (
               <input

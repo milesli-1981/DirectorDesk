@@ -27,16 +27,46 @@ import {
   OTS_SIDE_LABELS,
   SIDE_LABELS,
   VIEW_LABELS,
+  DirectorObject,
 } from "../domain/schema";
 import { ANIMAL_MODELS, ANIMAL_SPECIES } from "../engine/animalModels";
 import { EaseEditor } from "./EaseEditor";
+import { JumpEnvelope } from "./JumpEnvelope";
 import { PoseCustomizeModal } from "./PoseCustomizeModal";
-import { clonePose, POSE_PRESETS, POSE_PRESET_NAMES } from "../engine/poses";
+import { AUTHOR_POSE_NAMES, clonePose, POSE_PRESETS } from "../engine/poses";
 import { moveChannelsAt, solveCamera } from "../engine/cameraSolver";
 import { CAMERA_CHANNELS, CameraChannel } from "../engine/ease";
 import { axisSide, cameraAxis } from "../engine/axis";
 import { waypointKeyframes } from "../engine/path";
+import { locomotionOf } from "../engine/locomotion";
+import { objectBottom, objectTop, stairHeightFromPlanes, supportUnder } from "../engine/ground";
+import {
+  helixStairPath,
+  stairBounds,
+  stairPathOf,
+  stairRunLength,
+  stairSlopeDeg,
+} from "../engine/stair";
+import { checkJumpArc, classifyGap, speedScale, type GapKind } from "../engine/jump";
+import {
+  previewArc,
+  REACH_STYLES,
+  scanReachability,
+  segmentSpans,
+  takeoffSpeedRatio,
+} from "../engine/reach";
+import { RUN_SPEED } from "../engine/locomotion";
 import { LockBadge } from "./LockBadge";
+
+/** 高差分档的中文标签（与 engine/jump.ts 的 GapKind 一一对应）。 */
+const GAP_LABELS: Record<GapKind, string> = {
+  flat: "平地 · 直接走过",
+  step: "台阶 · 自动迈上",
+  drop: "落差 · 加速下坠",
+  jump: "需跳跃 · 抛物线",
+  climb: "需攀爬 · 贴墙",
+  blocked: "不可达",
+};
 
 const ACTION_KINDS: ActionKind[] = [
   "stand",
@@ -52,8 +82,15 @@ const ACTION_KINDS: ActionKind[] = [
 const CUSTOM_PREFIX = "custom:";
 /** 「＋ 自定义…」哨兵值：选中它不是取值，而是打开编辑弹窗。 */
 const NEW_CUSTOM = "__new_custom__";
-// 对象面板只展示静态基线姿势；步态类（walk/run）没有静态关节角度，只在动作片段里选。
-const STATIC_POSE_NAMES = POSE_PRESET_NAMES.filter((name) => name !== "walk" && name !== "run");
+/**
+ * 对象面板只展示**作者可选**的静态基线姿势（白名单 `AUTHOR_POSE_NAMES`）。
+ *
+ * 这里**不能**写成"从 `POSE_PRESET_NAMES` 里排除 walk/run"：那张表里还住着 6 个**阶段姿势**
+ * （jumpTakeoff / jumpAir / jumpLand / climbReach / climbUp / hang），它们由弧线进度自动挑、
+ * 不可选 —— 黑名单会漏掉它们，下拉里于是出现**选了也不触发**的死选项
+ * （选了只会让人摆着抱膝的姿势站着走）。守卫见 scripts/check-3d.ts §35。
+ */
+const STATIC_POSE_NAMES = AUTHOR_POSE_NAMES;
 
 /**
  * 关键帧通道定义（单一来源）：中文标签 + 取值范围/步进 + 分组 + 语义说明。
@@ -323,6 +360,9 @@ export function Inspector() {
   const setSegmentEase = useDirectorStore((s) => s.setSegmentEase);
   const setCameraMoveEase = useDirectorStore((s) => s.setCameraMoveEase);
   const setSegmentSpeedKeys = useDirectorStore((s) => s.setSegmentSpeedKeys);
+  const setSegmentArc = useDirectorStore((s) => s.setSegmentArc);
+  const addPathPoint = useDirectorStore((s) => s.addPathPoint);
+  const selectItem = useDirectorStore((s) => s.selectItem);
   const setCameraMoveSpeedKeys = useDirectorStore((s) => s.setCameraMoveSpeedKeys);
   const setHandoffMode = useDirectorStore((s) => s.setHandoffMode);
   const setCameraJunctionMode = useDirectorStore((s) => s.setCameraJunctionMode);
@@ -422,6 +462,14 @@ export function Inspector() {
       state.handoffs.find((h) => h.nextSeg === segment.id)
     : undefined;
 
+  // 全局体检面板是否展开。展开才扫描（见 `health` 的注释）。
+  const [healthOpen, setHealthOpen] = useState(false);
+
+  // 抽象楼梯「螺旋路径」生成器的参数。放在这里（而不是那段 JSX 里）是因为 hook
+  // 不能写在条件分支里 —— 楼梯面板只对 `topShape === "stair"` 的对象渲染。
+  const [helixRadius, setHelixRadius] = useState(2.5);
+  const [helixTurns, setHelixTurns] = useState(1);
+
   // 自定义动作弹窗：新建（空）/ 编辑（带已有记录）。由 Kind 下拉的「自定义」选项驱动。
   const [customize, setCustomize] = useState<{ mode: "create" } | { mode: "edit"; id: string } | null>(
     null,
@@ -457,6 +505,44 @@ export function Inspector() {
           onKeysChange: (keys: SpeedKey[] | null) => setCameraMoveSpeedKeys(move.id, keys),
         }
       : null;
+
+  /**
+   * 该段的高差诊断 + 弧线校验（Phase 4）。
+   * 只在选中 MOVE 段时算，且复用 `pathHeight` 的起落面语义，保证与渲染同源。
+   */
+  const arcInfo = useMemo(() => {
+    if (!segment) return null;
+    const owner = state.objects.find((o) => o.id === segment.object);
+    if (!owner || owner.role !== "agent") return null;
+    const loco = locomotionOf(state, owner);
+    const y0 = supportUnder(state, segment.startX, segment.startZ, Number.POSITIVE_INFINITY, 0, owner.id).y;
+    const y1 = supportUnder(state, segment.endX, segment.endZ, Number.POSITIVE_INFINITY, 0, owner.id).y;
+    const dh = y1 - y0;
+    const dx = Math.hypot(segment.endX - segment.startX, segment.endZ - segment.startZ);
+    const kind = classifyGap(dh, loco);
+    const arc = segment.arc;
+    let check: ReturnType<typeof checkJumpArc> | null = null;
+    // 起跳瞬时速度（docs/3d/02 §13 的接线）：站着起跳只能跳到一半远，
+    // 所以这个比值会同时缩放有效跳远，并决定要不要报"没有助跑"。
+    const speedRatio = takeoffSpeedRatio(state, segment);
+    if (arc && arc.mode === "parabola") {
+      check = checkJumpArc({ dh, dx, apex: arc.apex ?? Math.max(dh, 0), loco, speedRatio });
+    }
+    return { owner, loco, dh, dx, kind, arc, check, y0, y1, speedRatio };
+  }, [segment, state]);
+
+  /**
+   * 可达性（Phase 5）：与画布上的分段着色**共用** `segmentSpans`，
+   * 于是面板里说的档位就是线上画的那一档 —— 不会出现"面板说可走、线却是红的"。
+   */
+  const reachSpans = useMemo(
+    () => (segment ? segmentSpans(state, segment).filter((span) => span.tier !== 0) : []),
+    [segment, state],
+  );
+  const reachLoco = arcInfo?.loco ?? null;
+  // 全局体检（§9）：长场景里导演不可能一段段点开看有没有标红，所以做成一次扫描。
+  // 只在展开时才算 —— 扫描会遍历全场景所有段，没必要在每次选中时都跑。
+  const health = useMemo(() => (healthOpen ? scanReachability(state) : []), [healthOpen, state]);
 
   // 用显示名（改名后即时联动），未命名的资产回退到 id。
   const title = camera
@@ -707,6 +793,228 @@ export function Inspector() {
               />
             ))}
           </SubGroup>
+
+          {/* 顶面形状：平顶 / 斜坡 / **抽象楼梯**（一个整体，路线用**路径**表达）。
+              楼梯的物理是连续折线坡面，踏步只用于渲染 —— 所以它既不会"一级一跳"，
+              也不需要作者逐块标 blocking:false（见 engine/stair.ts 开头的说明）。
+
+              **只对环境资产（set）开放**：顶面是**盒子几何**的一部分（与 `bottom` 一起
+              构成那个盒子）。human / animal / vehicle 是人物与载具，顶面不是作者要画的
+              几何，渲染也走骨骼 / 模型（见 WorldView 的 `blockBody`），
+              给这个入口只会让"显示的盒子"和"实际的物理"打架。 */}
+          {object.role === "set" ? (
+          <SubGroup
+            title="顶面形状"
+            hint="平顶 = 盒子；斜坡沿 D 向抬升；抽象楼梯 = 一条路径（转角即拐弯，转角处自动铺方形休息平台）。"
+          >
+            <Field label="Shape">
+              <select
+                value={object.topShape ?? "flat"}
+                onChange={(event) => {
+                  const shape = event.target.value as "flat" | "ramp" | "stair";
+                  updateAsset(object.id, {
+                    topShape: shape,
+                    // 切成楼梯时把"一段直跑"落成**真实路径点**：之后拖点即塑形；
+                    // `D` 只是初始进深（路径一旦存在，它就是唯一权威）。
+                    ...(shape === "stair" && !object.stair?.path
+                      ? {
+                          stair: {
+                            path: stairPathOf(object).map((p) => ({
+                              id: `SP_${Date.now().toString(36)}_${Math.floor(Math.random() * 1000)}`,
+                              x: p.x,
+                              z: p.z,
+                            })),
+                          },
+                        }
+                      : {}),
+                  });
+                }}
+              >
+                <option value="flat">平顶 Flat</option>
+                <option value="ramp">斜坡 Ramp</option>
+                <option value="stair">抽象楼梯 Stair</option>
+              </select>
+            </Field>
+            {object.topShape === "stair"
+              ? (() => {
+                  const path = object.stair?.path ?? [];
+                  const newId = () =>
+                    `SP_${Date.now().toString(36)}_${Math.floor(Math.random() * 1000)}`;
+                  const patchPath = (next: Array<{ id: string; x: number; z: number }>) =>
+                    updateAsset(object.id, { stair: { path: next } });
+                  // 缺省 = 实心（旧行为）；关掉 = 只留踏板，楼梯悬空。
+                  const solid = object.stair?.solid !== false;
+                  const patchSolid = (next: boolean) =>
+                    updateAsset(object.id, { stair: { ...object.stair, solid: next } });
+                  const bounds = stairBounds(object);
+                  const runLen = stairRunLength(object);
+                  const slope = stairSlopeDeg(object);
+                  const planeH = stairHeightFromPlanes(state, object);
+                  return (
+                    <>
+                      {/* 底面填充：紧跟在 Shape 之后（实心 / 空心只对楼梯有意义）。
+                          纯渲染开关 —— 顶面还是同一条连续坡面，可走性与坡度都不变。 */}
+                      <Field label="底面">
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          title="实心：每级从对象底面砌到顶面（真实楼梯）；悬空板：只留踏板，能看穿底下"
+                          onClick={() => patchSolid(!solid)}
+                        >
+                          {solid ? "实心（填充到地面）" : "悬空板（不填充）"}
+                        </button>
+                      </Field>
+                      <p className="hint">
+                        楼梯 = **路径 + 高度**（始终是对象列表里的**一个对象**）。
+                        路径来源：不画 = **一段直跑**（长度取 D）；或打开工具栏 **✏️ Path**
+                        在画布上**按住拖手绘**（转角即拐弯）；或按下面**螺旋**生成 ——
+                        生成后都能**拖蓝点**微调。高度可手填 H，也可**取两端平面高差**。
+                        坡度永远是派生量（拉长路径就变缓），转角处自动铺方形休息平台。
+                      </p>
+                      <div className="mini-btns">
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          title="沿最后一个方向再延一段（路径变长 ⇒ 坡度变缓）"
+                          onClick={() => {
+                            const last = path[path.length - 1];
+                            const prev = path[path.length - 2];
+                            const dx = last && prev ? last.x - prev.x : 0;
+                            const dz = last && prev ? last.z - prev.z : 1;
+                            const len = Math.hypot(dx, dz) || 1;
+                            patchPath([
+                              ...path,
+                              {
+                                id: newId(),
+                                x: last.x + (dx / len) * 2,
+                                z: last.z + (dz / len) * 2,
+                              },
+                            ]);
+                          }}
+                        >
+                          ＋ 延长
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          title="在最长的边上插一个中点；再把它拖开就是拐弯"
+                          onClick={() => {
+                            let at = 1;
+                            let best = -1;
+                            for (let i = 1; i < path.length; i += 1) {
+                              const l = Math.hypot(
+                                path[i].x - path[i - 1].x,
+                                path[i].z - path[i - 1].z,
+                              );
+                              if (l > best) {
+                                best = l;
+                                at = i;
+                              }
+                            }
+                            if (!path[at] || !path[at - 1]) return;
+                            const a = path[at - 1];
+                            const b = path[at];
+                            patchPath([
+                              ...path.slice(0, at),
+                              { id: newId(), x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 },
+                              ...path.slice(at),
+                            ]);
+                          }}
+                        >
+                          ＋ 中间插点
+                        </button>
+                      </div>
+                      {/* 路径点**默认折叠**：手绘 / 螺旋出来的楼梯动辄几十个点，全展开会把面板
+                          撑成一条长龙（行内还会换行、数字框被挤出屏幕）。这里用原生 `<details>`，
+                          零 JS、零状态 —— 要看细节点一下标题即可。 */}
+                      <details className="stair-points">
+                        <summary>路径点（{path.length}）</summary>
+                        {path.map((p, i) => (
+                        <div key={p.id} className="mini-btns pt-row">
+                          <span className="node-label">#{i + 1}</span>
+                          {(["x", "z"] as const).map((axis) => (
+                            <input
+                              key={axis}
+                              type="number"
+                              step={0.5}
+                              className="pt-num"
+                              title={axis.toUpperCase()}
+                              value={Number(p[axis].toFixed(2))}
+                              onChange={(event) =>
+                                patchPath(
+                                  path.map((q, k) =>
+                                    k === i ? { ...q, [axis]: Number(event.target.value) } : q,
+                                  ),
+                                )
+                              }
+                            />
+                          ))}
+                          {path.length > 2 ? (
+                            <button
+                              type="button"
+                              className="ghost-button"
+                              onClick={() => patchPath(path.filter((_, k) => k !== i))}
+                            >
+                              删除
+                            </button>
+                          ) : null}
+                        </div>
+                        ))}
+                      </details>
+                      <div className="mini-btns">
+                        <span className="node-label">螺旋</span>
+                        <input
+                          type="number"
+                          step={0.5}
+                          className="pt-num"
+                          title="螺旋半径（米）"
+                          value={helixRadius}
+                          onChange={(event) => setHelixRadius(Number(event.target.value))}
+                        />
+                        <input
+                          type="number"
+                          step={0.25}
+                          className="pt-num"
+                          title="圈数"
+                          value={helixTurns}
+                          onChange={(event) => setHelixTurns(Number(event.target.value))}
+                        />
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          title="按半径与圈数生成一条圆路径（生成后就是普通路径，可继续拖点）"
+                          onClick={() => patchPath(helixStairPath(object, helixRadius, helixTurns))}
+                        >
+                          生成螺旋路径
+                        </button>
+                      </div>
+
+                      <div className="mini-btns">
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          title="把总高设成『终点处支撑面顶面 − 起点处支撑面顶面』——连接有高低差的两层"
+                          onClick={() =>
+                            updateAsset(object.id, {
+                              footprint: { ...object.footprint, h: Math.max(0.1, planeH) },
+                            })
+                          }
+                        >
+                          H ← 取两端平面高差（当前 {planeH.toFixed(2)}m）
+                        </button>
+                      </div>
+                      <p className="hint">
+                        宽 {object.footprint.w.toFixed(1)}m × 总高 {object.footprint.h.toFixed(1)}m、
+                        路径水平长 {runLen.toFixed(2)}m ⇒ 坡度 {slope.toFixed(1)}°；
+                        占地 {(bounds.maxX - bounds.minX).toFixed(1)} ×{" "}
+                        {(bounds.maxZ - bounds.minZ).toFixed(1)} m
+                      </p>
+                    </>
+                  );
+                })()
+              : null}
+          </SubGroup>
+          ) : null}
           {object.category === "human" ? (
             <SubGroup
               title="Pose（静态基线姿势）"
@@ -754,16 +1062,27 @@ export function Inspector() {
               </button>
             ))}
           </div>
+          <p className="hint">stop = pause then go · smooth = continuous (一镜到底) · cut = allow teleport</p>
+        </div>
+      ) : null}
+
+      {/* MOVE 段的**通用**删除入口 —— 刻意不放进上面那个 handoff 分支：
+          那里只在「该演员有多段 MOVE、形成交接」时才渲染，于是**只有一段 MOVE 的演员
+          根本没有删除入口**（相机有 Delete Move、动作有 Delete Action、相机关键帧有右键删除，
+          唯独 MOVE 段缺位）。放在这里以后，任何被选中的 MOVE 段都能删，与其它三类对齐。 */}
+      {segment ? (
+        <div className="field">
+          <div className="lab">MOVE 段 · {segment.id}</div>
           <div className="mini-btns">
             <button
               type="button"
               className="ghost-button danger-button"
+              title="删除这一段 MOVE（只删路线，不动演员本身；路径点可单独删）"
               onClick={() => deleteSegment(segment.id)}
             >
-              Delete Leg
+              删除这段 MOVE
             </button>
           </div>
-          <p className="hint">stop = pause then go · smooth = continuous (一镜到底) · cut = allow teleport</p>
         </div>
       ) : null}
 
@@ -889,6 +1208,263 @@ export function Inspector() {
           />
         ) : null}
       </div>
+
+      {/* 垂直弧线（跳跃 / 落差 / 攀爬）—— Phase 4。只在选中 MOVE 段且主体会动时出现。 */}
+      {arcInfo ? (
+        <div className="field">
+          <div className="lab">垂直弧线 · 跳跃 / 落差</div>
+          <p className="hint">
+            本段高差 <b>{arcInfo.dh >= 0 ? "+" : ""}{arcInfo.dh.toFixed(2)}m</b>、水平跨度{" "}
+            <b>{arcInfo.dx.toFixed(2)}m</b>。判定：{GAP_LABELS[arcInfo.kind]}。
+            {arcInfo.kind === "jump"
+              ? ` 在原地能跳 ${arcInfo.loco.maxJumpHeight.toFixed(2)}m、平地助跑跳远 ${arcInfo.loco.maxJumpReach.toFixed(2)}m 的前提下，这一点在包络内，可用抛物线跳过。`
+              : arcInfo.kind === "drop"
+                ? " 落差在可接受范围内，可用加速下坠。"
+                : arcInfo.kind === "climb"
+                  ? ` 高差超过跳跃高度但在攀爬能力 ${arcInfo.loco.maxClimbHeight.toFixed(2)}m 内，可贴墙攀爬。`
+                  : arcInfo.kind === "blocked"
+                    ? " ⚠ 超出该主体能力，走不过去也跳不过去。"
+                    : ""}
+          </p>
+          <div className="row">
+            <button
+              type="button"
+              className={`ghost-button${arcInfo.arc?.mode === "parabola" ? " on" : ""}`}
+              onClick={() => {
+                if (!segment) return;
+                if (arcInfo.arc?.mode === "parabola") {
+                  setSegmentArc(segment.id, null);
+                } else {
+                  const corrected = checkJumpArc({
+                    dh: arcInfo.dh,
+                    dx: arcInfo.dx,
+                    apex: Math.max(arcInfo.dh, Math.min(arcInfo.loco.maxJumpHeight, arcInfo.dh + 0.3)),
+                    loco: arcInfo.loco,
+                    speedRatio: arcInfo.speedRatio,
+                  });
+                  setSegmentArc(segment.id, { mode: "parabola", apex: corrected.apex });
+                }
+              }}
+            >
+              {arcInfo.arc?.mode === "parabola" ? "✕ 取消跳跃" : "⤴ 改为跳跃"}
+            </button>
+            <button
+              type="button"
+              className={`ghost-button${arcInfo.arc?.mode === "fall" ? " on" : ""}`}
+              disabled={arcInfo.dh >= 0}
+              onClick={() => {
+                if (!segment) return;
+                setSegmentArc(segment.id, arcInfo.arc?.mode === "fall" ? null : { mode: "fall" });
+              }}
+            >
+              {arcInfo.arc?.mode === "fall" ? "✕ 取消下坠" : "⤵ 改为下坠"}
+            </button>
+            {arcInfo.loco.maxClimbHeight > 0 ? (
+              <button
+                type="button"
+                className={`ghost-button${arcInfo.arc?.mode === "climb" ? " on" : ""}`}
+                disabled={arcInfo.dh <= 0}
+                onClick={() => {
+                  if (!segment) return;
+                  setSegmentArc(segment.id, arcInfo.arc?.mode === "climb" ? null : { mode: "climb" });
+                }}
+              >
+                {arcInfo.arc?.mode === "climb" ? "✕ 取消攀爬" : "🧗 改为攀爬"}
+              </button>
+            ) : null}
+          </div>
+          {arcInfo.arc?.mode === "parabola" ? (
+            <Field label="弧顶高度（相对起跳点）">
+              <input
+                type="range"
+                min={Math.max(0, arcInfo.dh)}
+                max={arcInfo.loco.maxJumpHeight}
+                step={0.05}
+                value={arcInfo.arc.apex ?? 0}
+                onChange={(event) => {
+                  if (!segment) return;
+                  setSegmentArc(segment.id, {
+                    mode: "parabola",
+                    apex: Number(event.target.value),
+                  });
+                }}
+              />
+              <span className="mono">{(arcInfo.arc.apex ?? 0).toFixed(2)}m / 上限 {arcInfo.loco.maxJumpHeight.toFixed(2)}m</span>
+            </Field>
+          ) : null}
+          {arcInfo.check && !arcInfo.check.ok ? (
+            <p className="hint" style={{ color: "var(--danger, #ff7b91)" }}>
+              {arcInfo.check.issues.map((i) => i.message).join("；")}
+            </p>
+          ) : null}
+          {/* 助跑（docs/3d/02 §5）：把"起跳瞬时速度"这个原本看不见的数摆出来 ——
+              它既缩放有效跳远，也是"想跳更远就在前面留一段助跑"这个手法的抓手。 */}
+          {arcInfo.arc || arcInfo.kind === "jump" ? (
+            <p className="hint">
+              起跳瞬时速度 <b>{(arcInfo.speedRatio * 100).toFixed(0)}%</b> 跑步速度
+              （{(arcInfo.speedRatio * RUN_SPEED).toFixed(2)} m/s） → 有效跳远按{" "}
+              <b>{(speedScale(arcInfo.speedRatio) * 100).toFixed(0)}%</b> 计。
+            </p>
+          ) : null}
+          {arcInfo.check?.needsRunup ? (
+            <p className="hint" style={{ color: "var(--warn, #f0a35a)" }}>
+              ⚠ 起跳前没有助跑 —— 站着跳只能跳到一半远（现在只有{" "}
+              {(arcInfo.speedRatio * 100).toFixed(0)}% 速度）。建议在跳跃前留一段助跑，
+              或把这一段的速度曲线开头改成近线性。
+            </p>
+          ) : null}
+          <JumpEnvelope loco={arcInfo.loco} dh={arcInfo.dh} dx={arcInfo.dx} />
+        </div>
+      ) : null}
+
+      {/* 可达性（Phase 5）—— 逐处列出问题 + 一键修复。
+          判定来自 `engine/reach.ts`，与画布上的分段着色同源。 */}
+      {segment && reachSpans.length > 0 && reachLoco ? (
+        <div className="field">
+          <div className="lab">可达性 · {reachSpans.length} 处需要处理</div>
+          {reachSpans.map((span, index) => {
+            const style = REACH_STYLES[span.tier];
+            const loco = reachLoco;
+            const blocker = span.blockerId
+              ? state.objects.find((o) => o.id === span.blockerId)
+              : undefined;
+            const climbable =
+              span.dh > 0 && loco.maxClimbHeight > 0 && span.dh <= loco.maxClimbHeight + 1e-6;
+            // 降低落差：把挡路那块的高度降到"跳得过去"为止（保留它作为障碍的存在感）。
+            const lowerH = blocker
+              ? Math.max(0.1, Math.round((span.fromY + loco.maxJumpHeight - objectBottom(blocker)) * 100) / 100)
+              : 0;
+            const lowerHint = blocker
+              ? `把「${objectDisplayName(blocker)}」从 ${objectTop(blocker).toFixed(2)}m 降到 ${lowerH.toFixed(2)}m 或以下`
+              : "";
+            return (
+              <div key={`${segment.id}_${index}`} className="reach-row">
+                <div className="reach-head" style={{ color: style.color }}>
+                  <span className="reach-glyph">{style.glyph}</span>
+                  {style.label}
+                  <span className="mono">
+                    {span.dh >= 0 ? "+" : "−"}
+                    {Math.abs(span.dh).toFixed(2)}m · 跨度 {span.dx.toFixed(2)}m
+                  </span>
+                </div>
+                <p className="hint">{span.message}</p>
+                <div className="row">
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={() => {
+                      const arc = previewArc(span.kind, span.dh, loco);
+                      if (arc) setSegmentArc(segment.id, arc);
+                    }}
+                  >
+                    ⤴ 生成弧线
+                  </button>
+                  {climbable ? (
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      onClick={() => setSegmentArc(segment.id, { mode: "climb" })}
+                    >
+                      🧗 改为攀爬
+                    </button>
+                  ) : null}
+                  {blocker ? (
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      title={lowerHint}
+                      onClick={() =>
+                        updateAsset(blocker.id, { footprint: { ...blocker.footprint, h: lowerH } })
+                      }
+                    >
+                      ⬇ 降低落差
+                    </button>
+                  ) : null}
+                  {blocker ? (
+                    <button
+                      type="button"
+                      className={`ghost-button${blocker.prefer === "walk-around" ? " on" : ""}`}
+                      title={
+                        blocker.prefer === "walk-around"
+                          ? `「${objectDisplayName(blocker)}」当前强制绕行，点此恢复`
+                          : `给「${objectDisplayName(blocker)}」打上绕行标记，路线会重新绕开它`
+                      }
+                      onClick={() =>
+                        updateAsset(blocker.id, {
+                          prefer: blocker.prefer === "walk-around" ? "auto" : "walk-around",
+                        })
+                      }
+                    >
+                      {blocker.prefer === "walk-around" ? "↩ 取消绕行" : "↷ 改为绕行"}
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    title="在这一处加一个路点，可以把它拖到别处绕过去"
+                    onClick={() => addPathPoint(segment.id, span.mid[0], span.mid[2])}
+                  >
+                    ＋ 加落脚点
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+
+      {/* 全局可达性体检（docs/3d/03 §9）：一次扫全场景，点条目直达。 */}
+      {showInspector ? (
+        <div className="field">
+          <div className="lab">全局体检</div>
+          <button
+            type="button"
+            className={`ghost-button${healthOpen ? " on" : ""}`}
+            onClick={() => setHealthOpen((v) => !v)}
+          >
+            {healthOpen
+              ? `收起 · ${health.length} 处`
+              : "🔍 扫描全场景可达性"}
+          </button>
+          {healthOpen ? (
+            health.length === 0 ? (
+              <p className="hint">全部可走 —— 没有跳跃 / 攀爬 / 不可达的地方。</p>
+            ) : (
+              <>
+                <p className="hint">
+                  {[1, 2, 3, 6]
+                    .map((tier) => {
+                      const n = health.filter((f) => f.tier === tier).length;
+                      return n > 0 ? `${n} 处${REACH_STYLES[tier as 1 | 2 | 3 | 6].label}` : "";
+                    })
+                    .filter(Boolean)
+                    .join(" · ")}
+                </p>
+                {health.map((finding) => {
+                  const style = REACH_STYLES[finding.tier];
+                  return (
+                    <button
+                      key={`${finding.segmentId}_${finding.index}`}
+                      type="button"
+                      className="health-row"
+                      onClick={() => selectItem(finding.segmentId)}
+                    >
+                      <span style={{ color: style.color }}>
+                        {style.glyph} {style.label}
+                      </span>
+                      <span className="mono">
+                        {objectDisplayName({ id: finding.objectId, name: finding.objectName })} ·{" "}
+                        {finding.timeStart.toFixed(1)}s
+                      </span>
+                      <span className="hint">{finding.message}</span>
+                    </button>
+                  );
+                })}
+              </>
+            )
+          ) : null}
+        </div>
+      ) : null}
 
       {camera ? (
         <>
@@ -1117,9 +1693,23 @@ export function Inspector() {
               <Field label="Kind">
                 <select
                   value={camera.kind ?? "ground"}
-                  onChange={(event) =>
-                    updateCamera(camera.id, { kind: event.target.value as "ground" | "drone" })
-                  }
+                  onChange={(event) => {
+                    const kind = event.target.value as "ground" | "drone";
+                    // 切到无人机时**顺手补一个取景目标**：原来这是 addbar 那个「Drone」按钮干的事
+                    // （新相机没有目标 = "没看任何东西"）。已经有目标就不动 —— 那是作者的选择。
+                    const needTarget = kind === "drone" && !camera.targetId;
+                    updateCamera(camera.id, {
+                      kind,
+                      ...(needTarget
+                        ? {
+                            targetId:
+                              state.objects.find((o) => o.type === "actor")?.id ??
+                              state.objects[0]?.id ??
+                              "",
+                          }
+                        : {}),
+                    });
+                  }}
                 >
                   <option value="ground">Ground</option>
                   <option value="drone">Drone</option>
@@ -1208,6 +1798,33 @@ export function Inspector() {
               </Field>
               <p className="hint">
                 跟随阻尼：相机对目标瞬变（转向 / 绕障让位 / 扭动）的响应滞后一点；瞬变若很快消失则被忽略。0 = 完全跟手，越大越「拖」。可在单个运镜段覆盖。
+              </p>
+              <Field label="自动对焦 Auto Focus">
+                <button
+                  type="button"
+                  className={`toggle${camera.autoFocus !== false ? " on" : ""}`}
+                  title="无意图主体时（自由 PATH 的固定方向 / 沿轨迹等）自动对焦到画面内最靠近构图中心的演员；关掉则沿用镜头 target。"
+                  onClick={() =>
+                    updateCamera(camera.id, { autoFocus: camera.autoFocus === false })
+                  }
+                >
+                  {camera.autoFocus !== false ? "自动对焦" : "锁定对焦目标"}
+                </button>
+              </Field>
+              <Field label="跟跳时相机随高度跟随 Follow Jump">
+                <button
+                  type="button"
+                  className={`toggle${camera.followJumpHeight !== false ? " on" : ""}`}
+                  onClick={() =>
+                    updateCamera(camera.id, { followJumpHeight: camera.followJumpHeight === false })
+                  }
+                >
+                  {camera.followJumpHeight !== false ? "跟随（默认）" : "锁在起跳高度"}
+                </button>
+              </Field>
+              <p className="hint">
+                关掉后：目标跳起 / 落差离地期间，**相机保持起跳高度的水平轨道、不跟高度** ——
+                像真实跟拍，人冲出画框又落回来。这是**电影语言**层面的选择，不是参数调优。
               </p>
             </SubGroup>
           </div>
@@ -1737,7 +2354,14 @@ export function Inspector() {
                               {group === "motion" ? "运动 Motion" : "镜头 Lens"}
                             </div>
                             {CAMERA_CHANNELS.filter(
-                              (channel) => KEY_CHANNEL_META[channel].group === group,
+                              (channel) =>
+                                KEY_CHANNEL_META[channel].group === group &&
+                                // PATH 不走 placeCamera 通道体系：只保留与轨迹无关的通道（焦距 / 荷兰角 / 平面摇 / 俯仰）。
+                                (move.type !== "PATH" ||
+                                  channel === "lensMm" ||
+                                  channel === "roll" ||
+                                  channel === "panDeg" ||
+                                  channel === "tiltDeg"),
                             ).map((channel) => {
                               const meta = KEY_CHANNEL_META[channel];
                               const value = activeKey[channel];

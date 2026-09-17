@@ -80,7 +80,10 @@ button:hover {
   display: grid;
   /* 三栏：左 对象列表(窄, 仅上半) / 中 视口(上半) / 右 检视器(整列, 满高)。
      底部整条时间轴横跨左栏下方与中间视口下方；右侧整列都给检视器（承载时间轴片段等更多信息）。
-     两行顶部为场景 tab 26px + 操作栏 38px；第 3 行为三栏主体(1fr)，第 4 行 264px 放时间轴。 */
+     两行顶部为场景 tab 30px + 操作栏 34px；第 3 行为三栏主体(1fr)，第 4 行 264px 放时间轴。
+    顶栏 30px（而非 26px）是为了给横向滚动条留出高度：场景页多 / 名字长时 tab 会横向溢出，
+    26px 装不下「tab + 滚动条」，滚动条会压住 tab 文字（见 .tabs 的滚动条样式）。
+    操作栏 34px：控件 26px ⇒ 上下各 4px 留白，与 tab 行「22px 控件 + 4px 留白」同一套纵向节奏。 */
   /* 首列宽度由 --left-w 驱动：抓手拖动 / 收起展开都只改这一个变量。
      同时用 min() 兜底：左栏最多只到「窗口 - 右栏 - 视口最小宽」，否则三栏总和超过窗口、
      网格整体右溢，视口右下角的悬浮工具条会被顶出画布、被主区裁掉（它必须原地不动）。 */
@@ -89,7 +92,11 @@ button:hover {
       max(var(--rail-w), calc(100% - var(--right-w) - var(--center-min-w)))
     )
     minmax(var(--center-min-w), 1fr) var(--right-w);
-  grid-template-rows: 26px 38px minmax(200px, 1fr) 264px;
+  /* 第 4 行 = 时间轴高度。它是「给画布让高度」的唯一旋钮：画布是第 3 行 minmax(200px,1fr)，
+     时间轴每矮 1px，画布就高 1px。这里从 264 → 216（矮 48px），视觉密度靠下面 .tlbar 一起收。 */
+  /* 第 4 行 = 时间轴高度。它是「给画布让高度」的唯一旋钮：画布是第 3 行 minmax(200px,1fr)，
+     时间轴每矮 1px，画布就高 1px。216 → 176：行高与顶栏收过之后，这个高度仍够看 5 条轨道。 */
+  grid-template-rows: 30px 34px minmax(200px, 1fr) 176px;
   /* 收起 / 展开走带回弹的缓动（末端轻微过冲）；拖动时由 .is-resizing 关掉动画以便跟手 */
   transition: grid-template-columns 0.44s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
@@ -136,7 +143,7 @@ header {
   white-space: nowrap;
 }
 
-/* —— 片场 / 场景页 tab 栏（压薄到 26px）—— */
+/* —— 片场 / 场景页 tab 栏（压薄到 30px，含薄滚动条空间）—— */
 .scene-tabs {
   grid-column: 1 / -1;
   grid-row: 1;
@@ -156,16 +163,39 @@ header {
   padding: 2px 6px;
   font-size: 10px;
   width: 120px;
+  flex: 0 0 auto;
 }
 .stage-name:focus {
   border-color: #67a7ff;
 }
 
 .tabs {
+  /* 占满 stage-name 之后的剩余宽度，内部横向滚动 —— 而不是把整行撑宽顶出网格。 */
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 4px;
   overflow-x: auto;
+  overflow-y: hidden;
+  /* 场景页变多 / 名字变长时横向滚动。滚动条压薄成 6px 半透明条，
+     否则原生滚动条会在 30px 行里吃掉一块、把 tab 文字盖住。 */
+  scrollbar-width: thin;
+  scrollbar-color: #3a4652 transparent;
+  padding-bottom: 2px;
+}
+.tabs::-webkit-scrollbar {
+  height: 6px;
+}
+.tabs::-webkit-scrollbar-track {
+  background: transparent;
+}
+.tabs::-webkit-scrollbar-thumb {
+  background: #3a4652;
+  border-radius: 3px;
+}
+.tabs::-webkit-scrollbar-thumb:hover {
+  background: #4d5b69;
 }
 
 .tab {
@@ -189,6 +219,11 @@ header {
 }
 .tab-label {
   padding: 0 2px;
+  /* 长场景名不再把单个 tab 撑到吃掉整条栏：超过就省略号，完整名在 title 里。 */
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .tab-rename {
   width: 84px;
@@ -715,8 +750,10 @@ header {
 /* 场景树行内图标（锁 / 删除）比工具栏更小，适配紧凑单行 */
 .obj-actions .lock-icon-btn,
 .obj-actions .obj-del {
-  width: 16px;
-  height: 16px;
+  /* 16 → 14：这一对角标按钮就是对象行的**行高地板**，
+     不收它们，字号再小行高也不会跟着矮。 */
+  width: 14px;
+  height: 14px;
   border-radius: 3px;
 }
 /* 统一的锁角标按钮：工具栏 / 场景树 / 资产面板共用，只显示图标 */
@@ -934,6 +971,12 @@ canvas {
   color: #55d88a;
 }
 
+/* 高度手柄的标高读数：与手柄同色（暖橙），让"这是可拖的东西"一眼可见。 */
+.height-readout {
+  color: #f0a35a;
+  font-variant-numeric: tabular-nums;
+}
+
 /* ------------------------------------------------------- Radial ring */
 
 .radialRing {
@@ -1052,15 +1095,33 @@ canvas {
   border-top: 1px solid #27313b;
   background: #0c1117;
   display: grid;
-  grid-template-rows: 38px minmax(0, 1fr);
+  /* 顶栏从 38 → 30：那一行是"控制条"，不是内容，收掉它等于把高度还给轨道区。 */
+  grid-template-rows: 30px minmax(0, 1fr);
 }
 
 .tlbar {
   display: flex;
   align-items: center;
-  gap: 7px;
-  padding: 5px 8px;
+  gap: 5px;
+  padding: 3px 8px;
   border-bottom: 1px solid #27313b;
+  /* 整条顶栏缩一号：字号、控件内边距一起收（上面的 30px 行高就是这个密度定出来的）。 */
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+/* 顶栏里的控件也跟着缩 —— 它们各自写了 font-size，用后代选择器统一压住。
+   `.timecode` 是读数，留略大一点便于扫。 */
+.tlbar button,
+.tlbar input,
+.tlbar select,
+.tlbar label,
+.tlbar span {
+  font-size: 11px;
+}
+
+.tlbar .timecode {
+  font-size: 13px;
 }
 
 /* 时间轴顶栏的「Scene Duration (s)」配置 */
@@ -1107,7 +1168,8 @@ canvas {
   border-color: var(--ap-blue);
   box-shadow: var(--ap-ring);
 }
-/* 片长短于内容：输入框描橙边 + 一枚可点击的提示，点一下就把片长对齐到内容末尾。 */
+/* 片长短于内容：输入框描橙边 + 两枚提示：主按钮「定位」带你去那一条，
+   「对齐片长」把片长拉到内容末尾。 */
 .dur-field.is-overflow input[type="number"] {
   border-color: rgba(255, 159, 10, 0.6);
 }
@@ -1127,6 +1189,14 @@ canvas {
   color: #ffe4b8;
   background: rgba(255, 159, 10, 0.3);
   border-color: rgba(255, 159, 10, 0.6);
+}
+/* 同款外观、但它是"说明"不是按钮（拖动撞到片长时那句话）：不要手型、不要 hover 反馈。 */
+.dur-warn.as-note,
+.dur-warn.as-note:hover {
+  cursor: default;
+  color: #ffcf8a;
+  background: rgba(255, 159, 10, 0.16);
+  border-color: rgba(255, 159, 10, 0.35);
 }
 
 .timecode {
@@ -1177,14 +1247,15 @@ canvas {
 }
 
 .row {
-  height: 36px;
+  /* 行高 36 → 26：轨道行更密，timebar 整体更矮（给画布让空间）。 */
+  height: 26px;
   display: grid;
   grid-template-columns: 190px 1fr auto;
   border-bottom: 1px solid #1d2630;
 }
 
 .label {
-  padding: 10px 8px;
+  padding: 5px 8px;
   border-right: 1px solid #27313b;
   color: #95a4b4;
   /* 过长 id 截断为省略号，不再侵占右侧轨道 */
@@ -1222,12 +1293,13 @@ canvas {
 
 .clip {
   position: absolute;
-  top: 6px;
-  height: 24px;
+  top: 3px;
+  height: 20px;
   border: 1px solid #55718b;
   background: #1b2c3c;
   border-radius: 3px;
-  padding: 5px 7px;
+  padding: 2px 6px;
+  font-size: 10.5px;
   white-space: nowrap;
   overflow: hidden;
   user-select: none;
@@ -1253,6 +1325,57 @@ canvas {
 .clip.action {
   background: #3a2a18;
   border-color: #c79247;
+}
+
+/* ---- 离地可视化（Phase 7 §12）：mini 弓形 + 底纹 ----
+   只在真的离过地的移动片段上出现（来源 = pathHeightAt − standingHeightFor），
+   平地 / planar 时没有这两个元素，时间轴与扩展前逐像素一致。 */
+.clip .flight-stripe {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: repeating-linear-gradient(
+    115deg,
+    rgba(85, 216, 138, 0.16) 0 2px,
+    transparent 2px 7px
+  );
+}
+.clip .flight-arc {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 10px;
+  pointer-events: none;
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+}
+/* 顶点拖拽把手（Phase 7 §12）：坐在弓形顶点（弧线底边 10px 区间的顶端）上的小圆点。
+   pointer-events:auto 让它可抓，stopPropagation 让它不触发整条片段拖动。 */
+.clip .flight-arc-handle {
+  position: absolute;
+  left: 50%;
+  bottom: 5px;
+  width: 9px;
+  height: 9px;
+  margin-left: -4.5px;
+  border-radius: 50%;
+  background: #55d88a;
+  border: 1px solid #0c1a12;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+  cursor: ns-resize;
+  pointer-events: auto;
+  z-index: 3;
+}
+.clip .flight-arc-handle:hover {
+  background: #7befac;
+}
+.clip .flight-arc-handle:active {
+  background: #9af3c4;
+}
+/* 片段文字要压在底纹之上。 */
+.clip.segment .flight-stripe + * {
+  position: relative;
 }
 
 /* 整队动作带：一条带子代表整队全体成员的动作。
@@ -1834,6 +1957,80 @@ pre {
   flex-basis: 100%;
 }
 
+/* 阵列（通用操作）：与「模板」同排常驻；常态虚线描边，展开时实心点亮。
+   它不是可拖拽资产，所以光标是 pointer 而不是继承 .add-icon 的 grab。 */
+.add-icon.arr-btn {
+  border-style: dashed;
+  border-color: rgba(10, 132, 255, 0.5);
+  color: #6cb2ff;
+  cursor: pointer;
+}
+.add-icon.arr-btn:hover:not(:disabled) {
+  background: rgba(10, 132, 255, 0.14);
+  border-color: var(--ap-blue);
+  color: #fff;
+}
+.add-icon.arr-btn.on {
+  background: var(--ap-blue);
+  border-color: transparent;
+  border-style: solid;
+  color: #fff;
+}
+.add-icon.arr-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+/* 置灰时别再被 .add-icon:hover 点亮：禁用就该是禁用的样子。 */
+.add-icon.arr-btn:disabled:hover {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.16);
+  color: var(--ap-text-3);
+}
+
+/* 阵列参数弹层：整行铺开（与 .tpl-picker 同一手法），控件横向排布 ——
+   弹层挂在画布顶部的操作条里，纵向堆叠会把整条栏撑得很高。 */
+.arr-panel {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  margin-top: 4px;
+  padding: 9px 11px;
+  border: 1px solid var(--ap-sep);
+  border-radius: var(--ap-r-md);
+  background: var(--ap-surface);
+}
+.arr-title {
+  font: 600 10px/1 var(--ap-font);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ap-text-2);
+}
+.arr-kinds {
+  display: inline-flex;
+  gap: 5px;
+}
+.arr-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font: 11px/1 var(--ap-font);
+  color: var(--ap-text-2);
+  white-space: nowrap;
+}
+.arr-field input[type="range"] {
+  width: 92px;
+}
+/* 「＋ 阵列 N 份」推到最后：参数在左、执行在右，扫一眼就知道主操作在哪。 */
+.arr-go {
+  margin-left: auto;
+}
+.arr-note {
+  flex-basis: 100%;
+  margin: 0;
+}
+
 /* 从模板新建机位：分类选择器 */
 .tpl-open {
   width: 100%;
@@ -2306,6 +2503,20 @@ pre {
   height: auto;
 }
 
+/* 跳跃包络图（Phase 4）：与 ease-wrap 同构的内联 SVG，无需图表库。 */
+.jump-envelope {
+  margin-top: 8px;
+  background: #0a1016;
+  border: 1px solid #26313b;
+  border-radius: 4px;
+}
+
+.jump-envelope svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
 .eread {
   font-family: Consolas, Menlo, monospace;
   color: #8ca1b4;
@@ -2445,6 +2656,99 @@ pre {
   background: #0a1016;
 }
 
+/* 可达性徽标（Phase 5）：与 handoff 徽标同族，但更宽（要放「⌒ 需跳跃」四个字），
+   且颜色 / 边框色由档位内联给定 —— 颜色是"哪一档"，字形是"不靠颜色也能读"的冗余。 */
+.reach-badge {
+  height: 20px;
+  padding: 0 7px;
+  border: 1.5px solid #f0a35a;
+  border-radius: 10px;
+  background: #0a1016d9;
+  color: #f0a35a;
+  font-family: var(--ap-font, inherit);
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  cursor: pointer;
+  backdrop-filter: blur(2px);
+}
+.reach-badge:hover {
+  background: #0a1016;
+}
+
+/* 拖拽即时反馈的 tooltip（docs/3d/03 §6）。
+   与徽标同族但**不响应指针** —— 它跟着光标走，抢走事件会让拖拽自己中断。
+   刻意不加"禁止"语义（不用 not-allowed 光标）：落位是允许的，这里只是报告。 */
+.reach-tip {
+  display: inline-block;
+  padding: 4px 8px;
+  border: 1.5px solid #f0a35a;
+  border-radius: 4px;
+  background: #0a1016f2;
+  font-family: var(--ap-font, inherit);
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: nowrap;
+  backdrop-filter: blur(2px);
+}
+
+/* Inspector 可达性面板：一处问题一行，配色与画布上的线同档同色。 */
+.reach-row {
+  margin: 7px 0 9px;
+  padding: 7px 8px 8px;
+  border-left: 2px solid #26313b;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.015);
+}
+.reach-row .reach-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.reach-row .reach-glyph {
+  font-size: 13px;
+  line-height: 1;
+}
+.reach-row .mono {
+  margin-left: auto;
+  color: var(--ap-text-3);
+  font-size: 10px;
+}
+.reach-row p.hint {
+  margin: 4px 0 6px;
+}
+.health-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  margin: 5px 0;
+  padding: 6px 8px;
+  border: 1px solid #26313b;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.015);
+  color: var(--ap-text, #e6edf3);
+  font-family: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+.health-row:hover {
+  border-color: #3a4a5a;
+  background: rgba(255, 255, 255, 0.04);
+}
+.health-row .mono {
+  color: var(--ap-text-3);
+  font-size: 10px;
+}
+.health-row .hint {
+  margin: 0;
+  font-size: 10px;
+}
+
 /* Selected toggle button state (camera view / handoff mode) */
 .ghost-button.on {
   border-color: #67a7ff;
@@ -2577,7 +2881,9 @@ pre {
   font-family: var(--ap-mono);
 }
 
-/* ---- 顶栏（毛玻璃） ---- */
+/* ---- 顶栏（毛玻璃 + 与场景 tab 成套的控件规格）----
+   与第一行 tab 行共用同一套：11.5px 正文 / 圆角小控件 / 4px 纵向节奏。
+   行高 34px，控件 26px（上下各 4px）；brand 12px/600，版本号做成小胶囊。 */
 header {
   background: rgba(28, 28, 30, 0.82);
   backdrop-filter: blur(20px) saturate(180%);
@@ -2585,47 +2891,186 @@ header {
   border-bottom: 1px solid var(--ap-sep);
 }
 .brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   color: var(--ap-text);
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font: 600 12px/1 var(--ap-font);
+  letter-spacing: 0.08em;
 }
 .brand span {
   color: var(--ap-text-3);
-  font-weight: 500;
+  font: 600 10px/1 var(--ap-font);
+  letter-spacing: 0.02em;
+  padding: 3px 6px;
+  background: var(--ap-surface-2);
+  border-radius: 999px;
+}
+.actions {
+  gap: 8px;
+}
+/* 操作栏按钮：与场景 tab 同族的圆角小控件，统一 26px 高、11.5px 字 */
+header .actions button {
+  height: 26px;
+  padding: 0 11px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font: 500 11.5px/1 var(--ap-font);
 }
 .render-status {
+  font: 11.5px/1 var(--ap-font);
   color: var(--ap-text-2);
 }
+/* ---- 场景页 tab 栏（圆角胶囊分段控件）----
+   旧基础样式是 10px 微控件 + 半套 Apple 覆盖，这里整套接管：
+   统一 11.5px 字号 / 22px 高度 / 8px 圆角，动作按钮默认隐身，减少视觉噪声。 */
 .scene-tabs {
+  gap: 8px;
+  padding: 0 8px 0 10px;
   border-bottom: 1px solid var(--ap-sep);
   background: rgba(28, 28, 30, 0.6);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
 }
-.tab,
-.tab-add {
+
+/* 片场名：与 tab 同高的低调输入框 */
+.stage-name {
+  width: 136px;
+  height: 22px;
+  padding: 0 9px;
+  background: var(--ap-surface-2);
+  border: 1px solid transparent;
+  border-radius: var(--ap-r-sm);
+  color: var(--ap-text);
+  font: 500 11.5px/1 var(--ap-font);
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+.stage-name::placeholder {
+  color: var(--ap-text-3);
+}
+.stage-name:focus {
+  outline: none;
+  border-color: var(--ap-blue);
+  box-shadow: var(--ap-ring);
+}
+
+/* tab 行：去掉底部留白，滚动条压薄成半透明条 */
+.tabs {
+  gap: 4px;
+  padding-bottom: 0;
+  scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
+}
+.tabs::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+}
+.tabs::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+/* 单个场景页：圆角胶囊；激活页用亮一档的实底 + 高光描边区分于 hover */
+.tab {
+  height: 22px;
+  padding: 0 4px 0 10px;
+  gap: 1px;
   background: transparent;
   border: 1px solid transparent;
   border-radius: var(--ap-r-sm);
   color: var(--ap-text-2);
+  font: 500 11.5px/1 var(--ap-font);
+  transition: background 0.16s ease, color 0.16s ease;
 }
-.tab:hover,
-.tab-add:hover {
-  background: var(--ap-surface-2);
+.tab:hover {
+  background: rgba(255, 255, 255, 0.06);
   color: var(--ap-text);
 }
 .tab.active {
-  background: var(--ap-surface-2);
+  background: var(--ap-surface-3);
   color: var(--ap-text);
-  border-color: transparent;
+  font-weight: 600;
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.08);
 }
-.stage-name {
-  background: var(--ap-surface-2);
+.tab-label {
+  padding: 0 2px;
+  max-width: 180px;
+}
+
+/* 新建 / 重置：与 tab 同高的图标按钮 */
+.tab-add,
+.tab-reset {
+  height: 22px;
+  padding: 0 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
   border: 1px solid transparent;
   border-radius: var(--ap-r-sm);
-  color: var(--ap-text);
-  font: 500 11.5px var(--ap-font);
+  color: var(--ap-text-2);
+  transition: background 0.16s ease, color 0.16s ease;
 }
-.stage-name:focus {
-  border-color: var(--ap-blue);
+.tab-add {
+  font-size: 15px;
+}
+.tab-reset {
+  font-size: 13px;
+  color: var(--ap-text-3);
+}
+.tab-add:hover,
+.tab-reset:hover {
+  background: var(--ap-surface-2);
+  color: var(--ap-text);
+}
+
+/* 行内动作（复制 / 删除）：默认隐身，hover 该页或它是激活页时出现。
+   仍占位 → 不会因为出现 / 消失让 tab 宽度跳动；隐身时禁用命中避免误触。 */
+.tab-dup,
+.tab-del {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--ap-text-3);
+  font-size: 11px;
+  line-height: 1;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.14s ease, background 0.14s ease, color 0.14s ease;
+}
+.tab:hover .tab-dup,
+.tab:hover .tab-del,
+.tab.active .tab-dup,
+.tab.active .tab-del {
+  opacity: 1;
+  pointer-events: auto;
+}
+.tab-dup:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: var(--ap-text);
+}
+.tab-del:hover {
+  background: rgba(255, 69, 58, 0.2);
+  color: var(--ap-red);
+}
+
+/* 改名输入框：嵌在胶囊里 */
+.tab-rename {
+  width: 96px;
+  height: 16px;
+  padding: 0 5px;
+  background: var(--ap-surface);
+  border: 1px solid var(--ap-blue);
+  border-radius: 4px;
+  color: var(--ap-text);
+  font: 500 11.5px/1 var(--ap-font);
+}
+.tab-rename:focus {
+  outline: none;
 }
 
 /* ---- 左右面板 ---- */
@@ -2700,6 +3145,101 @@ header {
 .vf-zoom button:hover {
   border-color: var(--ap-blue);
 }
+
+/* 楼梯路径点：每点**一行、不换行**。
+   面板本来就窄，两个数字框 + 删除键一旦允许换行，行高就会翻倍、
+   数字框还会被挤出可视区（作者截图里的"排版乱"）。这里用 flex 定死：序号固定宽、
+   两个数字框等分剩余宽度、删除键不参与压缩。 */
+.stair-points .pt-row {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.stair-points .pt-row .node-label {
+  flex: 0 0 auto;
+  min-width: 22px;
+}
+
+.stair-points .pt-row .pt-num {
+  flex: 1 1 0;
+  width: auto;
+  min-width: 0;
+}
+
+.stair-points .pt-row .ghost-button {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  white-space: nowrap;
+}
+
+.stair-points > summary {
+  cursor: pointer;
+}
+
+/* 「走上去 / 走下来」选楼梯时的抓手：浮在楼梯上方的可点感叹号。
+   它存在的唯一理由是**让命中不再是"射线 vs 楼梯折线"**（那条链在巨型/弯曲楼梯上会整条落空），
+   所以它必须显眼、可点、有 hover 反馈 —— 看得见就点得中。 */
+.pick-target {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid rgba(255, 214, 120, 0.9);
+  border-radius: 999px;
+  background: rgba(40, 30, 8, 0.86);
+  color: #ffd678;
+  font: 700 16px/1 var(--ap-font, system-ui);
+  cursor: pointer;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+}
+
+.pick-target:hover {
+  border-color: #fff;
+  background: rgba(70, 52, 10, 0.95);
+  color: #fff;
+  transform: scale(1.12);
+}
+
+/* ---- 时间轴片段的左右拖拽把手 ----
+   逻辑本来就有（`Timeline` 里 `<span className="handle l|r">` + `dragModeOf` 按它判左右拉伸），
+   但它们又细又不可见 —— 作者的实际感受是"根本没有把手、抓不到"。这里给它两件事：
+   ① 给足热区（9px 宽，整条边高），② 显形（内嵌一条竖条，hover 变亮）。
+   只动视觉与热区，不动拖动逻辑（改时长仍走 `handleClipMove` 的 mode l/r）。 */
+.clip .handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 9px;
+  cursor: ew-resize;
+  z-index: 3;
+}
+
+.clip .handle.l {
+  left: 0;
+}
+
+.clip .handle.r {
+  right: 0;
+}
+
+.clip .handle::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: 3px;
+  right: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.clip:hover .handle::after {
+  background: rgba(255, 255, 255, 0.6);
+}
 .vf-tool {
   background: var(--ap-surface-2);
   color: var(--ap-text);
@@ -2717,6 +3257,74 @@ header {
   background: var(--ap-blue);
   border-color: var(--ap-blue);
 }
+/* Shift 手势级 3D：**临时**生效。用虚线 + 琥珀色，刻意区别于"开关真的开着"的实心蓝 ——
+   实心蓝会让人以为松手之后它还开着。琥珀色沿用高度读数 .height-readout 的语汇。 */
+.vf-tool.is-temp {
+  background: var(--ap-surface-2);
+  color: #f0a35a;
+  border-color: #f0a35a;
+  border-style: dashed;
+}
+.vf-tool.is-temp:hover {
+  border-color: #f0a35a;
+}
+
+/* 个体级名字开关（眼睛图标）：紧跟场景级「名字」按钮。
+   睁眼 = 显示，斜杠眼 + 变暗 = 隐藏；激活（名字可见）沿用主题蓝，与 .vf-tool.on 同一语汇。 */
+.vf-eye {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 6px;
+}
+.vf-eye svg {
+  display: block;
+}
+.vf-eye.on {
+  color: var(--ap-blue);
+  border-color: var(--ap-blue);
+}
+.vf-eye.is-off {
+  opacity: 0.55;
+}
+/* 禁用态（未选中对象 / 场景接管时）：灰掉且不可点。 */
+.vf-tool:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+/* 画布上方的「Shift 3D 堆叠」提示条。只在平面模式下按住 Shift 时出现。
+   压在画布顶端居中：视线正好落在拖拽的那一块区域，不用移开眼睛找状态。 */
+.shift-stack-badge {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translate(-50%, 0);
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px dashed #f0a35a;
+  background: rgba(28, 28, 30, 0.86);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  font-family: var(--ap-font);
+  font-size: 11px;
+  color: #f6d3a8;
+  pointer-events: none;
+}
+.shift-stack-key {
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid #f0a35a;
+  color: #f0a35a;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+}
+
 .vf-camera {
   background: var(--ap-surface-2);
   color: var(--ap-text);
@@ -2741,10 +3349,21 @@ header {
   color: #ffffff;
 }
 .obj-row .obj {
-  padding-right: 32px;
+  /* 名字（省略号截断）右侧要给**角标**留位，而这个角标是 absolute 浮在右上角的，
+     宽度不会自动从名字里扣 —— 必须按它的实际宽度留：
+       3 个按钮 × 14px（隐藏 / 锁定 / 删除）+ 2 个 3px 间隙 = 48px，
+       再加上 `.obj-actions { right: 2px }` = **50px**，这里留 50px。
+     改角标按钮数量 / 尺寸时，这个值要跟着改（别凭感觉给）。
+     纵向内边距归零 + 行高压紧：行高的**地板**是角标那三颗按钮（现在 14px），
+     所以字号收到 9.5px 之后行高才会真的跟着变矮。 */
+  padding-top: 0;
+  padding-bottom: 0;
+  line-height: 1.25;
+  padding-right: 50px;
 }
 .obj-row .obj-name {
-  font-size: 12.5px;
+  /* 逐轮收窄：12.5 → 10.5 → 9.5。配合下面的零内边距与 14px 角标，整行才真的变矮。 */
+  font-size: 9.5px;
   font-weight: 500;
   color: inherit;
 }
@@ -2808,7 +3427,7 @@ header {
   margin-bottom: 8px;
 }
 .hint {
-  color: var(--ap-text-3);
+  color: var(--ap-text-2);
   font-size: 11px;
   line-height: 1.55;
 }
@@ -3158,7 +3777,7 @@ header {
   margin: 8px 0 0;
   font-size: 11px;
   line-height: 1.55;
-  color: var(--ap-text-3);
+  color: var(--ap-text-2);
 }
 .right pre {
   margin: 8px 0 0;
@@ -3363,6 +3982,59 @@ header {
   background: var(--ap-sel);
   border-color: transparent;
 }
+/* ── 列表折叠（Phase 8）：堆叠链作为一个可展开的子树 ──────────────────
+   视觉上刻意区别于「时间轴片段」子树：片段是**时间**维度（引导线用分隔色 + 蓝色），
+   堆叠是**空间**维度（虚线引导 + 琥珀），两根轴在列表里不该长得一样。 */
+.stack-toggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  align-self: stretch;
+  padding: 0 4px;
+  margin-right: 2px;
+  font: 9px/1 var(--ap-font);
+  color: var(--ap-orange);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--ap-r-xs);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.stack-toggle:hover {
+  background: var(--ap-surface-2);
+  border-color: var(--ap-orange);
+}
+.stack-children {
+  flex-basis: 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 2px 0 3px 4px;
+  padding-left: 8px;
+  /* 虚线：与时间轴片段那根实线区分开 —— 一根是空间、一根是时间 */
+  border-left: 1px dashed var(--ap-sep);
+}
+.stack-row {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.stack-obj {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 2px 6px;
+  font-size: 10.5px;
+}
+.stack-y {
+  flex: 0 0 auto;
+  font-size: 9px;
+  color: var(--ap-text-3);
+  font-variant-numeric: tabular-nums;
+}
 /* 类型标签：7.5px 在 11px 的行里过小，放大到 9px 并留出内边距 */
 .tree-kind {
   font-size: 9px;
@@ -3428,4 +4100,39 @@ header {
 .canvasWrap.is-drawing {
   outline: 2px solid rgba(10, 132, 255, 0.55);
   outline-offset: -2px;
+}
+
+/* 拖到不可达位置 → 光标变红 + 画布压一圈红边（docs/3d/03 §6）。
+   CSS 的 cursor 没法着色，所以内联一张 SVG（红底感叹号）当自定义光标；
+   回退值仍是 grabbing —— 形状不变 = 还在搬、也放得下，只是有问题。 */
+.canvasWrap.is-blocked canvas {
+  cursor:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24'%3E%3Ccircle cx='12' cy='12' r='9' fill='%23ff453a' stroke='%230a1016' stroke-width='2'/%3E%3Crect x='10.6' y='5.6' width='2.8' height='8.2' rx='1.4' fill='%23ffffff'/%3E%3Ccircle cx='12' cy='17.4' r='1.6' fill='%23ffffff'/%3E%3C/svg%3E")
+      12 12,
+    grabbing;
+}
+.canvasWrap.is-blocked::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  box-shadow: inset 0 0 0 2px rgba(255, 69, 58, 0.5);
+  z-index: 3;
+}
+
+/* 相机跟跳开关（Phase 6）：与 .grp-ids .chip 同一套视觉语言，但独立成类避免互相牵连。 */
+.toggle {
+  width: 100%;
+  font-size: 11px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.04);
+  color: #b9c6d4;
+  cursor: pointer;
+}
+.toggle.on {
+  border-color: var(--ap-blue);
+  background: var(--ap-sel);
+  color: #fff;
 }

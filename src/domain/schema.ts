@@ -12,7 +12,9 @@ export type AssetCategory =
   | "building"
   | "furniture"
   | "nature"
-  | "prop";
+  | "prop"
+  /** 台阶 / 平台 / 墙：可站立的静态构筑物。h ≤ maxStep 时人会自动迈上去。 */
+  | "structure";
 
 /** 动物物种：决定使用哪个 GLB 模型。来源见 `engine/animalModels.ts`。 */
 export type AnimalSpecies =
@@ -25,6 +27,12 @@ export type AnimalSpecies =
 /** agent = 可运动、可作目标；set = 静态环境（遮挡 + 障碍）。 */
 export type AssetRole = "agent" | "set";
 
+/**
+ * 世界模式。**planar 是能力表的退化取值**，不是特例分支（见 DirectorState.worldMode）。
+ * terrain 表示"几何参与高度"，是本文件里 baseY / bottom / topShape 生效的前提。
+ */
+export type WorldMode = "planar" | "terrain";
+
 /** 默认体块尺寸（世界单位）：w=宽(x) d=深(z) h=高(y)。 */
 export type Footprint = { w: number; d: number; h: number };
 
@@ -32,6 +40,13 @@ export type PathPointShape = "LINE" | "ARC";
 
 /** cubic-bezier(x1, y1, x2, y2) — 与 CSS 缓动一致。 */
 export type EaseCurve = [number, number, number, number];
+
+/**
+ * 名字显示的场景级三态。**场景是更高一级的权威**：
+ * `"on"` / `"off"` 压过个体，只有 `"default"` 才把控制权交给个体。
+ * 判定只有一处实现：`engine/nameVisibility.ts` 的 `nameVisible`。
+ */
+export type NameVisibility = "on" | "off" | "default";
 
 /**
  * 速度曲线关键点 = 一条「何时走到哪儿」的控制点。
@@ -78,12 +93,98 @@ export type JointName =
 /** 姿势 = 各关节相对父关节的本地欧拉角（弧度，[x, y, z]）。未列出的关节默认为 0。 */
 export interface Pose {
   joints: Partial<Record<JointName, Vec3>>;
+  /**
+   * 骨盆（root）的**额外竖直偏移**（米）。默认 0。
+   *
+   * 这是**作者旋钮**，不是"骨盆高度自适应"的替代品：后者由立足面几何每帧算出
+   * （`engine/stance.ts` 的 `pelvisLiftOf`），是几何必然；`rootY` 只用于
+   * "蹲在坡上还想把重心再压低一点"这类微调。
+   */
+  rootY?: number;
 }
 
 /**
  * Director World 中的对象。V1 使用平面世界（WORLD MODE = PLANAR），
  * 因此对象只保存 x / z，高度由 Proxy 语义决定。
  */
+/**
+ * 顶面形状。盒子表达不了斜坡与楼梯，这两种是目前的形状扩展。
+ *
+ * - `flat`：盒子。
+ * - `ramp`：沿局部 +Z 从 `bottom` 升到 `top` 的**斜面**。
+ * - `stair`：**抽象楼梯** —— 沿一条可拐弯的折线铺开的若干梯跑 + 平台（见 `StairSpec`）。
+ *   与 `ramp` 一样，它是"视觉近似、物理精确"的抽象：物理上是**连续坡面**（不是一级级台阶），
+ *   踏步由坡度派生、只用于渲染。
+ */
+export type TopShape = "flat" | "ramp" | "stair";
+
+/**
+ * 抽象楼梯的**路径点**（世界坐标）。作者在 Director View 上拖的就是它 ——
+ * 与资产路径（`MoveSegment.points`）/ 相机路径（`CameraMove.pathPoints`）同一套交互。
+ */
+export interface StairPathPoint {
+  id: string;
+  x: number;
+  z: number;
+}
+
+/**
+ * 抽象楼梯的参数（`topShape: "stair"` 时生效）。
+ *
+ * ## 为什么是"路径"而不是"一段段梯跑"
+ *
+ * 楼梯的**水平路线**和资产的行走路线是同一件事，所以用同一套表达：一条折线，
+ * 拖点即塑形，转角即拐弯。作者不需要填"第几段拐多少度"—— 想往哪拐就把点拖过去。
+ *
+ * 由此三件事都变成**派生量**，不用作者说：
+ *
+ * - **坡度** = `atan(总高 / 路径水平长度)`（要缓就把路径拉长）；
+ * - **每段的高** = 总高 × 该段长度 / 路径总长（按弧长均摊）；
+ * - **转角是圆的** = **急转**顶点被内切掉一段等半径圆弧（半径 ≤ 半宽），弧上每段折角都很小 ⇒
+ *   按"缓转 = 连续曲面"直接接上：不铺平台、不补角、**转角不会宽出来**，踏步沿弧自然铺开；
+ *   接缝处高度连续、无洞（折线近似圆弧的那一丝外侧楔口由相邻段互相重叠填掉）。
+ *   圆角放不下（相邻段太短）时才退回"硬角 + 平台 / 补角"兜底。
+ * - **平台是从路径里扣除的**（吃掉两侧边各半个宽度）⇒ **水平延伸 = 路径长**、
+ *   **末端（最后一个路径点）正好到达总高**。
+ *
+ * 路径点缺省（或不足 2 点）时退回**一段直跑**：沿对象局部 +Z，长度取 `footprint.d` ——
+ * 于是"没画路径"的楼梯与普通斜坡盒子一样好用，`D` 滑杆仍然管用。
+ */
+export interface StairSpec {
+  /** 水平路线（世界坐标）。≥2 点才能生效。 */
+  path?: StairPathPoint[];
+  /**
+   * 是否**填充底面**（把每一级从对象底面砌到该级顶面）。缺省 = `true`（实心楼梯）。
+   *
+   * 设成 `false` 就只留一块块踏板 —— 楼梯变成**悬空的板**，能看穿底下（露台、钢结构、
+   * 挑空处的室外梯都是这个样子）。**物理不变**：顶面仍是同一条连续坡面，可走性、坡度、
+   * 拾取全都不受影响 —— 这纯粹是"看起来是实心还是空心"。板厚 = `STAIR_TREAD_THICKNESS`。
+   */
+  solid?: boolean;
+}
+
+/**
+ * 运动能力：阈值挂在**运动主体**上，不是障碍上。
+ * 同一堵台阶，人上得去、车上去、马跳得更高 —— 所以 maxStep / 跳跃 / 攀爬都按类别取值。
+ * 见 `engine/locomotion.ts` 的预设表。
+ */
+export interface Locomotion {
+  /** 单步最大落差（米）：≤ 此值自动迈上去，> 此值视为阻挡或需要跳跃。 */
+  maxStep: number;
+  /** 最大可行走坡度（度）。超过即"陡坡"，退化为墙面。 */
+  maxSlopeDeg: number;
+  /** 原地起跳高度（米）。0 = 不会跳。 */
+  maxJumpHeight: number;
+  /** 平地助跑跳远（米）。 */
+  maxJumpReach: number;
+  /** 最大攀爬高度（米）。0 = 不会攀爬。 */
+  maxClimbHeight: number;
+  /** 身高（米），用于头顶净空判定。 */
+  height: number;
+  /** 脚底尺寸（米），用于落脚面积采样。 */
+  foot: { w: number; d: number };
+}
+
 export interface DirectorObject {
   id: string;
   /**
@@ -103,6 +204,45 @@ export interface DirectorObject {
   /** 默认体块尺寸。 */
   footprint: Footprint;
   color: string;
+  /**
+   * 实体底面高度（世界米）。默认 0。
+   *
+   * 这是"3D 化"最关键的一个字段：有了它，盒子才占据 [baseY, baseY + h] 而不是恒从 0 起，
+   * 于是「堆叠」成立 —— 把上层对象的 baseY 设成下方对象的顶面即可。
+   *
+   * agent 的 baseY 是"相对脚下地面的偏移"（悬停飞行、摆在架子上）；
+   * set 的 baseY 由拖拽自动吸附到下方支撑面，也可在 Inspector 手工指定。
+   */
+  baseY?: number;
+  /**
+   * 实体底面下探高度，默认 = baseY。设成低于 baseY 即"拱洞 / 桥"：
+   * 例：桥面 baseY = 2.75、bottom = 2.4 → 下方留 2.4m 净空可穿行。
+   */
+  bottom?: number;
+  /** 顶面形状，默认 "flat"。 */
+  topShape?: TopShape;
+  /** 抽象楼梯参数（`topShape: "stair"` 时生效）：坡度 + 梯段/拐弯。 */
+  stair?: StairSpec;
+  /** 是否可站上去。默认 true（由 maxStep 与坡度推导）。水面 / 沼泽设 false。 */
+  walkable?: boolean;
+  /**
+   * 是否显示这个名字（**个体级覆盖**）。缺省 = 跟随场景开关 `DirectorState.showNames`。
+   * 三态语义：`true` = 无论如何都显示（哪怕场景关着）；`false` = 无论如何都不显示；
+   * 不写 = 跟随场景。于是"少显示几个"和"只突出一个"都能表达。
+   */
+  showName?: boolean;
+  /**
+   * 遇障时的**作者意图**：默认（`"auto"`）按能力表决定 —— 迈得上就迈、跳得过就跳
+   * （见 docs/3d/04 §3：画了一条直线说明作者想走直线，绕行才是系统自作主张）。
+   *
+   * 设为 `"walk-around"` 即强制绕行：一片刺丛、一个水坑，你不会想让人跳进去。
+   * 这是可达性 UI 里「改为绕行」一键修复写下的那个字段（docs/3d/03 §5 / 04 §12）。
+   */
+  prefer?: "auto" | "walk-around";
+  /** 是否水平阻挡。默认 true。栅栏 / 草丛可设 false。 */
+  blocking?: boolean;
+  /** 是否遮挡相机视线。默认 true。玻璃可设 false —— 它与 blocking 是独立的语义。 */
+  occluding?: boolean;
   /** animal 类资产的物种（决定 GLB 模型）；非 animal 留空。 */
   species?: AnimalSpecies;
   /** 锁定后不可通过拖拽改变位置（防误触）；仍可点选以便解锁。 */
@@ -138,6 +278,28 @@ export interface CameraPathPoint {
 }
 
 /**
+ * 垂直弧线：把「沿路径走」的归一化里程映射到高度。
+ *
+ * 与水平运动**完全解耦** —— 路径的水平速度曲线（`ease` / `speedKeys`）不需要为跳跃做任何改动，
+ * 跳跃自动跟着路径走向走。这是"垂直三级权威"的直接收益（见 docs/3d/02 §4）。
+ *
+ * 关键设计：**顶点高度 `apex` 是作者旋钮**，不是从物理初速反推的。
+ * 系统只做可行性校验（`engine/jump.ts` 的 `checkJumpArc`），不替作者决定轨迹。
+ */
+export interface VerticalArc {
+  /** parabola = 跳上/跳过（抛物线）；fall = 落差下落（加速下坠）；climb = 攀爬（L 形贴墙）。 */
+  mode: "parabola" | "fall" | "climb";
+  /** 区间起点（归一化里程 0..1）。缺省 0。 */
+  from?: number;
+  /** 区间终点（归一化里程 0..1）。缺省 1。 */
+  to?: number;
+  /** 顶点相对「起跳点地面」的高度（米），作者拖拽设定。仅 `parabola` 用。 */
+  apex?: number;
+  /** 攀爬竖直段时长（秒）。缺省由攀爬速度推算，留作将来微调。 */
+  climbSeconds?: number;
+}
+
+/**
  * MOVE Segment = When + How to travel。
  * Segment 是唯一的时间/空间运动来源（Single Source）。
  */
@@ -155,6 +317,13 @@ export interface MoveSegment {
   ease: EaseCurve;
   /** 多段速度曲线关键点（≥2 时接管时序）。为空 = 单段 cubic-bezier。 */
   speedKeys?: SpeedKey[];
+  /** 垂直弧线（跳跃 / 落差 / 攀爬）。缺省 = 无弧线，高度由地面派生（瞬时对齐）。 */
+  arc?: VerticalArc;
+  /**
+   * 本段在 planar 世界也强制按弧线走。缺省 = 只有 terrain 世界才认弧线。
+   * 与 Shift 覆盖同理：这是**作者显式意图**，不是世界模式的替代品。
+   */
+  arcAlways?: boolean;
 }
 
 /** 相邻两条 leg 的交接点模式。 */
@@ -238,7 +407,9 @@ export type CameraMotionType =
 export type CameraTargetType = "OBJECT" | "OTS" | "GROUP" | "POV" | "LOCATION";
 
 /**
- * 动作片段的种类（与 engine/poses.ts 的 POSE_PRESETS 键一致）。
+ * 动作片段的种类（= `engine/poses.ts` 的 `AUTHOR_POSE_NAMES` + 步态 walk/run + custom）。
+ * **不含阶段姿势**（`jumpTakeoff` / `jumpAir` / `jumpLand` / `climbReach` / `climbUp` / `hang`）——
+ * 那些由弧线进度自动挑（`actionPose.ts` 的 `airbornePresetAt`），不是可选项。
  * 分两类：
  * - 姿态/手势类（stand/sit/crouch/wave/point/talk）：给出关节角度；
  * - 步态类（walk/run）：本身没有静态关节角度，只决定"怎么走"的节奏与幅度。
@@ -319,6 +490,12 @@ export interface CameraObject {
   roll?: number;
   /** 相机平台：ground = 地面机（默认）；drone = 无人机，自带基础飞行高度、不受地面约束。 */
   kind?: "ground" | "drone";
+  /**
+   * 是否显示这个相机的名字标签（**个体级覆盖**，与 `DirectorObject.showName` 同语义）。
+   * 缺省 = 跟随场景名字开关 `DirectorState.showNames`（"开"全显示 / "关"全隐藏 / "默认"跟随个体）。
+   * 场景级下拉框在画布工具条，个体级眼睛图标在选中本相机或资产时点亮。
+   */
+  showName?: boolean;
   /** 航拍 / 升降高度（米），暂存为相机数据（cameraSolver 当前用 DRONE 基准高度）。 */
   altitude?: number;
   /** 由模板库创建时记下来源模板 id（便于回看 / 再编辑）。 */
@@ -339,6 +516,19 @@ export interface CameraObject {
   fixedYawDeg?: number;
   /** PATH 默认固定朝向 · 立面俯仰角（度，0–360）：含义同 CameraMove.fixedPitchDeg。 */
   fixedPitchDeg?: number;
+  /**
+   * 跟拍目标**跳跃 / 落差**时，是否让相机跟着上下（默认 `true` = 跟随，与扩展前一致）。
+   *
+   * 设为 `false` 即为 docs/3d/03 §10 的**方案 b**：目标离地期间，相机保持**起跳高度的水平轨道**、
+   * **不跟高度** —— 像真实跟拍（摄影师本来就不会跟着人跳），人跳起来冲出画框又落回来。
+   *
+   * 为什么做成开关而不是"把抖动调小"：这是**电影语言**层面的选择，不是参数调优。
+   * 判"离地"用的是 `pathHeightAt`（实际高度）与 `standingHeightFor`（脚下地面）之差，
+   * 因此对**段上的弧线**与**走出平台边缘的落差**都生效，而不只是 `arc`。
+   */
+  followJumpHeight?: boolean;
+  /** 自动对焦（默认 true）：无意图主体（自由 PATH 等）时，对焦到画面内最靠近构图中心的演员。 */
+  autoFocus?: boolean;
 }
 
 /**
@@ -504,6 +694,31 @@ export interface DirectorState {
    * 随场景自动持久化；customId 悬空的片段按「空姿势」处理，不会报错。
    */
   customActions?: CustomAction[];
+  /**
+   * 世界模式。缺省 "planar"。
+   *
+   * 注意：**"planar" 不是一条特例分支，而是能力表的退化取值** —— 等价于
+   * maxStep = 0 + 无跳跃 + 无攀爬。此时 top ≤ 0 的面才可站，所有现有 set 资产
+   * （建筑 top=24、桌子 top=0.9 …）全部保留为障碍，与 3D 化之前逐像素一致。
+   *
+   * 因此下游不需要任何 `if (worldMode === "planar")` 特判。
+   */
+  worldMode?: WorldMode;
+  /**
+   * 对象名字的**场景级三态**开关。缺省 `"default"`（= 交给个体）。
+   *
+   * - `"on"` / `"off"`：**场景接管** —— 强制显示 / 强制隐藏，个体的 `showName` 被压过；
+   * - `"default"`：控制权交给个体（`DirectorObject.showName`，缺省显示）。
+   *
+   * 为什么需要它：示例场景为了讲解会给对象起很长的名字，对象一多，名字会盖住画面 ——
+   * 编辑时看不清全貌、播放时干扰信息。
+   */
+  showNames?: NameVisibility;
+  /**
+   * 场景级能力表 override（按类别覆盖 `engine/locomotion.ts` 的预设）。
+   * 用途：骑马的人能跳 1.2m、受伤的人 maxStep 只有 0.2m —— 不必新增资产类别。
+   */
+  locomotion?: Partial<Record<AssetCategory, Partial<Locomotion>>>;
 }
 
 /* ------------------------------------------------------ Stage / Scenes */

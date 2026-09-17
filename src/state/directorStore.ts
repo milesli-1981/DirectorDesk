@@ -19,6 +19,7 @@ import {
   HandoffMode,
   IntentAction,
   MoveSegment,
+  NameVisibility,
   OtsSide,
   PathPoint,
   SpeedKey,
@@ -27,7 +28,9 @@ import {
   ActionKind,
   Pose,
   Vec2,
+  VerticalArc,
   ViewMode,
+  WorldMode,
 } from "../domain/schema";
 import { createBlankState } from "../engine/demoShot";
 import { normalizePathPointModes, pathInsertIndex, simplifyPath } from "../engine/path";
@@ -35,7 +38,15 @@ import { normalizeCamPathShapes } from "../engine/cameraPath";
 import { contentEndTime } from "../engine/timeline";
 import { normalizeCameraKeys, normalizeEase, normalizeSpeedKeys } from "../engine/ease";
 import { ASSET_PRESETS } from "../engine/assetPresets";
-import { separateSetAsset } from "../engine/collision";
+import { objectTop } from "../engine/ground";
+import { nameVisible } from "../engine/nameVisibility";
+import { placeObject } from "../engine/place";
+import { DEFAULT_STAIR_WIDTH, insertBend, planStairLink } from "../engine/stairLink";
+import { planStairWalk, StairWalkDirection } from "../engine/stairWalk";
+import { settleStack, stackChain } from "../engine/stack";
+import { arraySlots, ArraySpec } from "../engine/array";
+import { DragReachHint } from "../engine/reach";
+import { JUMP_EASE, rewriteArcApex } from "../engine/arc";
 import { ANIMAL_MODELS, DEFAULT_ANIMAL_SPECIES } from "../engine/animalModels";
 import {
   AnimalSpecies,
@@ -96,9 +107,43 @@ function loadSceneState(id: string): DirectorState | null {
   }
 }
 
+/**
+ * 顶面形状（flat / ramp / stair）与抽象楼梯是**盒子几何**的一部分，只对环境资产
+ * （`role: "set"`）有意义：它和 `bottom` 一起定义那个盒子怎么占空间，下游由
+ * `ground` / `raycast` / `occlusion` / `stack` / `stair*` 一起读。
+ *
+ * human / animal / vehicle 是人物与载具，渲染走骨骼 / 模型（`WorldView` 的 `blockBody`），
+ * 挂着 `topShape` / `stair` 只会让"看到的盒子"和"实际的物理"两套说法打架
+ * （载具甚至会被真画成一段楼梯网格）。UI 已不再提供入口，这里把**任何来源**的历史数据
+ * 一并清掉，使下游不必再各自判一次。
+ */
+function stripAgentTopShape(objects: DirectorObject[]): DirectorObject[] {
+  let changed = false;
+  const next = objects.map((object) => {
+    if (object.role === "set" || (object.topShape === undefined && object.stair === undefined)) {
+      return object;
+    }
+    changed = true;
+    return { ...object, topShape: undefined, stair: undefined };
+  });
+  // 没脏数据就返回原引用：zustand 选择器按引用比较，凭空造新数组会引发整树重渲染。
+  return changed ? next : objects;
+}
+
+/** 上面那条规则的**状态级**包装：没有脏数据时不产生新对象。 */
+function stripAgentTopShapeFromState(s: DirectorState): DirectorState {
+  if (!Array.isArray(s.objects)) return s;
+  const objects = stripAgentTopShape(s.objects);
+  return objects === s.objects ? s : { ...s, objects };
+}
+
 function saveSceneState(id: string, state: DirectorState): void {
   try {
-    if (typeof localStorage !== "undefined") localStorage.setItem(sceneKey(id), JSON.stringify(state));
+    if (typeof localStorage !== "undefined") {
+      // 写盘是**唯一**出口：在这一刀清干净，任何来源的脏数据都进不了存档
+      // （读盘侧 `sanitizeState` 再清一道，两边各自独立成立，不互相依赖）。
+      localStorage.setItem(sceneKey(id), JSON.stringify(stripAgentTopShapeFromState(state)));
+    }
   } catch {
     /* ignore */
   }
@@ -137,7 +182,9 @@ function collectExamples(): {
     for (const tab of mod.manifest.order) {
       const st = mod.scenes[tab.id];
       if (!st || scenes[tab.id]) continue;
-      scenes[tab.id] = st;
+      // 示例源也过一遍清洗：老示例若带脏数据，写进存档的内容才与记录的"写入指纹"一致
+      // （否则 saveSceneState 那一刀会让指纹与实际内容对不上，被误判成"用户改过"）。
+      scenes[tab.id] = stripAgentTopShapeFromState(st);
       order.push({ id: tab.id, name: tab.name });
     }
   }
@@ -216,6 +263,38 @@ function syncExamples(order: StageManifest["order"], force = false): StageManife
 }
 
 /**
+ * 本地场景一次性清扫：历史版本允许给**任意**对象设「顶面形状 / 抽象楼梯」，而它只对环境资产
+ * （`role: "set"`）有意义（见 `stripAgentTopShape`）。这里把 manifest 里的**每一页**都过一遍 ——
+ * 只清"当前打开的那一页"会把其它页面的脏数据留着。
+ *
+ * **只动真的脏了的页**：干净的页一个字都不写。重写内容会让示例页的"写入指纹"对不上，
+ * 而 `syncExamples` 正是据此判定"用户改过"并**永久停止自动同步** —— 一个纯粹的清理动作
+ * 不该有这个副作用。
+ *
+ * 标记位保证只跑一次；此后新数据在写盘那一刻就被 `saveSceneState` 清掉了。
+ */
+const TOP_SHAPE_SWEEP_KEY = "director-desk-sweep-topshape-v1";
+
+function sweepAgentTopShape(order: StageManifest["order"]): void {
+  if (lsGet(TOP_SHAPE_SWEEP_KEY)) return;
+  for (const tab of order) {
+    const raw = lsGet(sceneKey(tab.id));
+    if (raw === null) continue;
+    let parsed: DirectorState;
+    try {
+      parsed = JSON.parse(raw) as DirectorState;
+    } catch {
+      continue;
+    }
+    if (!parsed || !Array.isArray(parsed.objects)) continue;
+    const objects = stripAgentTopShape(parsed.objects);
+    if (objects === parsed.objects) continue; // 干净 → 一个字都不动
+    saveSceneState(tab.id, { ...parsed, objects });
+  }
+  lsSet(TOP_SHAPE_SWEEP_KEY, "1");
+}
+
+/**
  * 启动时装配片场：
  * - 已有 manifest（用户继续编辑）→ 保留现状，并同步示例（陈旧/未改动的示例页自动更新）。
  * - 首屏（无 manifest）→ 以 scene_examples 目录下所有示例片场作为默认片场。
@@ -228,6 +307,8 @@ function initStage(): { manifest: StageManifest; activeState: DirectorState } {
   if (manifest && manifest.order.length > 0) {
     // 保留用户片场，同时同步示例：缺失的补建，陈旧且未被改动的自动更新。
     const order = syncExamples(manifest.order);
+    // 历史存档里「非环境资产却带顶面形状 / 楼梯」的脏页一次性清掉（只跑一次，见该函数）。
+    sweepAgentTopShape(order);
     const nextManifest = order.length !== manifest.order.length ? { ...manifest, order } : manifest;
     if (nextManifest !== manifest) saveManifest(nextManifest);
     const activeId =
@@ -274,7 +355,9 @@ export type RadialTarget = { kind: "object" | "point" | "cameraPoint"; id: strin
  *  纯视觉反馈：让「这个把手现在能不能点中」先看得见，命中判定仍由 WorldView 决定。 */
 export type MarkerHover =
   | { kind: "point"; segmentId: string; id: string }
-  | { kind: "endpoint"; segmentId: string; id: "start" | "end" };
+  | { kind: "endpoint"; segmentId: string; id: "start" | "end" }
+  | { kind: "cameraPoint"; id: string }
+  | { kind: "stairPoint"; id: string };
 
 interface DirectorStore {
   state: DirectorState;
@@ -300,16 +383,48 @@ interface DirectorStore {
   pathDrawMode: boolean;
   /** 是否正在拖拽场景对象 / 路径点，用于临时接管 OrbitControls。 */
   dragging: boolean;
+  /**
+   * 拖拽 / 拖放途中按住了 Shift = 本次操作强制按 3D 语义落位。
+   *
+   * 纯 UI 提示用（点亮 3D 开关、显示徽标），**不参与几何** —— 真正的覆盖
+   * 由画布把这个按键状态直接传给 `moveObject` / `addAsset`（见 `engine/worldMode`）。
+   * 之所以不进 `state`：它是手势的瞬时状态，不该被存盘、也不该进 undo 历史。
+   */
+  terrainGesture: boolean;
+  /**
+   * 拖拽途中的可达性即时反馈（docs/3d/03 §6）。
+   *
+   * 纯 UI 状态：不进 `state`、不进 undo 历史（与 `hoverMarker` 同样的理由）。
+   * 之所以挂在 store 而不是画布组件内部：判定的**输入**在 `Interaction`（它知道
+   * 拖的是哪个把手），而**消费方**在 `PathHandles` / tooltip / 外层光标 ——
+   * 跨组件共享一次判定，比让三处各算一遍可靠得多（这正是 `reach.ts` 存在的理由）。
+   */
+  dragReach: DragReachHint | null;
 
   setTime: (time: number) => void;
   setPlaying: (playing: boolean) => void;
   togglePlay: () => void;
   setZoom: (zoom: number) => void;
   setViewMode: (mode: ViewMode) => void;
+  /** 切换平面 / 立体世界。planar = 老行为（一切在 y=0），terrain = 启用堆叠与落脚高度。 */
+  setWorldMode: (mode: WorldMode) => void;
+  /**
+   * 场景级名字开关（三态，见 `DirectorState.showNames`）：
+   * `"on"` / `"off"` = 场景接管；`"default"` = 把控制权交给个体。
+   */
+  setShowNames: (show: NameVisibility) => void;
+  /** 个体级：切换某个对象的 `showName`（三态里只写 true / false，不写回"跟随场景"）。 */
+  toggleShowName: (objectId: string) => void;
+  /** 个体级：切换某个相机的 `showName`（与对象同语义，见 CameraObject.showName）。 */
+  toggleCameraShowName: (cameraId: string) => void;
   setActiveCamera: (cameraId: string) => void;
   toggleViewLocked: () => void;
   togglePathDraw: () => void;
   setDragging: (dragging: boolean) => void;
+  /** 设置「本次手势按住 Shift」提示状态。只在值变化时写入，避免拖拽途中刷爆 store。 */
+  setTerrainGesture: (on: boolean) => void;
+  /** 更新拖拽可达性提示。拖拽结束传 null。 */
+  setDragReach: (hint: DragReachHint | null) => void;
 
   selectObject: (objectId: string) => void;
   selectCamera: (cameraId: string) => void;
@@ -324,23 +439,50 @@ interface DirectorStore {
   openCameraPointRing: (pointId: string) => void;
   closeRing: () => void;
 
-  moveObject: (objectId: string, x: number, z: number) => void;
+  /**
+   * 拖动对象到 (x, z)。
+   * @param layerY 画布射线拾取到的"指针正指着的那一层"（优先于按 x/z 反查）。
+   * @param forceTerrain 本次拖拽强制按 3D 语义落位（按住 Shift）。见 `engine/worldMode`。
+   */
+  moveObject: (objectId: string, x: number, z: number, layerY?: number, forceTerrain?: boolean) => void;
   /** 调整对象在时间轴 / Scene Tree 中的行顺序：把 dragId 移到 targetId 所在的位置。 */
   reorderObject: (dragId: string, targetId: string) => void;
   /** 锁定 / 解锁资产：锁定后不可通过拖拽移动位置（防误触），仍可点选以便解锁。 */
   toggleLock: (id: string) => void;
-  addAsset: (category: AssetCategory, at?: { x: number; z: number }, species?: AnimalSpecies) => void;
+  /**
+   * 新增资产。
+   * @param at 落点。`y` = 射线拾取到的层高；`terrain` = 本次拖放强制按 3D 语义（按住 Shift）。
+   */
+  addAsset: (
+    category: AssetCategory,
+    at?: { x: number; z: number; y?: number; terrain?: boolean },
+    species?: AnimalSpecies,
+  ) => void;
   /**
    * 拖入一个「团队 Group」：一次生成 count 个同类资产并建组，整队共用一条路线
    * （锚点 = members[0]），队员按 formation 跟随。
+   *
+   * `at.terrain` = 松手时按着 Shift（手势级 3D 覆盖，见 `engine/worldMode`）：
+   * 每个队员都按 terrain 语义落到落点处最高的可站立面上。
    */
   addGroupAt: (
     category: AssetCategory,
     count: number,
     formation: FormationKind,
-    at?: { x: number; z: number },
+    at?: { x: number; z: number; y?: number; terrain?: boolean },
     species?: AnimalSpecies,
   ) => void;
+  /**
+   * 阵列：把指定对象批量复制成一排 / 一片 / 一圈 / 一段台阶。
+   *
+   * `spec.count` 是**总数（含源对象自身）** —— 与 Blender 数组修改器同义：
+   * count=3 会产出"源 + 2 个副本"共 3 个。每个副本独立走 `placeObject` 落位，
+   * 所以它们在地形世界里会自动各自贴到脚下的台面上，不会悬空也不会陷进地里。
+   *
+   * @param sourceId 源对象。它自己不动，副本从 lineup 的第 2 个槽位开始。
+   * @param spec 阵列规格，见 `engine/array.ts`。
+   */
+  arrayAsset: (sourceId: string, spec: ArraySpec) => void;
   updateAsset: (id: string, patch: Partial<DirectorObject>) => void;
   removeAsset: (id: string) => void;
   /** 组（Group Dynamics） */
@@ -382,6 +524,69 @@ interface DirectorStore {
   setSegmentPoints: (segmentId: string, points: { x: number; z: number }[]) => void;
   /** 手绘路径：为资产创建/复用最后的 MOVE segment，并写入拖拽得到的轨迹点。 */
   drawAssetPath: (objectId: string, points: { x: number; z: number }[]) => void;
+  /**
+   * 手绘路径（**抽象楼梯**）：抽稀后写成这条楼梯自己的水平路线（`stair.path`）。
+   *
+   * 与 `drawAssetPath` **同一套手势、同一个抽稀器**，区别只在"写进哪里"：
+   * 资产画的是"它要走的路"（MOVE segment），楼梯画的是"它自己"（见 docs/3d/00 §9.15）。
+   */
+  drawStairPath: (objectId: string, points: { x: number; z: number }[]) => void;
+
+  /**
+   * 环形菜单「台阶」选中后进入的**选目标**模式：值 = 起点高台的 id，`null` = 未进入。
+   * 进入后画布上的一次点击就是目标（另一个高台或地面），由 `linkStairTo` 生成台阶。
+   */
+  stairLinkFrom: string | null;
+  /**
+   * 选目标模式下的提示 / 拒绝理由（挂在那一处上方）。`null` = 无。
+   * `tone` 只决定画成提示（蓝）还是拒绝（红）—— 拒绝不是失败态，改一下落点就继续。
+   */
+  pickHint: { at: [number, number, number]; text: string; tone: "hint" | "refuse" } | null;
+  /** 进入选目标模式（环形菜单的「台阶」）。 */
+  beginStairLink: (objectId: string) => void;
+  /** 退出（Esc / 生成完成 / 起点已被删）：模式与草稿一起清掉。 */
+  cancelStairLink: () => void;
+  /**
+   * 「走上去 / 走下来」选目标模式：值 = 要安排走路的演员 + 方向，`null` = 未进入。
+   * 进入后画布上的一次点击就是**楼梯**，路线由 `planStairWalk` 生成
+   * （坡度 / 宽度按**他自己的**能力表判，所以同一条楼梯对不同主体结论可能不同）。
+   */
+  walkPick: { actorId: string; direction: StairWalkDirection } | null;
+  /** 进入走楼梯模式（环形菜单的「走上去」/「走下来」挂在演员上）。 */
+  beginWalkPick: (actorId: string, direction: StairWalkDirection) => void;
+  /**
+   * 让 `walkPick` 里那个演员走这条楼梯：复用/新建它最后一条 MOVE 段并写入路线，
+   * 同时把他的**层高**设成路线起点的高度 —— 不设的话向下走会从地面起步、整段穿过楼梯
+   * （见 `engine/stairWalk` 的模块说明）。
+   */
+  assignStairWalk: (stairId: string) => void;
+  /**
+   * 选定目标：`targetId` 非空 = 另一个高台，空 = 地面上的 `(x, z)`。
+   *
+   * 选定后进入**预览**（虚线 + 可加点）而不是直接生成 —— 生成是 `commitStair`。
+   * 只有**语义**问题会挡住（目标是自己 / 可运动资产 / 已是楼梯）；几何问题（太陡等）
+   * 照样进预览，因为"加个转折点拉长它"正是解决它的方式。
+   */
+  pickStairTarget: (targetId: string | null, x: number, z: number) => void;
+  /** 预览里加一个转折点（插在离它最近的那一段之后，与路径点"线上加点"同一手感）。 */
+  addStairBend: (x: number, z: number) => void;
+  /** 改台阶宽度（米）。比人的脚宽还窄会被 `planStairLink` 拒绝生成。 */
+  setStairWidth: (width: number) => void;
+  /** 按当前折线生成台阶。几何不合法时只报告，模式与折线都不变。 */
+  commitStair: () => void;
+  /**
+   * 预览草稿：目标 + 落点 + 作者加的转折点 + 宽度。
+   *
+   * **折线不在这里存** —— 它是 `planStairLink` 每次由这四样重算出来的，于是
+   * "看到的虚线"与"生成的楼梯"不可能分叉（同一样东西只能有一个出处）。
+   */
+  stairDraft: {
+    targetId: string | null;
+    point: { x: number; z: number };
+    bends: Array<{ x: number; z: number }>;
+    /** 走廊宽度（米）= 落库时的 `footprint.w`。人能通过的基本条件。 */
+    width: number;
+  } | null;
   setHandoffMode: (handoffId: string, mode: HandoffMode) => void;
   setCameraJunctionMode: (junctionId: string, mode: HandoffMode) => void;
   deleteSegment: (segmentId: string) => void;
@@ -406,9 +611,24 @@ interface DirectorStore {
   setSegmentEase: (segmentId: string, ease: EaseCurve) => void;
   /** 写入多段速度曲线关键点（null / 少于 2 个点 = 退回单段 cubic-bezier）。 */
   setSegmentSpeedKeys: (segmentId: string, keys: SpeedKey[] | null) => void;
+  /**
+   * 写入 / 清除垂直弧线（跳跃 / 落差 / 攀爬）。
+   *
+   * 传 `null` 表示清除弧线（退回"高度由地面派生"的瞬时对齐）。
+   * 写入弧线时**同时把该段 ease 覆盖成准线性**（`JUMP_EASE`）——
+   * 默认 cubic-bezier 在 u=0 处斜率为 0，人会在原地弹起原地落下，看起来不像跳跃。
+   * 这是"跳跃段内强制准线性水平速度"落地为**一个原子 store 动作**的地方（docs/3d/02 §5）。
+   */
+  setSegmentArc: (segmentId: string, arc: VerticalArc | null) => void;
+
+  /**
+   * 仅改写抛物线弧线的顶点高度 `apex`（作者旋钮），**不动 ease**、不清其他字段。
+   * 时间轴 mini 弓形的顶点拖拽走这里 —— 每次 pointermove 都触发，所以必须轻量：
+   * 不能像 `setSegmentArc` 那样顺手把 ease 覆盖成 JUMP_EASE（那会拖一下就清掉作者调过的手感）。
+   */
+  setSegmentArcApex: (segmentId: string, apex: number) => void;
 
   addCamera: () => void;
-  addDroneCamera: () => void;
   addCameraFromTemplate: (templateId: string) => void;
   removeCamera: (cameraId: string) => void;
   updateCamera: (
@@ -438,6 +658,8 @@ interface DirectorStore {
         | "truckDist"
         | "style"
         | "stabilize"
+        | "followJumpHeight"
+        | "autoFocus"
       >
     >,
   ) => void;
@@ -488,6 +710,19 @@ interface DirectorStore {
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 const round1 = (value: number) => Math.round(value * 10) / 10;
+
+/* ---------------------------------------- 高台连台阶（对象环形菜单的「台阶」） */
+
+/** 连出来的台阶的 id（与 `addAsset` 同一套前缀风格，一眼看得出是"连出来的"）。 */
+function nextStairId(state: DirectorState): string {
+  let index = state.objects.filter((o) => o.id.startsWith("AST_STAIR_")).length + 1;
+  let id = `AST_STAIR_${String(index).padStart(2, "0")}`;
+  while (state.objects.some((o) => o.id === id)) {
+    index += 1;
+    id = `AST_STAIR_${String(index).padStart(2, "0")}`;
+  }
+  return id;
+}
 
 function nextCustomActionId(state: DirectorState): string {
   const list = state.customActions ?? [];
@@ -619,6 +854,8 @@ function sanitizeState(s: DirectorState): DirectorState {
     );
   return {
     ...s,
+    // 非环境资产不该带顶面形状 / 抽象楼梯（见 stripAgentTopShape）：历史存档与手工 JSON 都可能残留。
+    objects: stripAgentTopShape(s.objects),
     segments,
     cameraMoves: s.cameraMoves.map((move) =>
       move.speedKeys
@@ -631,6 +868,15 @@ function sanitizeState(s: DirectorState): DirectorState {
     groups: s.groups?.map((g) => (g.dynamics ? g : { ...g, dynamics: true })),
   };
 }
+
+/*
+ * 「放在 (x, z)，该落在多高的面上」以及「按该层高做水平分离」——
+ * 这两件事连同它们的**先后顺序**一起搬到了 `engine/place.ts` 的 `placeObject`。
+ *
+ * 搬走的原因不是分层洁癖，而是这里原本抄了三份（moveObject / addAsset / updateAsset），
+ * 三份都把 separate 放在定高之前 —— 于是同层时垂直必然相交，盒子一靠近平台就被推开，
+ * "叠上去"永远走不到。不变量只留一处，才不会再次跑偏。
+ */
 
 /**
  * 团队路线的归属者：整队只 author 一条路线，挂在锚点（members[0]）上。
@@ -804,7 +1050,13 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
     activeCameraId: "CAM_A",
     viewLocked: false,
     pathDrawMode: false,
+    stairLinkFrom: null,
+    pickHint: null,
+    stairDraft: null,
+    walkPick: null,
     dragging: false,
+    terrainGesture: false,
+    dragReach: null,
 
     // 播放需要连续时间，不能在这里做 0.1s 量化。
     setTime: (time) =>
@@ -828,6 +1080,50 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
 
     setViewMode: (mode) => set({ viewMode: mode }),
 
+    setWorldMode: (mode) =>
+      set((store) => ({
+        state: { ...store.state, revision: store.state.revision + 1, worldMode: mode },
+      })),
+
+    setShowNames: (show) =>
+      set((store) => ({
+        state: { ...store.state, revision: store.state.revision + 1, showNames: show },
+      })),
+
+    toggleShowName: (objectId) =>
+      set((store) => {
+        const target = store.state.objects.find((o) => o.id === objectId);
+        if (!target) return {};
+        // 反相写入时从"当前实际是否可见"出发 —— 否则在场景处于「默认」且个体没写时，
+        // 点一下会写成 false 却看不出变化。判定走唯一出口 engine/nameVisibility（场景三态优先）。
+        const current = nameVisible(store.state.showNames, target);
+        return {
+          state: {
+            ...store.state,
+            revision: store.state.revision + 1,
+            objects: store.state.objects.map((o) =>
+              o.id === objectId ? { ...o, showName: !current } : o,
+            ),
+          },
+        };
+      }),
+
+    toggleCameraShowName: (cameraId) =>
+      set((store) => {
+        const target = store.state.cameras.find((c) => c.id === cameraId);
+        if (!target) return {};
+        const current = nameVisible(store.state.showNames, target);
+        return {
+          state: {
+            ...store.state,
+            revision: store.state.revision + 1,
+            cameras: store.state.cameras.map((c) =>
+              c.id === cameraId ? { ...c, showName: !current } : c,
+            ),
+          },
+        };
+      }),
+
     setActiveCamera: (cameraId) => set({ activeCameraId: cameraId }),
 
     toggleViewLocked: () => set((store) => ({ viewLocked: !store.viewLocked })),
@@ -835,6 +1131,11 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
     togglePathDraw: () => set((store) => ({ pathDrawMode: !store.pathDrawMode })),
 
     setDragging: (dragging) => set({ dragging }),
+
+    setTerrainGesture: (on) =>
+      set((store) => (store.terrainGesture === on ? {} : { terrainGesture: on })),
+
+    setDragReach: (hint) => set({ dragReach: hint }),
 
     selectObject: (objectId) =>
       set((store) => ({
@@ -881,7 +1182,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
 
     closeRing: () => set({ radialTarget: null }),
 
-    moveObject: (objectId, x, z) =>
+    moveObject: (objectId, x, z, layerY, forceTerrain) =>
       set((store) => {
         const state = store.state;
         const target = state.objects.find((o) => o.id === objectId);
@@ -892,11 +1193,51 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           (g) => g.dynamics && g.members[0] === objectId,
         );
         if (team && team.locked) return {};
-        // set 资产落点需与已有环境资产分离，避免穿模。
-        const { x: nx, z: nz } =
-          target && target.role === "set"
-            ? separateSetAsset(state.objects, objectId, x, z)
-            : { x, z };
+        // 落位：定层高 → 按该层高分离（顺序见 engine/place 的 placeObject）。
+        // 拖到平台上就叠上去（set）／站上去（agent），拖开就落回基准面。
+        const placed = placeObject(state, objectId, x, z, layerY, forceTerrain);
+        const nx = placed.x;
+        const nz = placed.z;
+        const baseY = placed.baseY;
+
+        // ── 堆叠传播（见 engine/stack.ts）──────────────────────────────
+        // 拖的是 set 时，压在它上面的整条堆叠链跟着一起走：
+        //   水平：按根的水平位移 (Δx, Δz) 平移，相对位置不变；
+        //   垂直：按根的层高变化 Δy 同步抬高 / 降低 —— 否则根部被抬上平台后
+        //         上层还停在旧高度，会嵌进根部里（塔被压扁），
+        //         settleStack 只会"掉"不会"抬"，修不了。
+        // 平移完再自下而上复位各层 baseY（整体踩空就一起落）。
+        //
+        // 只在 terrain 生效：planar 世界没有堆叠（placeObject 也不写 baseY），
+        // 此时必须逐像素走老路径。`baseY === undefined` 正是"非 terrain"的判据。
+        const stackMode = target?.role === "set" && baseY !== undefined;
+        const chainIds = stackMode ? stackChain(state, objectId).map((o) => o.id) : [objectId];
+        const followers = new Set(chainIds.slice(1));
+        const rootDX = nx - (target?.x ?? nx);
+        const rootDZ = nz - (target?.z ?? nz);
+        const rootDY = baseY !== undefined ? baseY - (target?.baseY ?? 0) : 0;
+
+        let objects = state.objects.map((object) => {
+          if (object.id === objectId) {
+            return { ...object, x: nx, z: nz, ...(baseY !== undefined ? { baseY } : {}) };
+          }
+          // 上层：跟随平移与抬升。bottom（拱洞下探）也要同步位移，见 engine/stack.ts。
+          if (followers.has(object.id)) {
+            return {
+              ...object,
+              x: object.x + rootDX,
+              z: object.z + rootDZ,
+              ...(baseY !== undefined ? { baseY: (object.baseY ?? 0) + rootDY } : {}),
+              ...(object.bottom !== undefined ? { bottom: object.bottom + rootDY } : {}),
+            };
+          }
+          return object;
+        });
+        // 平移后自下而上复位各层 baseY：整体踩空就一起落，落在新平台上就一起抬。
+        // settleStack 用 { ...state, objects } 的临时 state，这样它看到的已是平移后的坐标。
+        if (stackMode) {
+          objects = settleStack({ ...state, objects }, chainIds);
+        }
 
         // 拖动对象时，其第一段路径的起点跟随 ORIGIN：
         // 否则播放到该段时，对象会从新的 ORIGIN 瞬移回老起点。
@@ -913,9 +1254,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           state: {
             ...state,
             revision: state.revision + 1,
-            objects: state.objects.map((object) =>
-              object.id === objectId ? { ...object, x: nx, z: nz } : object,
-            ),
+            objects,
             segments,
             handoffs: first ? reconcileHandoffs(segments, state.handoffs) : state.handoffs,
           },
@@ -985,14 +1324,20 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         color: animal ? animal.color : preset.color,
         ...(animal ? { species: animal.species } : {}),
       };
-      // set 资产落点需与已有环境资产分离，避免穿模（agent 可自由摆放）。
-      const { x: placedX, z: placedZ } =
-        preset.role === "set"
-          ? separateSetAsset([...state.objects, asset], id, spawnX, spawnZ)
-          : { x: spawnX, z: spawnZ };
-      const placed: DirectorObject = { ...asset, x: placedX, z: placedZ };
+      // 落位：定层高 → 按该层高分离（顺序见 engine/place 的 placeObject）。
+      // 新建资产直接落在落点处最高的可站立面上（terrain 模式）；set 叠起来，
+      // agent 站上去 —— 落点语义一致。拖放携带了射线拾取的高度时以它为准。
+      // placeObject 需要对象已在 objects 里，所以先把它并进一份临时视图。
+      const staged: DirectorState = { ...state, objects: [...state.objects, asset] };
+      const placed = placeObject(staged, id, spawnX, spawnZ, at?.y, at?.terrain);
+      const next: DirectorObject = {
+        ...asset,
+        x: placed.x,
+        z: placed.z,
+        ...(placed.baseY !== undefined ? { baseY: placed.baseY } : {}),
+      };
       set({
-        state: { ...state, revision: state.revision + 1, objects: [...state.objects, placed] },
+        state: { ...state, revision: state.revision + 1, objects: [...state.objects, next] },
         selectedKind: "object",
         selectedId: id,
         selectedItem: null,
@@ -1005,8 +1350,7 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
      * 只给「组」设定一条路线——锚点（members[0]）承载它，其余队员由求解器按
      * formation 实时跟随（匀速保持编队、变速/变线弹簧回弹）。
      */
-    addGroupAt: (category, count, formation, at, species) => {
-      const store = get();
+    addGroupAt: (category, count, formation, at, species) => {      const store = get();
       const { state } = store;
       const preset = ASSET_PRESETS[category];
       if (!preset) return;
@@ -1019,6 +1363,12 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
 
       const created: DirectorObject[] = [];
       const members: string[] = [];
+      // 整队一起落位：每生成一个就先并进 `staged`，再走 `placeObject`。
+      // 逐个落位而不是"先生成全部再统一摆"很关键 —— 后面的队员要能看见前面的，
+      // 这样他们既会各自吸附到脚下的台面，也会互相避免挤在同一点。
+      // 不给 layerY：队员散在编队槽位上，锚点头顶拾到的那一层不代表每个队员脚下那一层，
+      // 各自按自己的 (x, z) 反查才是对的（这正是 `restingBaseY` 的 fallback 路径）。
+      let staged: DirectorState = { ...state };
       for (let i = 0; i < total; i += 1) {
         let n = state.objects.filter((o) => o.category === category).length + created.length + 1;
         let id = `AST_${category.toUpperCase()}_${String(n).padStart(2, "0")}`;
@@ -1028,18 +1378,30 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         }
         // 初始摆放沿用求解器同一套编队槽位（本地坐标 forward = +z, right = +x）。
         const slot = formationSlotOf(formation, spacing, i, total);
-        created.push({
+        const spawnX = Math.round((baseX + slot.right) * 10) / 10;
+        const spawnZ = Math.round((baseZ + slot.fwd) * 10) / 10;
+        const member: DirectorObject = {
           id,
           type: preset.role === "agent" ? "actor" : "prop",
           category,
           role: preset.role,
-          x: Math.round((baseX + slot.right) * 10) / 10,
-          z: Math.round((baseZ + slot.fwd) * 10) / 10,
+          x: spawnX,
+          z: spawnZ,
           rotation: 0,
           footprint: animal ? { ...animal.footprint } : { ...preset.footprint },
           color: animal ? animal.color : preset.color,
           ...(animal ? { species: animal.species } : {}),
-        });
+        };
+        staged = { ...staged, objects: [...staged.objects, member] };
+        const placed = placeObject(staged, id, spawnX, spawnZ, undefined, at?.terrain);
+        const next: DirectorObject = {
+          ...member,
+          x: placed.x,
+          z: placed.z,
+          ...(placed.baseY !== undefined ? { baseY: placed.baseY } : {}),
+        };
+        staged = { ...staged, objects: [...staged.objects.slice(0, -1), next] };
+        created.push(next);
         members.push(id);
       }
 
@@ -1070,6 +1432,77 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
       });
     },
 
+    arrayAsset: (sourceId, spec) => {
+      const store = get();
+      const { state } = store;
+      const source = state.objects.find((o) => o.id === sourceId);
+      if (!source) return;
+      // 第 0 个槽位与源对象当前位置重合 → 丢掉，源留在原处，副本从偏移 1 开始。
+      const slots = arraySlots(source, spec).slice(1);
+      if (slots.length === 0) return;
+
+      const created: DirectorObject[] = [];
+      // id 沿用 addAsset / addGroupAt 的同类计数规则，并保持全局唯一。
+      let n = state.objects.filter((o) => o.category === source.category).length + 1;
+      const nextId = () => {
+        let id = `AST_${source.category.toUpperCase()}_${String(n).padStart(2, "0")}`;
+        while ([...state.objects, ...created].some((o) => o.id === id)) {
+          n += 1;
+          id = `AST_${source.category.toUpperCase()}_${String(n).padStart(2, "0")}`;
+        }
+        n += 1;
+        return id;
+      };
+
+      // 逐个"先并进 staged 再 placeObject" —— 与 addGroupAt 同一模式：
+      // 后面的副本要能看见前面的，否则它们会在同一个 x/z 上互相重叠。
+      // 每个副本都由 placeObject 反查自己脚下的支撑面（terrain），planar 下不写 baseY。
+      let staged: DirectorState = { ...state };
+      for (const slot of slots) {
+        const cid = nextId();
+        // 拱洞：`bottom` 是绝对高度，落位前先按"下探量"给个初值（可能还要被 placeObject 改），
+        // 落位后用真实 baseY 重算一次。普通对象没有 bottom，走展开路径自然不带。
+        const sink = (source.baseY ?? 0) - (source.bottom ?? source.baseY ?? 0);
+        const seedY = slot.baseY ?? source.baseY ?? 0;
+        const draft: DirectorObject = {
+          ...source,
+          id: cid,
+          x: slot.x,
+          z: slot.z,
+          ...(source.bottom !== undefined ? { bottom: seedY - sink } : {}),
+        };
+        staged = { ...staged, objects: [...staged.objects, draft] };
+        // stair 的 slot.baseY 是作者的显式意图 → 作为 layerY 传进去，它是权威。
+        const placed = placeObject(staged, cid, slot.x, slot.z, slot.baseY);
+        const copy: DirectorObject = {
+          ...draft,
+          x: placed.x,
+          z: placed.z,
+          ...(placed.baseY !== undefined ? { baseY: placed.baseY } : {}),
+        };
+        if (source.bottom !== undefined && placed.baseY !== undefined) {
+          // 与 settleStack 同一条不变量：保持"下探量"而非 bottom 的绝对值。
+          copy.bottom = placed.baseY - sink;
+        }
+        staged = { ...staged, objects: [...staged.objects.slice(0, -1), copy] };
+        created.push(copy);
+      }
+
+      // 源若是某个堆叠的根，它上面压着的塔**不会**被复制 —— 阵列复制的是那一个对象。
+      // 副本各自独立落位，源自己的堆叠链完全不受影响。
+      set({
+        state: {
+          ...state,
+          revision: state.revision + 1,
+          objects: [...state.objects, ...created],
+        },
+        selectedKind: "object",
+        selectedId: created[created.length - 1].id,
+        selectedItem: null,
+        selectedPoint: null,
+      });
+    },
+
     updateAsset: (id, patch) =>
       set((store) => {
         const state = store.state;
@@ -1083,20 +1516,40 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           target && needsSeparate
             ? { ...target, ...patch }
             : null;
-        const sep = merged ? separateSetAsset(state.objects, id, merged.x, merged.z) : null;
-        const effectivePatch =
-          sep && patch.x !== undefined
-            ? { ...patch, x: sep.x }
-            : sep && patch.z !== undefined
-              ? { ...patch, z: sep.z }
-              : patch;
+        const effectivePatch: Partial<DirectorObject> = { ...patch };
+        // 改 footprint（尤其 h）会移动"支撑面"的高度 —— 压在上面的对象必须重新落一遍，
+        // 否则薄板变厚，上面的盒子就嵌进板里、薄板变薄就悬空（INV-3D-04）。
+        // 收集当前压在这个对象上的直接上层；改完几何后再 settle。
+        const touchedStack =
+          target && target.role === "set" && patch.footprint !== undefined
+            ? [...stackChain(state, id).map((o) => o.id)]
+            : [];
+        if (merged) {
+          // 落位统一走 placeObject（定层高 → 按层高分离，顺序见 engine/place）。
+          // `patch.baseY` 作为 layerY 传进去：调用方显式给了标高时它就是权威，
+          // 不该被几何反查覆盖 —— 与"指针拾取到的那一层优先"是同一条规则。
+          const placed = placeObject(state, id, merged.x, merged.z, patch.baseY);
+          // 沿用原有语义：只回写调用方实际改过的那一根轴，避免波及其它编辑路径。
+          // （当前 UI 只有 Block 尺寸会走到这里，x / z 分支是留给将来的。）
+          if (patch.x !== undefined) effectivePatch.x = placed.x;
+          else if (patch.z !== undefined) effectivePatch.z = placed.z;
+          if (patch.baseY === undefined && placed.baseY !== undefined) {
+            effectivePatch.baseY = placed.baseY;
+          }
+        }
+        let objects = state.objects.map((o) =>
+          o.id === id ? { ...o, ...effectivePatch } : o,
+        );
+        // 几何变了 → 自下而上复位整条堆叠链的 baseY（见 engine/stack.ts 的 settleStack）。
+        // 传 `touchedStack` 而非 `[id]`：改的是支撑面本身，要重算的是压在它上面的层。
+        if (touchedStack.length > 0) {
+          objects = settleStack({ ...state, objects }, touchedStack);
+        }
         return {
           state: {
             ...state,
             revision: state.revision + 1,
-            objects: state.objects.map((o) =>
-              o.id === id ? { ...o, ...effectivePatch } : o,
-            ),
+            objects,
           },
         };
       }),
@@ -1107,11 +1560,20 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
           m.targetId === id ? { ...m, targetId: undefined } : m,
         );
         const objects = store.state.objects.filter((o) => o.id !== id);
+        // 删掉的是"被压着的"底座时，压在上面的整条链失去支撑 → 必须向下重新落位，
+        // 否则它们会悬在原来那条链的高度上（INV-3D-04）。删前先取链，删后再 settle。
+        const orphanChain = stackChain(store.state, id)
+          .map((o) => o.id)
+          .filter((cid) => cid !== id);
+        const settled =
+          orphanChain.length > 0
+            ? settleStack({ ...store.state, objects }, orphanChain)
+            : objects;
         return {
           state: {
             ...store.state,
             revision: store.state.revision + 1,
-            objects,
+            objects: settled,
             segments: store.state.segments.filter((s) => s.object !== id),
             constraints: store.state.constraints.filter((c) => c.subject !== id && c.target !== id),
             cameraMoves,
@@ -1815,6 +2277,240 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
       set({ selectedItem: segment.id });
     },
 
+    drawStairPath: (objectId, points) => {
+      const object = get().state.objects.find((o) => o.id === objectId);
+      if (!object) return;
+      // 与 `drawAssetPath` 同一个抽稀器、同一个容差 —— 两处的手感必须一致。
+      const thin = simplifyPath(points, HAND_DRAW_EPSILON);
+      if (thin.length < 2) return;
+      const stamp = Date.now().toString(36);
+      get().updateAsset(objectId, {
+        // 手绘路径 = 作者在说"这是楼梯"：顶面形状一并在**这个唯一写入点**改掉。
+        // 新拖进来的「台阶」默认是平顶，少了这一步就是"画了不生效"。
+        topShape: "stair",
+        stair: {
+          path: thin.map((p, i) => ({
+            id: `SP_${stamp}_${i}`,
+            x: round1(p.x),
+            z: round1(p.z),
+          })),
+        },
+      });
+    },
+
+    beginStairLink: (objectId) => {
+      const source = get().state.objects.find((o) => o.id === objectId);
+      if (!source) return;
+      set({
+        stairLinkFrom: objectId,
+        // 进入模式立刻给一句"下一步点哪儿、怎么退"，否则画布上没有任何"我已经在等目标"的信号。
+        pickHint: {
+          at: [source.x, objectTop(source), source.z],
+          text: "台阶：点另一个高台或地面生成 · Esc 取消",
+          tone: "hint",
+        },
+      });
+    },
+
+    cancelStairLink: () =>
+      set({ stairLinkFrom: null, pickHint: null, stairDraft: null, walkPick: null }),
+
+    pickStairTarget: (targetId, x, z) => {
+      const store = get();
+      const { state } = store;
+      const source = state.objects.find((o) => o.id === store.stairLinkFrom);
+      // 起点已经不存在（被删 / 换了场景）→ 顺手退出模式，别把菜单挂在空气上。
+      if (!source) {
+        set({ stairLinkFrom: null, pickHint: null, stairDraft: null });
+        return;
+      }
+      const target = targetId ? state.objects.find((o) => o.id === targetId) : undefined;
+      // 几何、拒绝文案、折线都在 engine（可被守卫，见 engine/stairLink.ts）—— store 只管落库。
+      const result = planStairLink(state, source, target, x, z);
+      // 语义问题：没有可画的折线，只报告，留在"选目标"状态让作者重点。
+      if (!result.ok && !result.plan) {
+        set({
+          pickHint: { at: result.problem.at, text: result.problem.text, tone: "refuse" },
+        });
+        return;
+      }
+      // 进预览。几何问题（太陡）也进 —— 预览里加个转折点就能把它拉缓，这是唯一的修法。
+      set({
+        stairDraft: {
+          targetId: target?.id ?? null,
+          point: { x: round1(x), z: round1(z) },
+          bends: [],
+          width: DEFAULT_STAIR_WIDTH,
+        },
+        pickHint: result.ok
+          ? null
+          : { at: result.problem.at, text: result.problem.text, tone: "refuse" },
+      });
+    },
+
+    addStairBend: (x, z) => {
+      const store = get();
+      const { state, stairLinkFrom, stairDraft } = store;
+      if (!stairDraft) return;
+      const source = state.objects.find((o) => o.id === stairLinkFrom);
+      if (!source) return;
+      const target = stairDraft.targetId
+        ? state.objects.find((o) => o.id === stairDraft.targetId)
+        : undefined;
+      const result = planStairLink(
+        state,
+        source,
+        target,
+        stairDraft.point.x,
+        stairDraft.point.z,
+        stairDraft.bends,
+        stairDraft.width,
+      );
+      if (!result.plan) return;
+      set({
+        stairDraft: { ...stairDraft, bends: insertBend(result.plan, { x: round1(x), z: round1(z) }) },
+        pickHint: result.ok
+          ? null
+          : { at: result.problem.at, text: result.problem.text, tone: "refuse" },
+      });
+    },
+
+    setStairWidth: (width) => {
+      const { stairDraft } = get();
+      if (!stairDraft) return;
+      // 夹在一个说得通的区间里：太窄的不是台阶，太宽的只是白费几何。
+      set({ stairDraft: { ...stairDraft, width: Math.min(6, Math.max(0.2, round1(width))) } });
+    },
+
+    commitStair: () => {
+      const store = get();
+      const { state, stairLinkFrom, stairDraft } = store;
+      if (!stairDraft) return;
+      const source = state.objects.find((o) => o.id === stairLinkFrom);
+      if (!source) {
+        set({ stairLinkFrom: null, pickHint: null, stairDraft: null });
+        return;
+      }
+      const target = stairDraft.targetId
+        ? state.objects.find((o) => o.id === stairDraft.targetId)
+        : undefined;
+      const result = planStairLink(
+        state,
+        source,
+        target,
+        stairDraft.point.x,
+        stairDraft.point.z,
+        stairDraft.bends,
+        stairDraft.width,
+      );
+      if (!result.ok) {
+        set({
+          pickHint: { at: result.problem.at, text: result.problem.text, tone: "refuse" },
+        });
+        return;
+      }
+      const { start, startY, rise, run, points, width } = result.plan;
+
+      const id = nextStairId(state);
+      const stamp = Date.now().toString(36);
+      const stair: DirectorObject = {
+        id,
+        name: `台阶：${source.name || source.id} → ${target ? target.name || target.id : "地面"}`,
+        type: "prop",
+        category: "structure",
+        role: "set",
+        x: round1(start.x),
+        z: round1(start.z),
+        rotation: 0,
+        topShape: "stair",
+        stair: {
+          // **预览里看到的那条折线**（含作者加的转折点）原样落库 —— 不重算，免得两者分叉。
+          path: points.map((p, i) => ({ id: `SP_${stamp}_${i}`, x: round1(p.x), z: round1(p.z) })),
+        },
+        // h = 两端**实测**高差（派生量，不是作者填的）；w = 作者在预览里定的宽度；
+        // D = 折线水平长（没画路径时的退路）。
+        footprint: { w: round1(width), d: round1(run), h: round1(rise) },
+        // 底面 = 起点处的地面高度：于是楼梯从这一步的地面起、正好爬到目标面。
+        baseY: round1(startY),
+        color: "#8b9bb0",
+      };
+      // 刻意**不做水平分离**：台阶两端本来就贴住两座高台的墙，被推开就断了。
+      set({
+        state: { ...state, revision: state.revision + 1, objects: [...state.objects, stair] },
+        selectedKind: "object",
+        selectedId: id,
+        selectedItem: null,
+        selectedPoint: null,
+        stairLinkFrom: null,
+        pickHint: null,
+        stairDraft: null,
+      });
+    },
+
+    beginWalkPick: (actorId, direction) => {
+      const actor = get().state.objects.find((o) => o.id === actorId);
+      if (!actor) return;
+      set({
+        walkPick: { actorId, direction },
+        // 与连台阶同一套提示：先说清"下一步点哪儿、怎么退"。
+        pickHint: {
+          at: [actor.x, objectTop(actor), actor.z],
+          text: `${direction === "up" ? "走上去" : "走下来"}：点一条楼梯 · Esc 取消`,
+          tone: "hint",
+        },
+      });
+    },
+
+    assignStairWalk: (stairId) => {
+      const store = get();
+      const { state, walkPick } = store;
+      const actor = state.objects.find((o) => o.id === walkPick?.actorId);
+      const stair = state.objects.find((o) => o.id === stairId);
+      if (!actor || !stair || !walkPick) {
+        set({ walkPick: null, pickHint: null });
+        return;
+      }
+      const result = planStairWalk(state, stair, actor, walkPick.direction);
+      if (!result.ok) {
+        // 拒绝 = 报告：模式保持不动，作者换一条楼梯即可。
+        set({
+          pickHint: { at: [stair.x, objectTop(stair), stair.z], text: result.text, tone: "refuse" },
+        });
+        return;
+      }
+      // 复用它最后一条 MOVE 段（没有就新建）—— 与手绘路径 `drawAssetPath` 同一套：
+      // "这个演员要走的路"只有一条，反复安排应当覆盖它，而不是堆出第二条。
+      const moves = get()
+        .state.segments.filter((s) => s.object === actor.id && s.type === "MOVE")
+        .sort((a, b) => a.timeStart - b.timeStart);
+      let segment = moves[moves.length - 1];
+      if (!segment) {
+        get().addSegment(actor.id, undefined);
+        const after = get()
+          .state.segments.filter((s) => s.object === actor.id)
+          .sort((a, b) => a.timeStart - b.timeStart);
+        segment = after[after.length - 1];
+      }
+      if (!segment) return;
+      // **层高必须跟着路线起点的落脚面**：向下走时起点在楼顶，`baseY` 若留在地面，
+      // 落脚链条会从 0 起步 ⇒ 人贴地穿过整座楼梯（见 engine/stairWalk 模块说明）。
+      get().updateAsset(actor.id, { baseY: round1(result.plan.startY) });
+      // 路线点直接来自楼梯的路径（含接近段）—— 没有第二份几何。
+      // **路线必须抽稀**：楼梯路径可能有很多点（手绘 / 螺旋 / 圆角后都在里面），原样写进去
+      // 会在时间轴上塞满节点 —— 段块**左右两端的拖拽把手被这些节点盖住**（就是"拉不动时长"），
+      // 节点多了画布也卡。这里用与画布手绘**同一个抽稀器与容差**（`simplifyPath` 保首尾，
+      // 所以起终点、接近段端点都不会丢），视觉与走位不变（最坏在弯道内侧偏 0.35m）。
+      get().setSegmentPoints(segment.id, simplifyPath(result.plan.points, HAND_DRAW_EPSILON));
+      set({
+        walkPick: null,
+        pickHint: null,
+        selectedKind: "object",
+        selectedId: actor.id,
+        selectedItem: segment.id,
+        selectedPoint: null,
+      });
+    },
+
     setHandoffMode: (handoffId, mode) => {
       const store = get();
       const state = store.state;
@@ -1888,6 +2584,18 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
     setSegmentSpeedKeys: (segmentId, keys) =>
       patchSegment(segmentId, { speedKeys: normalizeSpeedKeys(keys) ?? undefined }),
 
+    setSegmentArc: (segmentId, arc) =>
+      // 有弧线 → 准线性 ease（保证起跳瞬间有水平速度）；清除弧线 → 恢复默认缓动由调用方决定，
+      // 这里只把 arc 抹掉、ease 留原样（免得"取消跳跃"把作者调过的手感也一起改掉）。
+      patchSegment(segmentId, arc ? { arc, ease: [...JUMP_EASE] } : { arc: undefined }),
+
+    // 顶点拖拽专用：只动 apex，保留作者 ease 与弧线其它字段。
+    setSegmentArcApex: (segmentId, apex) => {
+      const seg = get().state.segments.find((s) => s.id === segmentId);
+      if (!seg || !seg.arc) return;
+      patchSegment(segmentId, { arc: rewriteArcApex(seg.arc, apex) });
+    },
+
     addCamera: () => {
       const store = get();
       const { state } = store;
@@ -1918,51 +2626,6 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
         orbitDeg: 90,
         dollyScale: 1,
         craneHeight: 0,
-        ease: [0.42, 0, 0.58, 1],
-      };
-      const cameraMoves = [...state.cameraMoves, move];
-      set({
-        state: {
-          ...state,
-          revision: state.revision + 1,
-          cameras: [...state.cameras, camera],
-          cameraMoves,
-          cameraJunctions: reconcileCameraJunctions(cameraMoves, state.cameraJunctions),
-        },
-        selectedKind: "camera",
-        selectedId: id,
-        selectedItem: move.id,
-        activeCameraId: store.activeCameraId ?? id,
-      });
-    },
-
-    addDroneCamera: () => {
-      const store = get();
-      const { state } = store;
-      const id = nextCameraId(state);
-      const camera: CameraObject = {
-        id,
-        name: id,
-        color: CAMERA_COLORS[state.cameras.length % CAMERA_COLORS.length],
-        targetId: state.objects.find((object) => object.type === "actor")?.id ?? state.objects[0]?.id ?? "",
-        framing: "wide",
-        view: "high",
-        side: "back_3_4",
-        lensMm: 24,
-        motion: "DRONE",
-        kind: "drone",
-      };
-      const start = 0;
-      const end = round1(Math.min(state.duration, start + Math.max(2, state.duration * 0.5)));
-      const move: CameraMove = {
-        id: nextCameraMoveId(state, id),
-        camera: id,
-        type: "DRONE",
-        timeStart: start,
-        timeEnd: end,
-        orbitDeg: 180,
-        dollyScale: 1.4,
-        craneHeight: 8,
         ease: [0.42, 0, 0.58, 1],
       };
       const cameraMoves = [...state.cameraMoves, move];

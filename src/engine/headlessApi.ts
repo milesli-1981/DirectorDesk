@@ -1,5 +1,5 @@
 import { useDirectorStore } from "../state/directorStore";
-import { recordCameraPov } from "./videoExport";
+import { recordCameraPov, recordCameraMp4 } from "./videoExport";
 
 /**
  * 无头渲染 API：让外部（如 MCP server 通过 Playwright）把一份场景 JSON 推进来、
@@ -18,11 +18,15 @@ export interface PrevisRequest {
   fps?: number;
   /** 视频上传地址（MCP server 的本地接收器）。省略则只返回成功、不落盘。 */
   receiver?: string;
+  /** 输出格式：mp4（默认，WebCodecs 直出；不支持时自动回退 webm）或 webm（MediaRecorder 录制）。 */
+  format?: "mp4" | "webm";
 }
 
 export interface PrevisResult {
   /** 接收器回写的视频文件绝对路径。 */
   path?: string;
+  /** 实际输出的 MIME（请求 mp4 但回退 webm 时以实际为准）。 */
+  mime?: string;
   /** 出错信息。 */
   error?: string;
 }
@@ -63,15 +67,30 @@ export async function previsRender(req: PrevisRequest): Promise<PrevisResult> {
     const cameraId =
       req.camera && cameras.some((c) => c.id === req.camera) ? req.camera : cameras[0].id;
 
-    const blob = await recordCameraPov(cameraId, req.fps ?? 24);
+    // 默认 mp4（WebCodecs 直出，画质/封装更好）；WebCodecs 不可用或被拒时回退 webm，保证总能出片。
+    const wantMp4 = req.format !== "webm";
+    let blob: Blob;
+    let mime: string;
+    if (wantMp4) {
+      try {
+        blob = await recordCameraMp4(cameraId, req.fps ?? 24);
+        mime = "video/mp4";
+      } catch {
+        blob = await recordCameraPov(cameraId, req.fps ?? 24);
+        mime = "video/webm";
+      }
+    } else {
+      blob = await recordCameraPov(cameraId, req.fps ?? 24);
+      mime = "video/webm";
+    }
 
     let path: string | undefined;
     if (req.receiver) {
       const resp = await fetch(req.receiver, { method: "POST", body: blob });
-      const data = (await resp.json().catch(() => ({}))) as { path?: string };
+      const data = (await resp.json().catch(() => ({}))) as { path?: string; mime?: string };
       path = data.path;
     }
-    return { path };
+    return { path, mime };
   } catch (err) {
     return { error: err instanceof Error ? err.message : String(err) };
   }

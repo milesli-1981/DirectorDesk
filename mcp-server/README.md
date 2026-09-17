@@ -16,7 +16,7 @@ LLM ──(MCP)──> render_previs(sceneJson)
               └─ 返回视频文件绝对路径 (file:// 资源)
 ```
 
-复用现有渲染与 `MediaRecorder` 导出逻辑（无重写）；Web App 侧只需 `?headless=1` 挂载 `window.previsRender`。
+复用现有渲染与 `videoExport` 导出逻辑（无重写）：默认优先 WebCodecs 直出 MP4，浏览器不支持时自动回退 MediaRecorder(WebM)；Web App 侧只需 `?headless=1` 挂载 `window.previsRender`。
 
 ## 前置
 
@@ -65,8 +65,9 @@ npm start
 | `camera` | string? | 相机 id；省略则录第一台相机 |
 | `fps` | number? | 帧率，默认 24 |
 | `appUrl` | string? | Web App 地址，默认 `PREVIS_APP_URL` / `http://localhost:5173` |
+| `format` | `"mp4" \| "webm"`? | 输出格式，默认 `mp4`（WebCodecs 直出；浏览器不支持时自动回退 `webm`）；`webm` 走 MediaRecorder 实时录制 |
 
-返回视频文件的本地绝对路径（及 `file://` 资源）。渲染为**实时 1x**，耗时 ≈ 场景时长。
+返回视频文件的本地绝对路径（及 `file://` 资源），资源 `mimeType` 为实际产出格式（mp4 回退 webm 时随之变化）。渲染为**实时 1x**，耗时 ≈ 场景时长。
 
 ## 配合 Skill 使用
 

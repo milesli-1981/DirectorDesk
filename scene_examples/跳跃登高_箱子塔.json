@@ -1,0 +1,285 @@
+{
+  "manifest": {
+    "name": "跳跃登高 · 箱子塔",
+    "order": [{ "id": "SCN_CLIMB", "name": "跳跃登高 · 演员逐级跳上错落的箱子，登顶最高平台" }],
+    "activeSceneId": "SCN_CLIMB"
+  },
+  "scenes": {
+    "SCN_CLIMB": {
+      "revision": 3,
+      "duration": 12,
+      "aspectRatio": "16:9",
+      "worldMode": "terrain",
+      "showNames": "default",
+      "objects": [
+        {
+          "id": "ACTOR",
+          "name": "特技演员（从地面起跳，逐级登上箱子塔）",
+          "type": "actor",
+          "category": "human",
+          "role": "agent",
+          "x": 0,
+          "z": 8,
+          "rotation": 0,
+          "footprint": { "w": 0.6, "d": 0.6, "h": 1.8 },
+          "baseY": 2.5,
+          "color": "#67a7ff"
+        },
+        {
+          "id": "BOX1",
+          "name": "① 矮箱 h=0.5m（第一跳：地面 → 0.5m，在攀爬上限内，走 climb 弧）",
+          "type": "prop",
+          "category": "structure",
+          "role": "set",
+          "x": 0,
+          "z": 6,
+          "rotation": 0,
+          "footprint": { "w": 1.2, "d": 1.2, "h": 0.5 },
+          "color": "#8b9bb0"
+        },
+        {
+          "id": "BOX2",
+          "name": "② 中箱 h=1.0m（第二跳：0.5m → 1.0m）",
+          "type": "prop",
+          "category": "structure",
+          "role": "set",
+          "x": 1.5,
+          "z": 4,
+          "rotation": 0,
+          "footprint": { "w": 1.2, "d": 1.2, "h": 1.0 },
+          "color": "#9fb4cc"
+        },
+        {
+          "id": "BOX3",
+          "name": "③ 高箱 h=1.5m（第三跳：1.0m → 1.5m）",
+          "type": "prop",
+          "category": "structure",
+          "role": "set",
+          "x": 0,
+          "z": 2,
+          "rotation": 0,
+          "footprint": { "w": 1.2, "d": 1.2, "h": 1.5 },
+          "color": "#a9c0d6"
+        },
+        {
+          "id": "BOX4",
+          "name": "④ 更高箱 h=2.0m（第四跳：1.5m → 2.0m）",
+          "type": "prop",
+          "category": "structure",
+          "role": "set",
+          "x": 1.5,
+          "z": 0,
+          "rotation": 0,
+          "footprint": { "w": 1.2, "d": 1.2, "h": 2.0 },
+          "color": "#b6cde0"
+        },
+        {
+          "id": "PLATFORM",
+          "name": "⑤ 最高平台 h=2.5m（终点：落到这里收住）",
+          "type": "prop",
+          "category": "structure",
+          "role": "set",
+          "x": 0,
+          "z": -2,
+          "rotation": 0,
+          "footprint": { "w": 2.4, "d": 2.4, "h": 2.5 },
+          "color": "#cfe0ef"
+        },
+        {
+          "id": "D1",
+          "name": "散落道具箱 h=0.8m（仅布景，不在路线上）",
+          "type": "prop",
+          "category": "structure",
+          "role": "set",
+          "x": 4,
+          "z": 4,
+          "rotation": 20,
+          "footprint": { "w": 1, "d": 1, "h": 0.8 },
+          "color": "#6f7d8c"
+        },
+        {
+          "id": "D2",
+          "name": "散落道具箱 h=1.2m（仅布景）",
+          "type": "prop",
+          "category": "structure",
+          "role": "set",
+          "x": -3,
+          "z": 2,
+          "rotation": -15,
+          "footprint": { "w": 1, "d": 1, "h": 1.2 },
+          "color": "#7a8896"
+        },
+        {
+          "id": "D3",
+          "name": "散落道具箱 h=0.6m（仅布景）",
+          "type": "prop",
+          "category": "structure",
+          "role": "set",
+          "x": 3.5,
+          "z": -2,
+          "rotation": 35,
+          "footprint": { "w": 1, "d": 1, "h": 0.6 },
+          "color": "#6f7d8c"
+        },
+        {
+          "id": "D4",
+          "name": "散落道具箱 h=1.0m（仅布景）",
+          "type": "prop",
+          "category": "structure",
+          "role": "set",
+          "x": -2.5,
+          "z": -3,
+          "rotation": 10,
+          "footprint": { "w": 1, "d": 1, "h": 1.0 },
+          "color": "#7a8896"
+        },
+        {
+          "id": "D5",
+          "name": "散落道具箱 h=0.4m（仅布景）",
+          "type": "prop",
+          "category": "structure",
+          "role": "set",
+          "x": 1,
+          "z": 9.5,
+          "rotation": 0,
+          "footprint": { "w": 1, "d": 1, "h": 0.4 },
+          "color": "#6f7d8c"
+        }
+      ],
+      "segments": [
+        {
+          "id": "SEG1",
+          "type": "MOVE",
+          "object": "ACTOR",
+          "startX": 0,
+          "startZ": 8,
+          "endX": 0,
+          "endZ": 6,
+          "points": [],
+          "timeStart": 0.5,
+          "timeEnd": 2.5,
+          "ease": [0.15, 0.15, 0.85, 0.85],
+          "speedKeys": [
+            { "id": "S1_A", "t": 0, "v": 0, "ease": [0, 0, 1, 1] },
+            { "id": "S1_B", "t": 0.12, "v": 0.95, "ease": [0, 0, 1, 1] },
+            { "id": "S1_C", "t": 1, "v": 1, "ease": [0, 0, 1, 1] }
+          ],
+          "arc": { "mode": "climb" }
+        },
+        {
+          "id": "SEG2",
+          "type": "MOVE",
+          "object": "ACTOR",
+          "startX": 0,
+          "startZ": 6,
+          "endX": 1.5,
+          "endZ": 4,
+          "points": [],
+          "timeStart": 2.5,
+          "timeEnd": 4.5,
+          "ease": [0.15, 0.15, 0.85, 0.85],
+          "speedKeys": [
+            { "id": "S2_A", "t": 0, "v": 0, "ease": [0, 0, 1, 1] },
+            { "id": "S2_B", "t": 0.12, "v": 0.95, "ease": [0, 0, 1, 1] },
+            { "id": "S2_C", "t": 1, "v": 1, "ease": [0, 0, 1, 1] }
+          ],
+          "arc": { "mode": "climb" }
+        },
+        {
+          "id": "SEG3",
+          "type": "MOVE",
+          "object": "ACTOR",
+          "startX": 1.5,
+          "startZ": 4,
+          "endX": 0,
+          "endZ": 2,
+          "points": [],
+          "timeStart": 4.5,
+          "timeEnd": 6.5,
+          "ease": [0.15, 0.15, 0.85, 0.85],
+          "speedKeys": [
+            { "id": "S3_A", "t": 0, "v": 0, "ease": [0, 0, 1, 1] },
+            { "id": "S3_B", "t": 0.12, "v": 0.95, "ease": [0, 0, 1, 1] },
+            { "id": "S3_C", "t": 1, "v": 1, "ease": [0, 0, 1, 1] }
+          ],
+          "arc": { "mode": "climb" }
+        },
+        {
+          "id": "SEG4",
+          "type": "MOVE",
+          "object": "ACTOR",
+          "startX": 0,
+          "startZ": 2,
+          "endX": 1.5,
+          "endZ": 0,
+          "points": [],
+          "timeStart": 6.5,
+          "timeEnd": 8.5,
+          "ease": [0.15, 0.15, 0.85, 0.85],
+          "speedKeys": [
+            { "id": "S4_A", "t": 0, "v": 0, "ease": [0, 0, 1, 1] },
+            { "id": "S4_B", "t": 0.12, "v": 0.95, "ease": [0, 0, 1, 1] },
+            { "id": "S4_C", "t": 1, "v": 1, "ease": [0, 0, 1, 1] }
+          ],
+          "arc": { "mode": "climb" }
+        },
+        {
+          "id": "SEG5",
+          "type": "MOVE",
+          "object": "ACTOR",
+          "startX": 1.5,
+          "startZ": 0,
+          "endX": 0,
+          "endZ": -2,
+          "points": [],
+          "timeStart": 8.5,
+          "timeEnd": 10.5,
+          "ease": [0.15, 0.15, 0.85, 0.85],
+          "speedKeys": [
+            { "id": "S5_A", "t": 0, "v": 0, "ease": [0, 0, 1, 1] },
+            { "id": "S5_B", "t": 0.12, "v": 0.95, "ease": [0, 0, 1, 1] },
+            { "id": "S5_C", "t": 1, "v": 1, "ease": [0, 0, 1, 1] }
+          ],
+          "arc": { "mode": "climb" }
+        }
+      ],
+      "handoffs": [],
+      "constraints": [],
+      "cameras": [
+        {
+          "id": "CAM_FOLLOW",
+          "name": "跟拍 · 3/4 高位（看逐级登高全貌）",
+          "color": "#8ad1ff",
+          "targetId": "ACTOR",
+          "framing": "wide",
+          "view": "high",
+          "side": "front_3_4",
+          "lensMm": 35,
+          "motion": "FOLLOW"
+        },
+        {
+          "id": "CAM_SIDE",
+          "name": "侧视 · 剖面（每一跳的起落高度差一眼看清）",
+          "color": "#7bd88f",
+          "targetId": "ACTOR",
+          "framing": "wide",
+          "view": "eye_level",
+          "side": "side",
+          "lensMm": 35,
+          "motion": "FOLLOW"
+        }
+      ],
+      "cameraMoves": [],
+      "cameraJunctions": [],
+      "actions": [
+        { "id": "ACT1", "object": "ACTOR", "timeStart": 0.5, "timeEnd": 2.5, "kind": "run", "intensity": 1 },
+        { "id": "ACT2", "object": "ACTOR", "timeStart": 2.5, "timeEnd": 4.5, "kind": "run", "intensity": 1 },
+        { "id": "ACT3", "object": "ACTOR", "timeStart": 4.5, "timeEnd": 6.5, "kind": "run", "intensity": 1 },
+        { "id": "ACT4", "object": "ACTOR", "timeStart": 6.5, "timeEnd": 8.5, "kind": "run", "intensity": 1 },
+        { "id": "ACT5", "object": "ACTOR", "timeStart": 8.5, "timeEnd": 10.5, "kind": "run", "intensity": 1 }
+      ],
+      "groups": [],
+      "customActions": []
+    }
+  }
+}

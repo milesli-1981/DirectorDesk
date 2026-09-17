@@ -25,6 +25,9 @@ import {
 } from "./ease";
 import { baseHeading, objectFacing, objectPosition, travelHeading } from "./solver";
 import { sampleCamPath } from "./cameraPath";
+import { objectBottom, objectTop, standingHeightFor, supportUnder } from "./ground";
+import { locomotionOf } from "./locomotion";
+import { airborneLiftAt, arcActive, activeSegmentAt, pathHeightAt } from "./pathHeight";
 
 export interface ResolvedCamera {
   position: Vec3;
@@ -64,6 +67,274 @@ const VIEW_HEIGHT: Record<CameraView, number> = {
   overhead: 0,
 };
 
+/* ------------------------------------------------- 相机体系相对化（Phase 6） */
+
+/**
+ * 演员的**视线高度**（相对脚下，米）。这是"人"这个参照系里唯一一个需要对齐的绝对量：
+ * POV 的主观视线、OTS 的前景肩高，都用它。
+ */
+export const ACTOR_EYE_HEIGHT = 1.55;
+
+/**
+ * 相机体系必须**相对地面高程派生**，而不是用绝对世界米数。
+ *
+ * ## 为什么
+ *
+ * 在 Phase 5 之前，世界上唯一的"地面"就是 `y = 0`，于是 `VIEW_HEIGHT` 写绝对米数是对的。
+ * 有了地形 / 平台之后，`actor + 胸高` 这件事在平地与 3m 平台上不再等价：
+ *
+ * | 情形 | 绝对高度（旧） | 相对高度（新） |
+ * |---|---|---|
+ * | 演员站在 3m 平台上，chest 跟拍 | 机位 y = 3 + 1.35 = **4.35** | 同 |
+ * | 演员站在 3m 平台**下方**的地面上，chest | 机位 y = 0 + 2.1 = **2.1** ✅ | 同 |
+ * | 演员站在 3m 平台上，`locale: "local"` 场景（平台自身在 y=0） | —— | 3 + 1.35 = 4.35 |
+ *
+ * 真正会坏的是"地面本身不是 0"的场景 —— 例如整个场景被抬高、或目标站在高台上而
+ * 相机按平地高度摆放（机位埋进平台里）。相对化之后，**机位高度 = 目标脚下地面 + 视高**，
+ * 平地上 `ground === 0` ⇒ 与扩展前逐值一致。
+ *
+ * ## 三条硬约束
+ *
+ * 1. **planar 下逐值不变**：planar 的 `standingHeightFor` 恒为 `object.baseY ?? 0`，
+ *    而所有现有对象的 `baseY` 都是 undefined ⇒ `ground === 0` ⇒ 退化成原来的绝对米数。
+ *    §28 是这条的回归守卫。
+ * 2. **纯函数**：只读 `state.objects` / `state.segments`（红线 10）。相机每帧可能被防抖
+ *    采样十几次，这里绝不能有任何缓存外的状态。
+ * 3. **与渲染同源**：站在地面上的对象用 `standingHeightFor`（渲染走的就是这条，
+ *    `WorldView` 的 set / agent 落位），跳跃中的对象用 `pathHeightAt`（`pathHeight.ts` 是
+ *    高度的唯一权威，红线 9）。各写各的就会出现"相机按地面跟、人却跳到了半空"。
+ */
+
+/**
+ * 对象**脚下地面**的高度（不含它自己正在跳的弧线）。
+ *
+ * `movingOnly = true` 时对非 agent（set 资产 / 相机）直接用它的 `baseY ?? 0` ——
+ * set 本来就不"站"在别的东西上，`standingHeightFor` 对它也没意义。
+ */
+function groundElevationOf(
+  state: DirectorState,
+  object: DirectorObject | undefined,
+  x: number,
+  z: number,
+  time: number,
+  movingOnly = false,
+): number {
+  if (!object) return 0;
+  if (movingOnly && object.role === "set") return object.baseY ?? 0;
+  return standingHeightFor(state, object, x, z);
+}
+
+/**
+ * 对象此刻的**实际高度**（含跳跃 / 落差弧线，含台阶 y 低通）。
+ *
+ * 注意：它**不再**与 `groundElevationOf` 的差等于离地量 —— 台阶 y 低通把地面本身
+ * 抹平了，身体贴的是"被抹平的地面"。判离地一律走 `airborneLiftAt`。
+ */
+function bodyHeightOf(
+  state: DirectorState,
+  object: DirectorObject | undefined,
+  x: number,
+  z: number,
+  time: number,
+): number {
+  if (!object) return 0;
+  if (object.role === "set") return object.baseY ?? 0;
+  return pathHeightAt(state, object, x, z, time);
+}
+
+/**
+ * 锚线 / 注视点 / 视线高度共用的「脚下地面」。
+ *
+ * **无弧线时必须用台阶 y 低通后的地面**（= `bodyHeightOf` = `pathHeightAt` 那条）：
+ * 机位平滑了而瞄准点没平滑，两者就会错拍 —— 镜头在每级台阶处先仰后俯
+ * （实测一帧 ~2.7°，比完全不平滑还难看；§32 把这条钉成了不变量）。
+ *
+ * 有弧线时沿用**瞬时**地面：跳跃的既有语义是「机位跟着人飞、注视点留在落地高度」。
+ */
+function anchoredGroundOf(
+  state: DirectorState,
+  object: DirectorObject | undefined,
+  x: number,
+  z: number,
+  time: number,
+): number {
+  if (!object) return 0;
+  if (object.role === "set") return object.baseY ?? 0;
+  const seg = activeSegmentAt(state, object.id, time);
+  if (seg && arcActive(state, seg)) return groundElevationOf(state, object, x, z, time);
+  return bodyHeightOf(state, object, x, z, time);
+}
+
+/** 该对象站在这里时的**视线高度**（世界米）：脚下地面 + 演员眼高。 */
+export function eyeHeightOf(
+  state: DirectorState,
+  objectId: string,
+  time: number,
+  x?: number,
+  z?: number,
+): number {
+  const object = state.objects.find((o) => o.id === objectId);
+  const p = x === undefined || z === undefined ? objectPosition(state, objectId, time) : null;
+  const px = x ?? p!.x;
+  const pz = z ?? p!.z;
+  return anchoredGroundOf(state, object, px, pz, time) + ACTOR_EYE_HEIGHT;
+}
+
+/**
+ * 机位高度的**基准线**：目标脚下地面 + 它的离地量（跳跃 / 落差）。
+ *
+ * 这是「机位挂在目标的哪个高度上」的唯一出处：站在地上时等于脚下地面，
+ * 跳跃中等于弧线高度（机位跟着一起飞）。`followJumpHeight === false` 时改用
+ * `cameraAnchorHeight` 把离地量抹掉 —— 见 §10 方案 b。
+ */
+function anchorLineOf(
+  state: DirectorState,
+  object: DirectorObject | undefined,
+  x: number,
+  z: number,
+  time: number,
+): number {
+  if (!object) return 0;
+  if (object.role === "set") return object.baseY ?? 0;
+  return bodyHeightOf(state, object, x, z, time);
+}
+
+/* ------------------------------------------------- 跟跳防抖（Phase 6 / 03 §10 方案 b） */
+
+/** 判"离地"的容差（米）：1cm 以内算站在地上，避免浮点噪声把每一帧都判成离地。 */
+const AIRBORNE_EPS = 0.01;
+
+/**
+ * 在 `[lo, hi]` 内二分定位"从贴地转为离地"的**那一刻**（返回贴地侧端点）。
+ *
+ * 二分而不是解析求解：判据是 `pathHeightAt`（弧线 / 瞬时对齐 / 落差三种来源的合并），
+ * 没有闭式反函数；而它是时间的纯函数，二分 8 步就够准（区间 0.125s → ≈0.5ms）。
+ *
+ * 返回**贴地侧**端点。调用方只拿它去查"那一刻脚下的地面"，但取贴地侧仍有意义：
+ * 离地侧那一刻的地面查询可能已经跨到"下一层"（走出平台边缘的落差弧线尤其如此），
+ * 贴地侧才稳定地落在起跳平台上。
+ */
+function findTakeoff(
+  state: DirectorState,
+  object: DirectorObject,
+  x: number,
+  z: number,
+  lo: number,
+  hi: number,
+): number {
+  // 端点 x/z 用「当前时刻的真实位置」近似：起跳前后水平位移通常远小于判高所需精度，
+  // 而这里只用来定"哪一层是地面"，微小水平误差不会跨层。
+  const air = (t: number) => airborneLiftAt(state, object, x, z, t);
+  if (air(lo) > AIRBORNE_EPS) return lo;
+  if (air(hi) <= AIRBORNE_EPS) return hi;
+  let grounded = lo;
+  let airborne = hi;
+  for (let i = 0; i < 8; i += 1) {
+    const m = (grounded + airborne) / 2;
+    if (air(m) > AIRBORNE_EPS) airborne = m;
+    else grounded = m;
+  }
+  return grounded;
+}
+
+/**
+ * 跟拍目标的**相机高度锚线**（世界米）。
+ *
+ * - `followJumpHeight !== false`（默认）：返回目标此刻的**实际高度**（含跳跃弧线）→
+ *   相机跟着人上下，与扩展前逐值一致。
+ * - `followJumpHeight === false`：返回**起跳高度**。于是上下坡照跟（步行不离地，
+ *   起跳点在每一点上都等于当时的地面），但**离地期间锁在同一水平面上** ——
+ *   人跳出画框又落回来，而不是镜头跟着弹。
+ *
+ * 两条边界必须显式说明：
+ * 1. **锁的是"起跳高度"，不是"这一段的最高点"。** 起跳高度由二分定位到离地前一帧，
+ *    因此下坡起跳取的是坡上那个点，人跳得再高也不改变锚线。
+ * 2. **整段跳跃都在空中时（`air(lo) > 0`），锚线 = 段首高度**，即"从那一刻的高度平飞过去"，
+ *    而不是回落。这是刻意的：没有可用的起跳点，就不该凭空编一个。
+ */
+export function cameraAnchorHeight(
+  state: DirectorState,
+  objectId: string,
+  time: number,
+  x: number,
+  z: number,
+  followJumpHeight: boolean,
+): number {
+  const object = state.objects.find((o) => o.id === objectId);
+  if (!object) return 0;
+  if (object.role === "set") return object.baseY ?? 0;
+  const actual = bodyHeightOf(state, object, x, z, time);
+  if (followJumpHeight) return actual;
+  if (airborneLiftAt(state, object, x, z, time) <= AIRBORNE_EPS) return actual;
+
+  // 往前找离地瞬间：先粗扫（1/8 秒）定位到最后一个贴地的采样点，再二分收紧。
+  //
+  // 粗扫步长是"最大跳跃窗口"的一半量级即可 —— 但**不能**用它直接当二分区间：
+  // 抛物线的起飞初速很大（apex 1.5 / 半程 1s → 起步约 6 m/s），一步 0.125s 内人就升了
+  // 0.75m，区间宽直接决定二分误差的上界。所以这里分两段：
+  //   ① 粗扫只负责找到"某个还贴地的时刻 t"；
+  //   ② 再以 [t, t + step] 为区间二分到 ~0.5ms，误差落到毫米级。
+  const step = 0.125;
+  for (let t = time - step; t >= -1e-6; t -= step) {
+    const air = airborneLiftAt(state, object, x, z, t);
+    if (air <= AIRBORNE_EPS) {
+      const takeoff = findTakeoff(state, object, x, z, t, Math.min(t + step, time));
+      // 返回**起跳点脚下的地面**，而不是 `bodyHeightOf(takeoff)`。
+      //
+      // 差别只有毫米级，但方向很重要：`findTakeoff` 二分到的是"离地量首次超过
+      // `AIRBORNE_EPS (1cm)` 的那一刻"，那一刻 `bodyHeightOf` 天然比地面高约 1cm
+      // （抛物线上 `apex·4s` 在起点是线性的，1cm 的离地量对应约 3ms）。
+      // 拿它当锚线，等于把"人还站在地上的高度"往上抬了 1cm；而"起跳高度"在语义上
+      // 就是**他起跳时站的那个面**。下坡起跳时这个面取的是坡上那一点（因为 `takeoff`
+      // 在坡上），这正是「锁在起跳高度」的原义。
+      return groundElevationOf(state, object, x, z, takeoff);
+    }
+    if (t <= 0) break;
+  }
+  // 整段都在空中 / 找不到起跳点：锁在**段首高度**（"从那一刻的高度平飞过去"），
+  // 不凭空编一个地面高程出来 —— 那会让机位在跳跃中途莫名下坠。
+  return bodyHeightOf(state, object, x, z, 0);
+}
+
+function focusPoint(state: DirectorState, targetId: string, time: number): Vec3 {
+  const object = state.objects.find((item) => item.id === targetId);
+  const position = objectPosition(state, targetId, time);
+  const ground = anchoredGroundOf(state, object, position.x, position.z, time);
+  // 演员注视点 = 脚下地面 + 视线高度；其余主体取"脚下 + 1m"（原语义 1，现在相对地面）。
+  const height = object?.type === "actor" ? ground + ACTOR_EYE_HEIGHT : ground + 1;
+  return [position.x, height, position.z];
+}
+
+/** 场景中心（所有对象的质心），供 LOCATION 固定环境机位作锚点。 */
+function sceneCenter(state: DirectorState): Vec3 {
+  if (!state.objects.length) return [0, 1.3, 0];
+  const cx = state.objects.reduce((sum, object) => sum + object.x, 0) / state.objects.length;
+  const cz = state.objects.reduce((sum, object) => sum + object.z, 0) / state.objects.length;
+  // 注视点取质心处的**地面高程 + 1.3**：LOCATION 锚在场景重心上，而不是钉在世界原点的高度上。
+  // 用 +∞ 起点 / maxStep = 0 = "此处最高的可站立面"，与 `restingHeightAt` 同义（不排除任何对象）。
+  const ground = supportUnder(state, cx, cz, Number.POSITIVE_INFINITY, 0).y;
+  return [cx, ground + 1.3, cz];
+}
+
+/** 队伍脚下的地面高程：取所有成员**脚下地面**的最大值（整队站上平台时镜头跟着上）。 */
+function groupGroundOf(
+  state: DirectorState,
+  memberIds: string[],
+  time: number,
+  fallbackX: number,
+  fallbackZ: number,
+): number {
+  let best = -Infinity;
+  for (const id of memberIds) {
+    const object = state.objects.find((o) => o.id === id);
+    if (!object) continue;
+    const p = objectPosition(state, id, time);
+    best = Math.max(best, anchoredGroundOf(state, object, p.x, p.z, time));
+  }
+  if (best > -Infinity) return best;
+  return supportUnder(state, fallbackX, fallbackZ, Number.POSITIVE_INFINITY, 0).y;
+}
+
 /** 无人机平台相对基准机位叠加的基础飞行高度（米）。 */
 const DRONE_BASE_ALTITUDE = 6;
 
@@ -95,21 +366,6 @@ export function activeCameraMove(
   );
 }
 
-function focusPoint(state: DirectorState, targetId: string, time: number): Vec3 {
-  const object = state.objects.find((item) => item.id === targetId);
-  const position = objectPosition(state, targetId, time);
-  const height = object?.type === "actor" ? 1.55 : 1;
-  return [position.x, height, position.z];
-}
-
-/** 场景中心（所有对象的质心），供 LOCATION 固定环境机位作锚点。 */
-function sceneCenter(state: DirectorState): Vec3 {
-  if (!state.objects.length) return [0, 1.3, 0];
-  const cx = state.objects.reduce((sum, object) => sum + object.x, 0) / state.objects.length;
-  const cz = state.objects.reduce((sum, object) => sum + object.z, 0) / state.objects.length;
-  return [cx, 1.3, cz];
-}
-
 /** 解析当前生效的稳定方式（风格轴）：段级覆盖 > 相机默认 > 旧场景 motion:"HANDHELD" 兼容 > 默认锁定。 */
 function styleOf(camera: CameraObject, options: Placement): CameraStyle {
   return options.style ?? camera.style ?? (camera.motion === "HANDHELD" ? "handheld" : "locked");
@@ -123,6 +379,53 @@ function shakePreset(camera: CameraObject, style: CameraStyle): StyleParams {
 /** 风格轴带来的滚转漂移（度），叠加到相机 roll 上（位置抖动在 placeCamera 内处理）。 */
 function styleRollDrift(sp: StyleParams, time: number): number {
   return sp.rollDrift ? Math.sin(time * (sp.rollFreq + 0.7) + 0.5) * sp.rollDrift : 0;
+}
+
+/**
+ * 绕机位把注视方向按 pan（绕世界 Y）/ tilt（绕相机右轴）旋转，返回新的注视点。
+ * placeCamera 的 PAN/TILT 与 PATH 段的关键帧扫视共用这套几何，避免两处各写一份。
+ */
+function aimWithPanTilt(position: Vec3, target: Vec3, panDeg: number, tiltDeg: number): Vec3 {
+  if (!panDeg && !tiltDeg) return target;
+  const ox = position[0];
+  const oy = position[1];
+  const oz = position[2];
+  let dx = target[0] - ox;
+  let dy = target[1] - oy;
+  let dz = target[2] - oz;
+  const dist = Math.hypot(dx, dy, dz) || 1;
+  dx /= dist;
+  dy /= dist;
+  dz /= dist;
+  if (panDeg) {
+    const a = (panDeg * Math.PI) / 180;
+    const c = Math.cos(a);
+    const s = Math.sin(a);
+    const nx = dx * c + dz * s;
+    const nz = -dx * s + dz * c;
+    dx = nx;
+    dz = nz;
+  }
+  if (tiltDeg) {
+    // 绕相机「右轴」做真正的俯仰：右轴 = normalize(d × up)，与 d 正交且单位化，
+    // 旋转用 Rodrigues（k⊥d 时 d' = d·cos + (k×d)·sin），保证视线长度不变、只改俯仰。
+    const a = (tiltDeg * Math.PI) / 180;
+    const c = Math.cos(a);
+    const s = Math.sin(a);
+    const h = Math.hypot(dx, dz);
+    if (h > 1e-4) {
+      const crossX = (-dx * dy) / h;
+      const crossY = h;
+      const crossZ = (-dz * dy) / h;
+      const nx = dx * c + crossX * s;
+      const ny = dy * c + crossY * s;
+      const nz = dz * c + crossZ * s;
+      dx = nx;
+      dy = ny;
+      dz = nz;
+    }
+  }
+  return [ox + dx * dist, oy + dy * dist, oz + dz * dist];
 }
 
 interface Placement {
@@ -165,18 +468,29 @@ function placeStandard(
   facing: number,
   droneLift: number,
   altitude: number,
+  /**
+   * 机位高度的**基准线**（世界米）= 目标此刻的**实际高度**（含跳跃弧线 / 落差）。
+   *
+   * 语义是「机位挂在目标的哪个高度上」：`lift = 0`（站在地上）时它就等于脚下地面高程 ⇒
+   * `ground + VIEW_HEIGHT` 与扩展前的绝对米数逐值一致；跳跃中 `lift > 0` ⇒
+   * 机位跟着一起抬（这才是"跟拍"，也是本 Phase 相对化**必须保住**的旧行为）。
+   */
+  lift = 0,
 ): { position: Vec3; target: Vec3 } {
   const baseDistance = framingDistance(framing, options.distanceScale ?? 1);
   const yaw = facing + ((SIDE_ANGLE[side] + (options.orbitDeg ?? 0)) * Math.PI) / 180;
   let horizontal = baseDistance;
-  let height = VIEW_HEIGHT[view] + droneLift + altitude + (options.craneHeight ?? 0);
+  let height = lift + VIEW_HEIGHT[view] + droneLift + altitude + (options.craneHeight ?? 0);
   if (view === "overhead") {
     horizontal = baseDistance * 0.3;
-    height = baseDistance + 4 + droneLift + altitude + (options.craneHeight ?? 0);
+    height = lift + baseDistance + 4 + droneLift + altitude + (options.craneHeight ?? 0);
   }
   const position: Vec3 = [
     target[0] + Math.sin(yaw) * horizontal,
-    target[1] + height,
+    // 注意**不能**写成 `target[1] + VIEW_HEIGHT[...]`：`target[1]` 是注视点高度
+    // （演员 = 脚下 + 1.55），直接相加会让每个视角凭空多抬一个眼高。
+    // 正确的关系是 `lift + VIEW_HEIGHT`，其中 lift 由调用方按「脚下地面 + 离地量」算出。
+    height,
     target[2] + Math.cos(yaw) * horizontal,
   ];
   return { position, target };
@@ -205,7 +519,10 @@ function placeCamera(
   if (targetType === "POV" && targetId) {
     const p = objectPosition(state, targetId, time);
     const yaw = (objectFacing(state, targetId, time) * Math.PI) / 180;
-    const eye = 1.55;
+    // 眼高走 `anchorLineOf`（脚下地面 + 离地量）+ 演员眼高：站在 3m 平台上的人，
+    // 主观视线也该在 3 + 1.55；跳跃中人眼跟着飞，主观镜头才有失重感。
+    const anchor = anchorLineOf(state, state.objects.find((o) => o.id === targetId), p.x, p.z, time);
+    const eye = anchor + ACTOR_EYE_HEIGHT;
     const look = 6;
     position = [p.x, eye, p.z];
     target = [p.x + Math.sin(yaw) * look, eye, p.z + Math.cos(yaw) * look];
@@ -238,16 +555,19 @@ function placeCamera(
       // facing 是弧度、SIDE_ANGLE 是角度，必须各自换算后再相加（不可整体当角度换算）。
       // orbitDeg 与 OBJECT 分支一致地叠加到 yaw 上，否则整队目标无法环绕（关键帧「环绕」/原生 ORBIT 都会失效）。
       const yaw = facing + ((SIDE_ANGLE[side] + (options.orbitDeg ?? 0)) * Math.PI) / 180;
-      const groupTarget: Vec3 = [cx, 1.3, cz];
+      // 群体注视点相对化：质心处的**地面高程 + 1.3**（一队人马站在同一个平台上时，
+      // 机位与注视点一起抬上去，而不是把镜头留在平台下面）。
+      const groupGround = groupGroundOf(state, groupMemberIds, time, cx, cz);
+      const groupTarget: Vec3 = [cx, groupGround + 1.3, cz];
       if (view === "overhead") {
-        const h = framingDistance(framing) + 4 + droneLift + altitude + (options.craneHeight ?? 0);
+        const h = groupGround + framingDistance(framing) + 4 + droneLift + altitude + (options.craneHeight ?? 0);
         position = [cx, h, cz + 0.001];
         target = groupTarget;
       } else {
-        const height = VIEW_HEIGHT[view] + droneLift + altitude + (options.craneHeight ?? 0);
+        const height = groupGround + VIEW_HEIGHT[view] + droneLift + altitude + (options.craneHeight ?? 0);
         position = [
           groupTarget[0] + Math.sin(yaw) * horizontal,
-          groupTarget[1] + height,
+          height,
           groupTarget[2] + Math.cos(yaw) * horizontal,
         ];
         target = groupTarget;
@@ -258,12 +578,18 @@ function placeCamera(
       const facing = travelHeading(state, targetId, time);
       ({ position, target } = placeStandard(
         state, camera, options, framing, view, side, t, facing, droneLift, altitude,
+        anchorLineOf(state, state.objects.find((o) => o.id === targetId), t[0], t[2], time),
       ));
     }
   } else {
-    const t = targetType === "LOCATION" ? sceneCenter(state) : focusPoint(state, targetId, time);
+    const isLocation = targetType === "LOCATION";
+    const t = isLocation ? sceneCenter(state) : focusPoint(state, targetId, time);
     // 同上：整队方向没变时，绕障的横向让位不该让机位转向。
-    const facing = targetType === "LOCATION" ? 0 : travelHeading(state, targetId, time);
+    const facing = isLocation ? 0 : travelHeading(state, targetId, time);
+    // 目标锚线（脚下地面 + 离地量）→ 机位高度相对它派生。LOCATION 的锚点已经含地面，故不重复叠加。
+    const anchor = isLocation
+      ? 0
+      : anchorLineOf(state, state.objects.find((o) => o.id === targetId), t[0], t[2], time);
 
     // 过肩镜头（OTS）：机位置于前景演员 A 的斜后方，越过其肩膀拍主体 B。
     // 两人各自移动时机位自动跟随，始终保持过肩关系（肩在前景一侧、不挡住主体）。
@@ -288,7 +614,12 @@ function placeCamera(
         // 旧值 distAB*0.4 让肩偏轴 ~46° 而完全出框）。这里压到 ~0.16 倍间距，
         // 使肩稳定落在画框边缘（约 16° 偏轴），既可见又不挡主体。
         const lateral = Math.min(0.9, Math.max(0.4, distAB * 0.16)) * sign;
-        const eye = 1.55;
+        // 过肩机位与注视点都相对「前景演员 A 的锚线」派生：A 站上台阶时，
+        // 肩高与镜头一起抬起来，过肩关系才保持得住。
+        const shoulderAnchor = anchorLineOf(
+          state, state.objects.find((o) => o.id === shoulderId), a.x, a.z, time,
+        );
+        const eye = shoulderAnchor + ACTOR_EYE_HEIGHT;
         const cx = a.x - fx * back + rx * lateral;
         const cz = a.z - fz * back + rz * lateral;
 
@@ -304,16 +635,43 @@ function placeCamera(
         const shift = -sign * offset * vLen * halfWidthTan;
 
         position = [cx, eye, cz];
-        target = [b.x + rgx * shift, 1.55, b.z + rgz * shift];
+        // 注视点也抬到主体 B 的**锚线高度**（原先写死 1.55，B 在平台上或跳在空中时会看偏）。
+        // 注意用 B 的锚线而不是前景 A 的：过肩关系靠机位位置维持，注视点应该盯着主体。
+        const tAnchor = anchorLineOf(state, state.objects.find((o) => o.id === targetId), b.x, b.z, time);
+        target = [b.x + rgx * shift, tAnchor + ACTOR_EYE_HEIGHT, b.z + rgz * shift];
       } else {
         ({ position, target } = placeStandard(
-          state, camera, options, framing, view, side, t, facing, droneLift, altitude,
+          state, camera, options, framing, view, side, t, facing, droneLift, altitude, anchor,
         ));
       }
     } else {
       ({ position, target } = placeStandard(
-        state, camera, options, framing, view, side, t, facing, droneLift, altitude,
+        state, camera, options, framing, view, side, t, facing, droneLift, altitude, anchor,
       ));
+    }
+  }
+
+  // ---- 跟跳防抖（03 §10 方案 b）：`followJumpHeight === false` 时，离地期间锁机位高度 ----
+  //
+  // 做法不是"给机位加低通"（那只是让抖动小一点），而是**把高度锚线整体降回起跳高度**，
+  // 于是画面里的人在框内上下飞、镜头纹丝不动 —— 这才是真实跟拍。
+  //
+  // 只在 OBJECT / OTS 这些"跟某个具体主体"的分支生效：GROUP 是群体构图、
+  // POV 是主观视线、LOCATION 是固定环境机位，都不存在"跟跳"这回事。
+  const followJump = camera.followJumpHeight !== false;
+  if (!followJump && targetId && targetType !== "GROUP" && targetType !== "POV" && targetType !== "LOCATION") {
+    const tracked = state.objects.find((o) => o.id === targetId);
+    if (tracked) {
+      const p = objectPosition(state, targetId, time);
+      // 锚线 - 实际高度 = 需要往下压的量。因为相机与注视点都在同一套相对几何里，
+      // 把**机位**下压这个量即可（注视点保持在实际高度，镜头于是"仰着看"跳动的人，
+      // 正符合"人冲出画框又落回来"的观感）。
+      // 两边都走单一出处：`anchorLineOf` 是默认（跟随）时的挂载高度，`cameraAnchorHeight`
+      // 是关掉跟随后该用的高度 —— 差就是漏出去的那段离地量。
+      const actual = anchorLineOf(state, tracked, p.x, p.z, time);
+      const anchor = cameraAnchorHeight(state, targetId, time, p.x, p.z, false);
+      const lift = actual - anchor;
+      if (lift > AIRBORNE_EPS) position = [position[0], position[1] - lift, position[2]];
     }
   }
 
@@ -322,47 +680,7 @@ function placeCamera(
   const tiltDeg = options.tiltDeg ?? camera.tiltDeg ?? 0;
   const truckDist = options.truckDist ?? camera.truckDist ?? 0;
   if (panDeg || tiltDeg) {
-    const ox = position[0];
-    const oy = position[1];
-    const oz = position[2];
-    let dx = target[0] - ox;
-    let dy = target[1] - oy;
-    let dz = target[2] - oz;
-    const dist = Math.hypot(dx, dy, dz) || 1;
-    dx /= dist;
-    dy /= dist;
-    dz /= dist;
-    if (panDeg) {
-      const a = (panDeg * Math.PI) / 180;
-      const c = Math.cos(a);
-      const s = Math.sin(a);
-      const nx = dx * c + dz * s;
-      const nz = -dx * s + dz * c;
-      dx = nx;
-      dz = nz;
-    }
-    if (tiltDeg) {
-      // 绕相机「右轴」做真正的俯仰：右轴 = normalize(d × up)，与 d 正交且单位化，
-      // 旋转用 Rodrigues（k⊥d 时 d' = d·cos + (k×d)·sin），保证视线长度不变、只改俯仰。
-      // 旧实现直接用未归一化的右向量做仿射：水平视线时会退化成偏航（与 pan 混淆），
-      // 且会压缩视线长度（顺带改了距离）。
-      const a = (tiltDeg * Math.PI) / 180;
-      const c = Math.cos(a);
-      const s = Math.sin(a);
-      const h = Math.hypot(dx, dz);
-      if (h > 1e-4) {
-        const crossX = (-dx * dy) / h; // (k × d).x
-        const crossY = h; // (k × d).y
-        const crossZ = (-dz * dy) / h; // (k × d).z
-        const nx = dx * c + crossX * s;
-        const ny = dy * c + crossY * s;
-        const nz = dz * c + crossZ * s;
-        dx = nx;
-        dy = ny;
-        dz = nz;
-      }
-    }
-    target = [ox + dx * dist, oy + dy * dist, oz + dz * dist];
+    target = aimWithPanTilt(position, target, panDeg, tiltDeg);
   }
   if (truckDist) {
     // 沿视线右向量平行横移机位与目标，保持相对几何（= 轨道横移）。
@@ -391,10 +709,103 @@ function placeCamera(
     position = [position[0] + jx, position[1] + jy, position[2] + jz];
   }
 
+  // ---- 相机避障（Phase 6）：机位不许落在遮挡体里 ----
+  // 放在风格抖动**之后**：抖动是有意的质感，不该为了让位被吃掉；但也不能让抖动把机位
+  // 推进墙里 —— 所以先抖再避让，避让是最后一道闸。
+  position = avoidOccluders(state, position, target);
+
   return { position, target };
 }
 
 /* ---------------------------------------------------- 运镜通道 / 关键帧求值 */
+
+/** 机位与盒面之间保留的余量（米）：贴面会把近平面戳进墙里。 */
+const CAMERA_SKIN = 0.35;
+/** 单个对象最多试几次推出（每次沿一个轴），防止病态几何下死循环。 */
+const CAMERA_AVOID_ITERS = 4;
+
+/**
+ * 相机避障：把落在**遮挡体内部**的机位推到盒外。
+ *
+ * ## 为什么是"推出"而不是"绕路"
+ *
+ * 绕路需要一条 3D 路径规划（还有遮挡变化的时间连续性），复杂度远超收益。
+ * 而相机机位被墙挡住时的痛点其实只有一个：**镜头埋进墙里 → 画面全黑 / 花屏**。
+ * 把它推到最近的一面外就解决了 90% 的问题，而且：
+ *
+ * - **纯函数、无状态**：只读 `state.objects` 与传进来的两点（红线 10）；
+ * - **时间连续**：机位随目标连续移动 ⇒ 推出方向在盒内各点也分段连续；
+ * - **planar 逐值不变**：planar 下 `maxStep = 0` ⇒ 对象都在 `y = 0` 起、身高 ≤ 3，
+ *   而 `VIEW_HEIGHT.ground = 0.35` 的机位确实可能落进一个 h=3 的盒子……
+ *   —— 所以这里**必须**加 planar 短路，否则会改变现有场景的机位（§30 守卫这条）。
+ *
+ * 只处理"机位在盒内"，不处理"机位在盒外但视线被挡"：后者是**构图问题**，
+ * 由 `OcclusionHighlights` 红框报告给导演，不该由求解器偷偷改机位（与 Phase 5
+ * "只报告不干预"的原则一致）。
+ */
+function avoidOccluders(state: DirectorState, position: Vec3, target: Vec3): Vec3 {
+  // planar 短路：此时"遮挡"是 2D 概念（见 9.8 ①），机位高度本来就该按绝对米数走。
+  if ((state.worldMode ?? "planar") === "planar") return position;
+
+  let p = position;
+  for (let iter = 0; iter < CAMERA_AVOID_ITERS; iter += 1) {
+    let moved = false;
+    for (const o of state.objects) {
+      if (o.role !== "set" || o.occluding === false) continue;
+      const box = objectBox3(o);
+      if (
+        p[0] <= box.minX || p[0] >= box.maxX ||
+        p[1] <= box.minY || p[1] >= box.maxY ||
+        p[2] <= box.minZ || p[2] >= box.maxZ
+      ) {
+        continue;
+      }
+      // 六个面各算"推到面外需要走多远"，取最近的 —— 等价于沿最小穿透轴弹出，
+      // 但比"按轴分类"更直接，也自然处理机位从顶面/底面进入的情形。
+      // 但朝**注视点**那一侧的面要加罚：从背后穿出去会把主体也甩到镜头后面。
+      const toTarget = [target[0] - p[0], target[1] - p[1], target[2] - p[2]];
+      const candidates: Array<[number, number, number, number]> = [
+        [box.minX - CAMERA_SKIN - p[0], -1, 0, 0],
+        [box.maxX + CAMERA_SKIN - p[0], 1, 0, 0],
+        [box.minY - CAMERA_SKIN - p[1], 0, -1, 0],
+        [box.maxY + CAMERA_SKIN - p[1], 0, 1, 0],
+        [box.minZ - CAMERA_SKIN - p[2], 0, 0, -1],
+        [box.maxZ + CAMERA_SKIN - p[2], 0, 0, 1],
+      ];
+      let best: [number, number, number, number] | null = null;
+      let bestCost = Infinity;
+      for (const c of candidates) {
+        const [dist, nx, ny, nz] = c;
+        const cost = Math.abs(dist) * (nx * toTarget[0] + ny * toTarget[1] + nz * toTarget[2] < 0 ? 1.6 : 1);
+        if (cost < bestCost) {
+          bestCost = cost;
+          best = c;
+        }
+      }
+      if (!best) continue;
+      p = [p[0] + best[0] * best[1], p[1] + best[0] * best[2], p[2] + best[0] * best[3]];
+      moved = true;
+    }
+    if (!moved) break;
+  }
+  return p;
+}
+
+/** `occlusion.objectBox` 的同义实现（避免为一次包含引入循环依赖；两边算法一致，§30 有对拍）。 */
+function objectBox3(o: DirectorObject): {
+  minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number;
+} {
+  const hw = o.footprint.w / 2;
+  const hd = o.footprint.d / 2;
+  return {
+    minX: o.x - hw,
+    minY: objectBottom(o),
+    minZ: o.z - hd,
+    maxX: o.x + hw,
+    maxY: objectTop(o),
+    maxZ: o.z + hd,
+  };
+}
 
 /** 一条运镜在某时刻的九个可定制通道（关键帧缺省的通道由运镜基元给出）。 */
 export interface MoveChannels {
@@ -555,6 +966,10 @@ function resolveMove(
       const keyedLens = keyedChannel(tracks, "lensMm", u);
       const keyedRoll = keyedChannel(tracks, "roll", u);
       const outLens = keyedLens ?? move.lensMm ?? camera.lensMm;
+      // 关键帧扫视：pan/tilt 通道对 PATH 也生效（固定方向时可一边飞一边摇 / 俯仰）。
+      const keyedPan = keyedChannel(tracks, "panDeg", u);
+      const keyedTilt = keyedChannel(tracks, "tiltDeg", u);
+      target = aimWithPanTilt(position, target, keyedPan ?? 0, keyedTilt ?? 0);
       let pos = position;
       if (sp.shakeAmp > 0 || sp.bobAmp > 0) {
         const a = sp.shakeAmp;
@@ -733,47 +1148,56 @@ export function solveCamera(
   if (!camera) return raw;
   const move = activeCameraMove(state, cameraId, time);
   const strength = clamp(move?.stabilize ?? camera.stabilize ?? 0, 0, 1);
-  if (strength <= 0) return raw;
 
-  const window = strength * STABILIZE_MAX_WINDOW;
-  // 不跨越运镜 / 切镜边界采样：下界钳到当前段起点（无段则为 0）。
-  const lo = Math.max(move ? move.timeStart : 0, time - window);
-  const span = time - lo;
-  if (span < 1e-3) return raw;
-
-  const samples = Math.max(
-    2,
-    Math.min(STABILIZE_MAX_SAMPLES, Math.round(span / STABILIZE_SAMPLE_STEP) + 1),
-  );
-  let px = 0;
-  let py = 0;
-  let pz = 0;
-  let tx = 0;
-  let ty = 0;
-  let tz = 0;
-  let count = 0;
-  for (let i = 0; i < samples; i += 1) {
-    const tk = lo + (span * i) / (samples - 1);
-    const r = solveCameraRaw(state, cameraId, tk);
-    if (!r) continue;
-    px += r.position[0];
-    py += r.position[1];
-    pz += r.position[2];
-    tx += r.target[0];
-    ty += r.target[1];
-    tz += r.target[2];
-    count += 1;
+  let result = raw;
+  if (strength > 0) {
+    const window = strength * STABILIZE_MAX_WINDOW;
+    // 不跨越运镜 / 切镜边界采样：下界钳到当前段起点（无段则为 0）。
+    const lo = Math.max(move ? move.timeStart : 0, time - window);
+    const span = time - lo;
+    if (span >= 1e-3) {
+      const samples = Math.max(
+        2,
+        Math.min(STABILIZE_MAX_SAMPLES, Math.round(span / STABILIZE_SAMPLE_STEP) + 1),
+      );
+      let px = 0;
+      let py = 0;
+      let pz = 0;
+      let tx = 0;
+      let ty = 0;
+      let tz = 0;
+      let count = 0;
+      for (let i = 0; i < samples; i += 1) {
+        const tk = lo + (span * i) / (samples - 1);
+        const r = solveCameraRaw(state, cameraId, tk);
+        if (!r) continue;
+        px += r.position[0];
+        py += r.position[1];
+        pz += r.position[2];
+        tx += r.target[0];
+        ty += r.target[1];
+        tz += r.target[2];
+        count += 1;
+      }
+      if (count) {
+        result = {
+          position: [px / count, py / count, pz / count],
+          target: [tx / count, ty / count, tz / count],
+          // 镜头 / 滚转沿用当前时刻：变焦与荷兰角是刻意的运镜表达，不该被防抖拖慢。
+          lensMm: raw.lensMm,
+          fovDeg: raw.fovDeg,
+          roll: raw.roll,
+          move: raw.move,
+        };
+      }
+    }
   }
-  if (!count) return raw;
-  return {
-    position: [px / count, py / count, pz / count],
-    target: [tx / count, ty / count, tz / count],
-    // 镜头 / 滚转沿用当前时刻：变焦与荷兰角是刻意的运镜表达，不该被防抖拖慢。
-    lensMm: raw.lensMm,
-    fovDeg: raw.fovDeg,
-    roll: raw.roll,
-    move: raw.move,
-  };
+
+  // 台阶抖**不在这里处理**：它在源头（`pathHeightAt` 的台阶 y 低通）已经抹平，
+  // 机位与瞄准点都从那个被抹平的地面派生，天然同拍。这里再平滑一次只会变成纯滞后 ——
+  // 实测会让主体在画框里漂移 ~5% 画面高（台阶步频下反复出现），得不偿失。
+  // 所以相机侧唯一的平滑就是上面的 `stabilize`（作者可调，且它同时作用于机位与瞄准点）。
+  return result;
 }
 
 /** 采样一台相机整段时间的机位轨迹，用于 Director View 可视化运镜。 */

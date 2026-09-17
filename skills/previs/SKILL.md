@@ -73,5 +73,5 @@ description: 把自然语言/结构化创意简述转成导演场景 JSON，并�
 
 ## 注意
 - `render_previs` 为**实时 1x 录制**，渲染耗时 ≈ 场景时长；这是预演，不是离线加速渲染。
-- 输出为 `.webm`（VP8/VP9）。需要 MP4 时由调用方用 ffmpeg 转码。
+- 输出默认 `mp4`（WebCodecs 直出 H.264）；无头浏览器不支持 WebCodecs 时自动回退 `webm`（VP8/VP9），返回资源的 `mimeType` 以实际为准。需要固定格式时传 `format: "webm"`。
 - 视频以本地文件返回；对话中展示取决于客户端是否支持视频附件。
