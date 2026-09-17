@@ -85,6 +85,9 @@ export function planStairWalk(
     };
   }
 
+  // 用**作者画的那条线**（不是圆角后的离散走线）：圆角把每个急转切成十几段，
+  // 用它能得到几十个点的路线 —— 看起来乱，而且这些点会盖住时间轴两端拖拽时长的把手。
+  // 圆角只是几何观感；路线贴着作者画的折线走即可（转折点仍在梯段内，见 `filletPath`）。
   const path = stairPathOf(stair);
   if (path.length < 2) return { ok: false, text: "这条楼梯没有可走的路径" };
 

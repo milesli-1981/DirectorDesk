@@ -1,7 +1,14 @@
 import * as THREE from "three";
 import { DirectorObject, DirectorState } from "../domain/schema";
 import { coversXZ, objectBottom, objectTop, topAt } from "./ground";
-import { runPlane, stairHitAt, stairRunAt, stairRuns, stairSlopeDeg } from "./stair";
+import {
+  runPlane,
+  stairHitAt,
+  stairRunAt,
+  stairRunHeightAt,
+  stairRuns,
+  stairSlopeDeg,
+} from "./stair";
 import { effectiveState, worldModeOf } from "./worldMode";
 
 /**
@@ -233,13 +240,17 @@ function rayPlaneIntersect(
 /**
  * 楼梯顶面与射线的交：**逐段求交取最近的那个**。
  *
- * 平面是无限的、段是有限的，所以命中点还要用高度的权威函数 `stairHitAt` 复核 ——
- * 它落在别的段上时高度必然对不上，该段就被否掉，由那一段自己的那次迭代接住。
+ * 平面是无限的、段是有限的，所以命中点还要用**单段**判据复核 —— 落在别的段上就被否掉，
+ * 由那一段自己的那次迭代接住（别在这里用全局的 `stairHitAt`，那会把循环变成 O(段数²)）。
  */
 function rayStairTop(ray: THREE.Ray, object: DirectorObject): number | null {
   const o = ray.origin;
   const d = ray.direction;
   let best: number | null = null;
+  // 兜底候选：落点不落在**这一段**里、但仍可能落在整条楼梯的占用面上。
+  // 楼梯是折线 + 圆角拼出来的，弯道上各段又短又斜，射线完全可能从两段的缝里穿过 ——
+  // 作者看到的就是"整条楼梯怎么点都点不中"（多点几次、换个位置又能中）。
+  let fallback: number | null = null;
   for (const run of stairRuns(object)) {
     const plane = runPlane(run);
     const t = rayPlaneIntersect(ray, plane);
@@ -247,17 +258,20 @@ function rayStairTop(ray: THREE.Ray, object: DirectorObject): number | null {
     if (best !== null && t >= best) continue;
     const px = o.x + d.x * t;
     const pz = o.z + d.z * t;
-    const y = stairHitAt(object, px, pz);
-    if (Number.isNaN(y)) continue;
-    // 平面在该点的高度（段内线性）；与权威高度一致 ⇒ 命中的确实是这一段。
-    const s = Math.sin(run.heading);
-    const c = Math.cos(run.heading);
-    const along = (px - run.x) * s + (pz - run.z) * c;
-    const tRise = run.length <= EPS ? 0 : Math.min(1, Math.max(0, along / run.length));
-    if (Math.abs(y - (run.y0 + (run.y1 - run.y0) * tRise)) > 1e-3) continue;
+    // 平面是无限的、段是有限的 ⇒ 落点必须真的在**这一段**里（单段版的权威判据）。
+    // 别在这里调 `stairHitAt`：那是 O(段数) 的全局查询，套在逐段循环里就成了 O(段数²)——
+    // 圆角之后的段数足够多，一次拾取就能卡住。
+    if (stairRunHeightAt(run, px, pz) === null) {
+      if (fallback === null || t < fallback) fallback = t;
+      continue;
+    }
     best = t;
   }
-  return best;
+  if (best !== null || fallback === null) return best;
+  // 兜底：把"最近的那个穿缝落点"拿到全局占用面上验一次（**只验一次**，不是每段一次）。
+  const fx = o.x + d.x * fallback;
+  const fz = o.z + d.z * fallback;
+  return stairHitAt(object, fx, fz) !== null ? fallback : null;
 }
 
 /** 射线与该对象顶面的交（不校验 footprint 归属）；返回沿射线的 t。 */

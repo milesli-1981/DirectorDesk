@@ -1,4 +1,14 @@
-import { Suspense, useEffect, useMemo, MutableRefObject, useRef, useState } from "react";
+import {
+  MutableRefObject,
+  Profiler,
+  Suspense,
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Canvas, ThreeEvent, useFrame, useThree } from "@react-three/fiber";
 import { setCaptureCanvas } from "../engine/videoExport";
 import { Html, Line, OrbitControls, PerspectiveCamera } from "@react-three/drei";
@@ -32,7 +42,13 @@ import {
 } from "../engine/ground";
 import { raycastGround } from "../engine/raycast";
 import { pathHeightAt, arcPolyline, arcEndHeights, arcActive } from "../engine/pathHeight";
-import { STAIR_HANDLE_LIFT, stairHandleY, stairTreads } from "../engine/stair";
+import {
+  STAIR_HANDLE_LIFT,
+  STAIR_TREAD_THICKNESS,
+  stairBounds,
+  stairHandleY,
+  stairTreads,
+} from "../engine/stair";
 import { stanceOf } from "../engine/stance";
 import { arcAtU, arcHeightAt, arcIsFlat } from "../engine/arc";
 import { sampleArcHits } from "../engine/jump";
@@ -774,34 +790,48 @@ function NameTag({ text, height }: { text: string; height: number }) {
  * 局部坐标：父 group 已经把对象摆到「底面中心 + rotation」上，所以这里把楼梯按
  * `x=0 / z=0 / rotation=0 / bottom=0` 求一遍，得到的恰好就是局部坐标（y 从底面起算）。
  */
-function StairMesh({ object }: { object: DirectorObject }) {
+const StairMesh = memo(function StairMesh({ object }: { object: DirectorObject }) {
   // 踏步的**展开**由 `engine/stair.stairTreads` 统一算（中心 + 朝向，世界坐标）——
   // 渲染层只做「世界 → 局部」的换算。方向不能再在这里算：曾经这里把步子沿垂直于
   // 梯跑的轴排开（盒子长边在 Z、位置却沿 X 递增），楼梯就画成了一堆错位的方块。
   // 父 group 已经把对象摆到「底面中心 + rotation」上（世界→局部的逆旋转与 coversXZ 同源）。
-  const rot = (object.rotation * Math.PI) / 180;
-  const cos = Math.cos(rot);
-  const sin = Math.sin(rot);
   const bottom = objectBottom(object);
-  const treads = stairTreads(object).map((tread) => {
-    const dx = tread.x - object.x;
-    const dz = tread.z - object.z;
-    return {
-      x: dx * cos - dz * sin,
-      z: dx * sin + dz * cos,
-      heading: tread.heading - rot,
-      width: tread.halfWidth * 2,
-      depth: tread.length,
-      // 实体台阶：从对象底面一直砌到该级顶面（真实楼梯就是实心的）。
-      height: Math.max(tread.top - bottom, 0.02),
-    };
-  });
+  // **`memo` + `useMemo` 都是必需的**：场景树里任何一次 store 更新都会让整棵子树重渲染
+  // （时间轴播放、滚轮缩放都会），而圆角之后一座楼梯的踏步有几十块 —— 每次重渲染都重算
+  // 一遍就是明显的掉帧。这里只用 `object`，它在不可变更新下引用不变 ⇒ 可以安全跳过。
+  const treads = useMemo(() => {
+    const rot = (object.rotation * Math.PI) / 180;
+    const cos = Math.cos(rot);
+    const sin = Math.sin(rot);
+    // 缺省实心（旧行为不变）：每级从对象底面砌到该级顶面。
+    // `solid: false` = **悬空板**：只留一块 12cm 的板贴着顶面，楼梯可以看穿底下。
+    // **只对真的有路径的楼梯生效**：没有路径的"楼梯"只是一段退化的直跑盒子，
+    // 把它抽成纸片没有意义 —— 也免得上游某个对象只是挂着 `topShape: "stair"` 就被误伤。
+    const plate = object.stair?.solid === false && (object.stair.path?.length ?? 0) >= 2;
+    return stairTreads(object).map((tread) => {
+      const dx = tread.x - object.x;
+      const dz = tread.z - object.z;
+      const top = tread.top - bottom; // 该级顶面（父 group 的局部高度）
+      return {
+        x: dx * cos - dz * sin,
+        z: dx * sin + dz * cos,
+        heading: tread.heading - rot,
+        width: tread.halfWidth * 2,
+        depth: tread.length,
+        height: plate ? STAIR_TREAD_THICKNESS : Math.max(top, 0.02),
+        // 盒心：实心从底面砌起（盒心 = 半高）；悬空板贴着顶面往下挂（最底下一级落到地面）。
+        y: plate
+          ? Math.max(top - STAIR_TREAD_THICKNESS / 2, STAIR_TREAD_THICKNESS / 2)
+          : Math.max(top, 0.02) / 2,
+      };
+    });
+  }, [object, bottom]);
   return (
     <group>
       {treads.map((tread, index) => (
         <mesh
           key={index}
-          position={[tread.x, tread.height / 2, tread.z]}
+          position={[tread.x, tread.y, tread.z]}
           rotation={[0, tread.heading, 0]}
         >
           <boxGeometry args={[tread.width, tread.height, tread.depth]} />
@@ -816,9 +846,46 @@ function StairMesh({ object }: { object: DirectorObject }) {
       ))}
     </group>
   );
+});
+
+/**
+ * 楼梯几何在**世界坐标**下的中心（不是 `object.x/z`）；非楼梯返回 `null`。
+ *
+ * 为什么需要：楼梯的几何由**世界坐标的路径**（`stair.path`）定义，`object.x/z` 只是父 group
+ * 的锚点 —— 拖动路径点把整座楼梯搬走时 `object.x/z` 并不跟着变。于是任何挂在"对象原点"上的
+ * 装饰（选中环、名字、锁标、footprint 方框）都会留在原地，看起来"标识定位错了"。
+ */
+function stairCenterWorld(object: DirectorObject): { x: number; z: number } | null {
+  if (object.topShape !== "stair") return null;
+  const b = stairBounds(object);
+  if (!Number.isFinite(b.minX) || !Number.isFinite(b.maxX)) return null;
+  return { x: (b.minX + b.maxX) / 2, z: (b.minZ + b.maxZ) / 2 };
 }
 
-function ActorView({ objectId }: { objectId: string }) {
+/** 世界 (x, z) → 该对象父 group 的局部 (x, z)：与 `StairMesh` 是同一套换算。 */
+function worldToLocalXZ(object: DirectorObject, x: number, z: number): { x: number; z: number } {
+  const rot = (object.rotation * Math.PI) / 180;
+  const cos = Math.cos(rot);
+  const sin = Math.sin(rot);
+  const dx = x - object.x;
+  const dz = z - object.z;
+  return { x: dx * cos - dz * sin, z: dx * sin + dz * cos };
+}
+
+/** 对象装饰的锚点：楼梯锚到**几何中心**，其余对象就是原点（行为不变）。 */
+function decorAnchor(object: DirectorObject): { x: number; z: number } {
+  const center = stairCenterWorld(object);
+  return center ? worldToLocalXZ(object, center.x, center.z) : { x: 0, z: 0 };
+}
+
+/**
+ * 一个对象的 3D 表示。
+ *
+ * **必须 `memo`**：它只吃 `objectId`（字符串，引用天然稳定），自身该看的数据都在下面的
+ * selectors 里订阅 —— 于是"选中别的对象 / 改别处"不会再让**每一个**对象的网格元素树重走
+ * 一遍 render（选中一次卡 2 秒里，这一份是主要成分之一）。
+ */
+const ActorView = memo(function ActorView({ objectId }: { objectId: string }) {
   const object = useDirectorStore((s) => s.state.objects.find((o) => o.id === objectId));
   const isSelected = useDirectorStore((s) => {
     if (s.selectedKind !== "object" || !s.selectedId) return false;
@@ -964,12 +1031,16 @@ function ActorView({ objectId }: { objectId: string }) {
       blockBody
     );
 
+  // 装饰（footprint 框 / 选中环 / 名字 / 锁标）挂哪儿：楼梯的几何可能离 `object.x/z` 很远
+  // （路径是世界坐标、路径点可拖），所以锚到**几何中心**；其余对象就是原点，行为不变。
+  const anchor = decorAnchor(object);
+
   return (
     <group ref={groupRef}>
       <group ref={bodyRef}>{body}</group>
 
       {showHelpers ? (
-        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.02, 0]}>
+        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[anchor.x, 0.02, anchor.z]}>
           <planeGeometry args={[w, d]} />
           <meshBasicMaterial
             color={isSelected ? "#ffffff" : object.role === "set" ? "#f0a35a" : "#55d88a"}
@@ -981,7 +1052,7 @@ function ActorView({ objectId }: { objectId: string }) {
       ) : null}
 
       {isSelected && showHelpers ? (
-        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.03, 0]}>
+        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[anchor.x, 0.03, anchor.z]}>
           <ringGeometry args={[ringR - 0.16, ringR, 44]} />
           <meshBasicMaterial color="#ffffff" side={THREE.DoubleSide} transparent opacity={0.9} />
         </mesh>
@@ -990,12 +1061,14 @@ function ActorView({ objectId }: { objectId: string }) {
       {/* 名字：人物画进场景（导演视图 + 成片都可见），其它资产用 DOM 标签（仅导演视图）。
           两条路都走 `ObjectName` —— 场景级 / 个体级两个开关在那儿合成。 */}
       {object.category === "human" || showHelpers ? (
-        <ObjectName object={object} height={h} selected={isSelected} />
+        <group position={[anchor.x, 0, anchor.z]}>
+          <ObjectName object={object} height={h} selected={isSelected} />
+        </group>
       ) : null}
 
       {object.locked && showHelpers ? (
         <Html
-          position={[0, h + 0.95, 0]}
+          position={[anchor.x, h + 0.95, anchor.z]}
           center
           style={{ pointerEvents: "none" }}
           zIndexRange={[20, 0]}
@@ -1007,7 +1080,7 @@ function ActorView({ objectId }: { objectId: string }) {
       ) : null}
     </group>
   );
-}
+});
 
 /**
  * 人形骨骼：human 类资产用「头 + 躯干 + 双臂 + 双腿」的关节化组合体表示。
@@ -1490,6 +1563,61 @@ function SegmentPaths() {
   const showHelpers = useDirectorStore((s) => s.viewMode === "director");
   const state = useDirectorStore((s) => s.state);
 
+  // **几何部分与"选中谁"无关，必须缓存**：下面每一步都不便宜 ——
+  //   · `pathPolyline` / `arcPolyline` 逐采样点贴地（O(采样点 × 物体)）；
+  //   · `routeObstaclesFor` → `chordCanReach` 按 `dist/0.3` 累进，每步一次 `supportUnder`；
+  //   · `segmentSpans` → `reach.profileAlong` 又是 O(采样点 × 全体物体)。
+  // 选中只是换个线的颜色，原先却把这三样对**每条段**全部重算一遍 —— 实测点一下要等 2 秒。
+  // 缓存键用 `state` 引用即可：`selectObject` 只写 `selectedId`、**不碰 `state`**，
+  // 所以选中前后 `state` 是同一个对象 ⇒ memo 直接命中（与 `pathHeight` 的剖面缓存同一手法）。
+  /** 每条段的上一份结果（见 `layers`）：键 = 段引用 + 对象表 + worldMode。 */
+  const layersRef = useRef(
+    new Map<
+      string,
+      {
+        seg: MoveSegment;
+        objects: DirectorObject[];
+        worldMode: string;
+        points: Array<[number, number, number]>;
+        rects: ReturnType<typeof routeObstaclesFor>;
+        spans: ReturnType<typeof segmentSpans>;
+      }
+    >(),
+  );
+  const layers = useMemo(() => {
+    // **按段分别缓存**（而不是"state 一变就全部重算"）：拖一条段改长度时，`state` 会变，
+    // 但**只有被拖的那条**段的几何变了 —— 其余段一条都不该重算。原先一次性全量重算，
+    // 拖拽（每次 pointermove 都写 store）就会一直卡在重算全场景上。
+    const cache = layersRef.current;
+    const objects = state.objects;
+    const worldMode = state.worldMode ?? "planar";
+    for (const segment of segments) {
+      const hit = cache.get(segment.id);
+      if (hit && hit.seg === segment && hit.objects === objects && hit.worldMode === worldMode) {
+        continue;
+      }
+      const groundAt = (x: number, z: number) => pathGroundAt(state, segment.object, x, z);
+      const points = segment.arc
+        ? arcPolyline(state, segment, segment.object)
+        : pathPolyline(segment, groundAt);
+      cache.set(segment.id, {
+        seg: segment,
+        objects,
+        worldMode,
+        points,
+        rects: routeObstaclesFor(state, segment),
+        spans: segmentSpans(state, segment),
+      });
+    }
+    return cache;
+  }, [segments, state]);
+  // 段被删掉后缓存里会留下死条目：顺手清一次（代价 O(段数)，且只在段表变化时走）。
+  if (layersRef.current.size !== segments.length) {
+    for (const id of layersRef.current.keys()) {
+      if (!segments.some((s) => s.id === id)) layersRef.current.delete(id);
+    }
+  }
+
   if (!showHelpers) return null;
 
   return (
@@ -1527,19 +1655,13 @@ function SegmentPaths() {
         // 路径线贴地走：与演员的渲染高度、标记的拾取高度**共用 pathGroundAt**，
         // 否则会出现"人站在平台上、蓝线还留在地面"的割裂（以及看着在那里却点不中）。
         // 有弧线时改用 arcPolyline —— 线跟着弓形轨迹鼓起来，"跳过去"这件事一眼可见。
-        const groundAt = (x: number, z: number) => pathGroundAt(state, segment.object, x, z);
-        const points = segment.arc
-          ? arcPolyline(state, segment, segment.object)
-          : pathPolyline(segment, groundAt);
+        const cached = layers.get(segment.id);
+        if (!cached) return null;
+        // 贴地折线 / 障碍集合 / 可达性档位都来自上面那份缓存（只跟场景数据有关）。
+        const { points, rects, spans } = cached;
         if (points.length < 2) return null;
-        // 障碍感知「导航层」：环境（set 资产）如何重塑该 segment 的行动路线。
-        // 与运动求解共用 segmentRoutePoints **与同一份障碍集合**，因此这条线就是 agent
-        // 真正走的路线——群队锚点会把「编队骑得过去」的小障碍排除掉，两边必须一致，
-        // 否则会看到橙色线绕行、人却直穿过去。
-        const rects = routeObstaclesFor(state, segment);
-        // 可达性分段：`engine/reach.ts` 吃的是**同一份** route + 障碍集合，
-        // 所以线上的档位就是求解器眼里的档位，不会分叉。
-        const spans = segmentSpans(state, segment);
+        // 只有"退化为无地形判定"的那条兜底路线还要现算高度（便宜、且只在有绕行时走）。
+        const groundAt = (x: number, z: number) => pathGroundAt(state, segment.object, x, z);
         const hasIssue = spans.some((span) => span.tier !== 0);
         // 全平的路线继续保持现状（不画）—— 只有在有绕行或有问题时才出现导航层。
         const showRoute = rects.length > 0 || hasIssue;
@@ -3067,7 +3189,13 @@ function CameraZoom() {
   const { camera, controls } = useThree();
   const applied = useRef(zoom);
   // 以 OrbitControls 的实时 target 为锚点（WASD 平移视角后不希望被拉回原点）。
-  const anchor = (): THREE.Vector3 => (controls as unknown as { target?: THREE.Vector3 } | null)?.target ?? TARGET;
+  // 用 `useCallback` 固定它：否则每次渲染都是新函数 ⇒ 下面的 effect 每次都跑（缩放时
+  // 每帧都在动相机），平白多出一堆无谓的相机写入。
+  const anchor = useCallback(
+    (): THREE.Vector3 =>
+      (controls as unknown as { target?: THREE.Vector3 } | null)?.target ?? TARGET,
+    [controls],
+  );
 
   useEffect(() => {
     if (viewMode !== "director") return;
@@ -3180,7 +3308,11 @@ function RingAnchor({ objectId }: { objectId: string }) {
 
   useFrame(() => {
     const { state, currentTime } = useDirectorStore.getState();
-    const position = objectPosition(state, objectId, currentTime);
+    // 楼梯的几何由**世界坐标的路径**定义（`object.x/z` 只是父 group 的锚点，路径点一拖就分家）
+    // ⇒ 菜单要挂在**几何中心**上，否则"楼梯在那边、圈在这边"（见 `stairCenterWorld`）。
+    const object = state.objects.find((o) => o.id === objectId);
+    const center = object ? stairCenterWorld(object) : null;
+    const position = center ?? objectPosition(state, objectId, currentTime);
     groupRef.current?.position.set(position.x, 0, position.z);
   });
 
@@ -3483,6 +3615,18 @@ function CameraHud() {
   );
 }
 
+/**
+ * `<WorldScene />` 的 **memo 版本**（无名 props ⇒ 父级重渲染时整棵场景子树直接跳过）。
+ *
+ * 为什么必须这样：`WorldView` 根组件订阅了选中态 / 悬停 / 草稿等一堆**编辑态**，
+ * 每一次变化都会让它重渲染；而 `<Canvas>` 里的场景子树不是 memo 的话会跟着**整棵重走**
+ * —— 场景里每个对象、每个标签、每条路径线全部重新 reconcile。实测表现就是
+ * "凡是要让画布重渲染的操作都明显卡"（引擎计算本身只有 2ms，全花在这里）。
+ * 场景内部真正需要编辑态的图层（`SegmentPaths`、各种 Handles、标记、提示…）各自订阅 store，
+ * 所以跳过这次父级重渲染不会让任何东西失去更新。
+ */
+const MemoWorldScene = memo(WorldScene);
+
 function FramingOverlay() {
   const state = useDirectorStore((s) => s.state);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -3525,9 +3669,33 @@ function FramingOverlay() {
   );
 }
 
-export function WorldView() {
+/**
+ * 缩放读数 + ± 按钮。
+ *
+ * **单独做成一个组件是性能要求，不是洁癖**：`CameraZoom` 在 `useFrame` 里按相机距离
+ * 每帧回写 `zoom`，而 `WorldView` 一旦订阅 `zoom`，滚轮每动一下就会重渲染**整棵 3D 场景树**
+ * （每个对象的网格、每座楼梯的几十块踏步全部重算 / 重挂）。把订阅关进这个小按钮里，
+ * 缩放就只动这个读数 —— 场景一动不动。
+ */
+function ZoomControls() {
   const zoom = useDirectorStore((s) => s.zoom);
   const setZoom = useDirectorStore((s) => s.setZoom);
+  return (
+    <div className="vf-zoom" title="滚轮 / ± 缩放，WASD 或方向键平移视角">
+      <button type="button" title="Zoom out" onClick={() => setZoom(zoom - 0.1)}>
+        −
+      </button>
+      <button type="button" title="Reset to 100%" onClick={() => setZoom(1)}>
+        {Math.round(zoom * 100)}%
+      </button>
+      <button type="button" title="Zoom in" onClick={() => setZoom(zoom + 0.1)}>
+        +
+      </button>
+    </div>
+  );
+}
+
+export function WorldView() {
   const viewMode = useDirectorStore((s) => s.viewMode);
   const setViewMode = useDirectorStore((s) => s.setViewMode);
   const worldMode = useDirectorStore((s) => s.state.worldMode ?? "planar");
@@ -3580,7 +3748,7 @@ export function WorldView() {
   const togglePathDraw = useDirectorStore((s) => s.togglePathDraw);
   const addAsset = useDirectorStore((s) => s.addAsset);
   const addCamera = useDirectorStore((s) => s.addCamera);
-  const addDroneCamera = useDirectorStore((s) => s.addDroneCamera);
+
   const addCameraFromTemplate = useDirectorStore((s) => s.addCameraFromTemplate);
   const addGroupAt = useDirectorStore((s) => s.addGroupAt);
   const [tplOpen, setTplOpen] = useState(false);
@@ -3618,8 +3786,6 @@ export function WorldView() {
   const handleDropAdd = (kind: string, point: { x: number; z: number }, terrain = false) => {
     if (kind === "camera") {
       addCamera();
-    } else if (kind === "drone") {
-      addDroneCamera();
     } else if (kind === "group") {
       // terrain 要一起存进草稿：面板开着的时候 Shift 早就松了（见 groupDraft 的说明）。
       setGroupDraft({ at: point, count: 4, category: "human", formation: "column", terrain });
@@ -3667,18 +3833,7 @@ export function WorldView() {
           >
             Camera
           </button>
-          <button
-            type="button"
-            className="add-icon"
-            draggable
-            title="拖拽到画布添加 Drone（自动取景目标）"
-            onDragStart={(event) => {
-              event.dataTransfer.setData("application/director-add", "drone");
-              event.dataTransfer.effectAllowed = "copy";
-            }}
-          >
-            Drone
-          </button>
+
           <button
             type="button"
             className="add-icon group-btn"
@@ -3868,7 +4023,17 @@ export function WorldView() {
           }}
         >
           <color attach="background" args={["#0a0a0c"]} />
-          <WorldScene />
+          {/* 临时性能探针：场景子树单独计时。定位完连同 `Profiler` 一起删掉。 */}
+          <Profiler
+            id="scene"
+            onRender={(id, _phase, actualDuration) => {
+              if (import.meta.env.DEV && actualDuration > 6) {
+                console.log(`[slow-render] ${id} ${actualDuration.toFixed(1)}ms`);
+              }
+            }}
+          >
+            <MemoWorldScene />
+          </Profiler>
           <CaptureBridge />
         </Canvas>
 
@@ -3943,17 +4108,7 @@ export function WorldView() {
               <NameModeSelect />
               <ObjectNameToggle />
               <div className="vf-sep" />
-              <div className="vf-zoom" title="滚轮 / ± 缩放，WASD 或方向键平移视角">
-                <button type="button" title="Zoom out" onClick={() => setZoom(zoom - 0.1)}>
-                  −
-                </button>
-                <button type="button" title="Reset to 100%" onClick={() => setZoom(1)}>
-                  {Math.round(zoom * 100)}%
-                </button>
-                <button type="button" title="Zoom in" onClick={() => setZoom(zoom + 0.1)}>
-                  +
-                </button>
-              </div>
+              <ZoomControls />
               <button
                 type="button"
                 className={`vf-tool ${pathDrawMode ? "on" : ""}`}

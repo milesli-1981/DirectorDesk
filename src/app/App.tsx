@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { Profiler, useEffect, useRef, useState, type CSSProperties } from "react";
 import { Inspector } from "../components/Inspector";
 import {
   ObjectList,
@@ -14,6 +14,37 @@ import { contentEndTime } from "../engine/timeline";
 import { exportMultiCamVideos } from "../engine/videoExport";
 import { installHeadlessApi } from "../engine/headlessApi";
 import { useDirectorStore } from "../state/directorStore";
+
+/**
+ * **临时性能探针（只在开发期生效）**：卡顿时把"哪棵子树 / 哪次长任务"打到控制台，
+ * 免得凭感觉猜。要读的是 `[slow-render]` 与 `[long-task]` 两类行。
+ * 定位完就把这些 `Profiler` 包裹和 `PerfProbe` 一起删掉。
+ */
+const slowRender =
+  (id: string) =>
+  (_id: string, _phase: string, actualDuration: number): void => {
+    if (import.meta.env.DEV && actualDuration > 6) {
+      console.log(`[slow-render] ${id} ${actualDuration.toFixed(1)}ms`);
+    }
+  };
+
+function PerfProbe() {
+  useEffect(() => {
+    if (!import.meta.env.DEV) return undefined;
+    try {
+      const obs = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          if (entry.duration > 30) console.log(`[long-task] ${entry.duration.toFixed(0)}ms`);
+        }
+      });
+      obs.observe({ entryTypes: ["longtask"] });
+      return () => obs.disconnect();
+    } catch {
+      return undefined;
+    }
+  }, []);
+  return null;
+}
 
 export function App() {
   const playing = useDirectorStore((s) => s.playing);
@@ -205,16 +236,25 @@ export function App() {
 
       <SceneTabs />
 
-      <ObjectList
-        width={leftWidth}
-        collapsed={collapsed}
-        onWidth={setLeftW}
-        onToggle={toggleLeft}
-        onDragging={setResizing}
-      />
-      <WorldView />
-      <Inspector />
-      <Timeline />
+      <PerfProbe />
+      <Profiler id="objectList" onRender={slowRender("objectList")}>
+        <ObjectList
+          width={leftWidth}
+          collapsed={collapsed}
+          onWidth={setLeftW}
+          onToggle={toggleLeft}
+          onDragging={setResizing}
+        />
+      </Profiler>
+      <Profiler id="worldView" onRender={slowRender("worldView")}>
+        <WorldView />
+      </Profiler>
+      <Profiler id="inspector" onRender={slowRender("inspector")}>
+        <Inspector />
+      </Profiler>
+      <Profiler id="timeline" onRender={slowRender("timeline")}>
+        <Timeline />
+      </Profiler>
     </div>
   );
 }

@@ -842,12 +842,28 @@ export function Inspector() {
                     `SP_${Date.now().toString(36)}_${Math.floor(Math.random() * 1000)}`;
                   const patchPath = (next: Array<{ id: string; x: number; z: number }>) =>
                     updateAsset(object.id, { stair: { path: next } });
+                  // 缺省 = 实心（旧行为）；关掉 = 只留踏板，楼梯悬空。
+                  const solid = object.stair?.solid !== false;
+                  const patchSolid = (next: boolean) =>
+                    updateAsset(object.id, { stair: { ...object.stair, solid: next } });
                   const bounds = stairBounds(object);
                   const runLen = stairRunLength(object);
                   const slope = stairSlopeDeg(object);
                   const planeH = stairHeightFromPlanes(state, object);
                   return (
                     <>
+                      {/* 底面填充：紧跟在 Shape 之后（实心 / 空心只对楼梯有意义）。
+                          纯渲染开关 —— 顶面还是同一条连续坡面，可走性与坡度都不变。 */}
+                      <Field label="底面">
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          title="实心：每级从对象底面砌到顶面（真实楼梯）；悬空板：只留踏板，能看穿底下"
+                          onClick={() => patchSolid(!solid)}
+                        >
+                          {solid ? "实心（填充到地面）" : "悬空板（不填充）"}
+                        </button>
+                      </Field>
                       <p className="hint">
                         楼梯 = **路径 + 高度**（始终是对象列表里的**一个对象**）。
                         路径来源：不画 = **一段直跑**（长度取 D）；或打开工具栏 **✏️ Path**
@@ -908,8 +924,13 @@ export function Inspector() {
                           ＋ 中间插点
                         </button>
                       </div>
-                      {path.map((p, i) => (
-                        <div key={p.id} className="mini-btns">
+                      {/* 路径点**默认折叠**：手绘 / 螺旋出来的楼梯动辄几十个点，全展开会把面板
+                          撑成一条长龙（行内还会换行、数字框被挤出屏幕）。这里用原生 `<details>`，
+                          零 JS、零状态 —— 要看细节点一下标题即可。 */}
+                      <details className="stair-points">
+                        <summary>路径点（{path.length}）</summary>
+                        {path.map((p, i) => (
+                        <div key={p.id} className="mini-btns pt-row">
                           <span className="node-label">#{i + 1}</span>
                           {(["x", "z"] as const).map((axis) => (
                             <input
@@ -938,7 +959,8 @@ export function Inspector() {
                             </button>
                           ) : null}
                         </div>
-                      ))}
+                        ))}
+                      </details>
                       <div className="mini-btns">
                         <span className="node-label">螺旋</span>
                         <input
@@ -966,6 +988,7 @@ export function Inspector() {
                           生成螺旋路径
                         </button>
                       </div>
+
                       <div className="mini-btns">
                         <button
                           type="button"
@@ -1039,16 +1062,27 @@ export function Inspector() {
               </button>
             ))}
           </div>
+          <p className="hint">stop = pause then go · smooth = continuous (一镜到底) · cut = allow teleport</p>
+        </div>
+      ) : null}
+
+      {/* MOVE 段的**通用**删除入口 —— 刻意不放进上面那个 handoff 分支：
+          那里只在「该演员有多段 MOVE、形成交接」时才渲染，于是**只有一段 MOVE 的演员
+          根本没有删除入口**（相机有 Delete Move、动作有 Delete Action、相机关键帧有右键删除，
+          唯独 MOVE 段缺位）。放在这里以后，任何被选中的 MOVE 段都能删，与其它三类对齐。 */}
+      {segment ? (
+        <div className="field">
+          <div className="lab">MOVE 段 · {segment.id}</div>
           <div className="mini-btns">
             <button
               type="button"
               className="ghost-button danger-button"
+              title="删除这一段 MOVE（只删路线，不动演员本身；路径点可单独删）"
               onClick={() => deleteSegment(segment.id)}
             >
-              Delete Leg
+              删除这段 MOVE
             </button>
           </div>
-          <p className="hint">stop = pause then go · smooth = continuous (一镜到底) · cut = allow teleport</p>
         </div>
       ) : null}
 
@@ -1659,9 +1693,23 @@ export function Inspector() {
               <Field label="Kind">
                 <select
                   value={camera.kind ?? "ground"}
-                  onChange={(event) =>
-                    updateCamera(camera.id, { kind: event.target.value as "ground" | "drone" })
-                  }
+                  onChange={(event) => {
+                    const kind = event.target.value as "ground" | "drone";
+                    // 切到无人机时**顺手补一个取景目标**：原来这是 addbar 那个「Drone」按钮干的事
+                    // （新相机没有目标 = "没看任何东西"）。已经有目标就不动 —— 那是作者的选择。
+                    const needTarget = kind === "drone" && !camera.targetId;
+                    updateCamera(camera.id, {
+                      kind,
+                      ...(needTarget
+                        ? {
+                            targetId:
+                              state.objects.find((o) => o.type === "actor")?.id ??
+                              state.objects[0]?.id ??
+                              "",
+                          }
+                        : {}),
+                    });
+                  }}
                 >
                   <option value="ground">Ground</option>
                   <option value="drone">Drone</option>

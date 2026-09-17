@@ -57,7 +57,7 @@ import {
   tierOfGap,
   worstTier,
 } from "../src/engine/reach";
-import { cameraAnchorHeight, solveCamera } from "../src/engine/cameraSolver";
+import { CAMERA_EYE_REF, cameraAnchorHeight, solveCamera, VIEW_PITCH_DEG } from "../src/engine/cameraSolver";
 import { objectPosition } from "../src/engine/solver";
 import {
   helixStairPath,
@@ -69,6 +69,7 @@ import {
   stairRuns,
   stairSlopeDeg,
   stairTreads,
+  stairWalkPathOf,
 } from "../src/engine/stair";
 import { simplifyPath } from "../src/engine/path";
 import { ObjectAction, objectActions } from "../src/engine/objectActions";
@@ -94,8 +95,10 @@ import {
 import {
   ActionClip,
   ActionKind,
+  CameraFraming,
   CameraMove,
   CameraObject,
+  CameraView,
   DirectorObject,
   DirectorState,
   Locomotion,
@@ -1490,16 +1493,54 @@ function camScene(
 
 console.log("\n[28] 相机体系相对化");
 {
-  // ① 平地（planar）必须逐值等于扩展前的绝对米数。这是本 Phase 的**硬回归**：
-  //    任何相对化写错都会立刻在这里红。
+  // ① **视角 View = 名义俯仰角**（2026-09-16 语义变更）。
+  //    "机位 y = 1.7 / 1.35"那类断言属于**旧语义**（绝对机位高度），正是要换掉的东西，
+  //    因此作废；新语义要钉的是：对**任意景别**，机位到注视点的俯仰角 = 该档的名义角
+  //    （`VIEW_PITCH_DEG`）。唯一允许的偏差是长焦远景下的仰拍被**地面下限**抬平 ——
+  //    物理上做不到更强的仰角（18m 外 −12° 要站到地下 2m），此时只许更平、不许更陡。
   {
-    const s = camScene([actor("H", 0, 0)], [cam("C", "H")]);
-    const r = solveCamera(s, "C", 0)!;
-    // eye_level = 1.7，chest = 1.35（原绝对值）
-    check("§28 planar eye_level：机位 y = 1.7", round6(r.position[1]), 1.7);
-    check("§28 planar：注视点 y = 1.55（演员眼高）", round6(r.target[1]), 1.55);
-    const s2 = camScene([actor("H", 0, 0)], [cam("C", "H", { view: "chest" })]);
-    check("§28 planar chest：机位 y = 1.35", round6(solveCamera(s2, "C", 0)!.position[1]), 1.35);
+    const views: CameraView[] = ["ground", "low", "chest", "eye_level", "high", "overhead"];
+    const framings: CameraFraming[] = [
+      "extreme_wide",
+      "wide",
+      "two_shot",
+      "medium",
+      "close_up",
+      "extreme_close_up",
+    ];
+    const off: string[] = [];
+    for (const view of views) {
+      const nominal = VIEW_PITCH_DEG[view];
+      for (const framing of framings) {
+        const s = camScene([actor("H", 0, 0)], [cam("C", "H", { view, framing })]);
+        const r = solveCamera(s, "C", 0)!;
+        const dxz = Math.hypot(r.position[0] - r.target[0], r.position[2] - r.target[2]);
+        // 正 = 机位高于支点（俯拍），与 `VIEW_PITCH_DEG` 同号。
+        // 平地站定 ⇒ 支点 = 锚线(0) + CAMERA_EYE_REF。
+        const pitch = (Math.atan2(r.position[1] - CAMERA_EYE_REF, dxz) * 180) / Math.PI;
+        if (pitch < nominal - 1) off.push(`${view}/${framing} 过陡 ${pitch.toFixed(1)}°`);
+        // 名义角 ≥ 0（平视 / 俯拍）时不许被抬平 —— 抬平只可能发生在仰拍档。
+        if (nominal >= 0 && pitch > nominal + 1) off.push(`${view}/${framing} 过平 ${pitch.toFixed(1)}°`);
+      }
+    }
+    check("§28 视角 = 名义俯仰角（任意景别误差 < 1°，仰拍被地面抬平除外）", off, []);
+
+    // 地面下限：长焦远景的 `ground` 按角度推算要站到地下，必须被抬到地面之上（0.05m）。
+    const groundWide = camScene(
+      [actor("H", 0, 0)],
+      [cam("C", "H", { view: "ground", framing: "extreme_wide" })],
+    );
+    check(
+      "§28 长焦远景仰拍不钻地下（抬到地面下限）",
+      round6(solveCamera(groundWide, "C", 0)!.position[1]),
+      0.05,
+    );
+
+    check(
+      "§28 planar：注视点 y = 1.55（演员眼高）",
+      round6(solveCamera(camScene([actor("H", 0, 0)], [cam("C", "H")]), "C", 0)!.target[1]),
+      1.55,
+    );
   }
 
   // ② 非演员目标：注视点 = 脚下 + 1（原值 1 的相对版本）。
@@ -1517,22 +1558,28 @@ console.log("\n[28] 相机体系相对化");
       "terrain",
     );
     const r = solveCamera(s, "C", 0)!;
-    check("§28 站在 3m 平台：视高相对化 → 机位 y = 3 + 1.7", round6(r.position[1]), 4.7);
+    // eye_level 的名义俯仰角是 0 ⇒ 机位高度 = 锚线 + 眼平参照 = 3 + 1.7（与旧设计逐值相同）。
+    check("§28 站在 3m 平台：eye_level → 机位 y = 3 + 1.7", round6(r.position[1]), 4.7);
     check("§28 站在 3m 平台：注视点 y = 3 + 1.55", round6(r.target[1]), 4.55);
   }
 
-  // ④ 关键陷阱自查：**不能**写成 target[1] + VIEW_HEIGHT —— 
-  //    那会让每个视角凭空多抬一个眼高（1.55）。这里断言"机位 - 地面 == VIEW_HEIGHT"。
+  // ④ 景别距离的语义：机位到**支点**（锚线 + 眼平参照）的距离**恒等于景别距离** ——
+  //    于是"选 High 不会顺带把主体缩小"。旧做法只给高度、水平距离固定，实际距离会随视角变大。
   {
     const s = camScene(
       [box("P", 0, 0, 4, 4, 3, 0), actor("H", 0, 0, 3)],
-      [cam("C", "H", { view: "low" })],
+      [cam("C", "H", { view: "high" })],
       [],
       "terrain",
     );
     const r = solveCamera(s, "C", 0)!;
-    check("§28 陷阱自查：机位 − 地面 == VIEW_HEIGHT[low] == 0.9", round6(r.position[1] - 3), 0.9);
-    check("§28 陷阱自查：机位 ≠ 注视点 + VIEW_HEIGHT", round6(r.position[1]) === round6(r.target[1] + 0.9), false);
+    // 支点在 3m 平台上 = 3 + CAMERA_EYE_REF（**不是**注视点的 3 + 1.55）。
+    const dist = Math.hypot(
+      r.position[0] - r.target[0],
+      r.position[1] - (3 + CAMERA_EYE_REF),
+      r.position[2] - r.target[2],
+    );
+    check("§28 机位到支点距离 = 景别距离（medium 6m）", round6(dist), 6);
   }
 
   // ⑤ POV 眼高相对化。
@@ -1655,7 +1702,7 @@ console.log("\n[29] 跟跳防抖（followJumpHeight）");
 
 console.log("\n[30] 相机避障");
 {
-  // 一堵墙正好压住默认机位（eye_level 1.7 的高处盒子）。
+  // 一堵墙正好压住默认机位（eye_level = 1.7 的高处盒子）。
   // back_3_4 方位角 135°，机位落在 target + sin/cos(135°)*distance —— 用一个包住它的盒子。
   const wall = box("W", 0, 0, 30, 30, 8);
   const s = camScene([actor("H", 0, 0), wall], [cam("C", "H")], [], "terrain");
@@ -1927,7 +1974,8 @@ console.log("\n[31] 姿态：坡面 pitch / roll + 骨盆高度自适应（Phase
 console.log("\n[32] 相机高度时间低通（走台阶防抖）");
 {
   // 一级 0.3m 的台阶：人从地面（z<0）走上台面（z>0）。
-  // 台上机位高度 = 台面 0.3 + eye_level 1.7 = 2.0；台下 = 1.7。
+  // eye_level 的名义俯仰角是 0 ⇒ 机位高度 = 锚线 + 眼平参照 1.7。
+  // 台上 = 台面 0.3 + 1.7 = 2.0；台下 = 1.7。
   const step = box("S", 0, 4, 8, 8, 0.3);
   const objs = [step, actor("H", 0, -4)];
   const walk = seg("W", "H", [0, -4], [0, 6], { timeEnd: 2 });
@@ -2128,9 +2176,13 @@ console.log("\n[33] 抽象楼梯（整体建模：坡度 + 总高 + 拐弯）");
     check("§33 planar：楼梯仍算障碍（maxSlopeDeg = 0）", blockingRectsFor(stPlanar, "H").length, 1);
   }
 
-  // ⑤ 拐弯：两段 + 转角平台，接缝处高度连续、沿折线全程有面可站。
+  // ⑤ 拐弯：**急转自动圆角**（既不铺平台，也不做硬角）。
+  //
+  // 作者的原话是"楼梯的转折，不要做硬转，做弧度"。做法：把折线的每个急转顶点**内切**成
+  // 一段等半径圆弧（`filletPath`），弧上每段的折角都很小 ⇒ 直接落进"缓转 = 连续曲面"
+  // 那条既有通道：不铺平台、不补角、转角也不会宽出来，踏步沿弧自然铺开。
   {
-    // 路径：先沿 +Z 爬，再拐 90° 沿 +X 爬（转角处自动生成平台）。
+    // 路径：先沿 +Z 爬，再拐 90° 沿 +X 爬（转角处自动圆成一段圆弧）。
     const L = {
       ...box("SL", 0, 0, 2, 2, 2.4),
       topShape: "stair",
@@ -2143,35 +2195,180 @@ console.log("\n[33] 抽象楼梯（整体建模：坡度 + 总高 + 拐弯）");
       },
     } as DirectorObject;
     const runs = stairRuns(L);
-    check("§33 L 形：两段梯跑 + 一个转角平台 + 一个顶端平台 = 4 段", runs.length, 4);
-    check("§33 L 形：第二段朝向 = 90°（由路径推导）", round6((runs[2].heading * 180) / Math.PI), 90);
-    check("§33 L 形：转角平台是水平的", round6(runs[1].y1 - runs[1].y0), 0);
+    const walk = stairWalkPathOf(L);
+
+    // ① 圆弧：半径 = 半个梯宽（两段各 2m，放得下）⇒ 切点 (0,1) / (1,2)、圆心 (1,1)。
+    //    弧上的点**等距圆心**，且两头的端点仍是作者画的那两个点（圆角不吃两头）。
+    const onArc = walk.filter((p) => Math.abs(Math.hypot(p.x - 1, p.z - 1) - 1) < 1e-9).length;
+    check("§33 弯梯：弧上点等距圆心（半径 = 半宽，圆角是内切等半径弧）", onArc, walk.length - 2);
     check(
-      "§33 L 形：平台起点 = 第一段终点（接缝无洞）",
-      [round6(runs[1].x), round6(runs[1].z)],
-      [
-        round6(runs[0].x + Math.sin(runs[0].heading) * runs[0].length),
-        round6(runs[0].z + Math.cos(runs[0].heading) * runs[0].length),
-      ],
+      "§33 弯梯：首尾仍是作者画的端点（圆角只吃拐角）",
+      [round6(walk[0].x), round6(walk[0].z), round6(walk[walk.length - 1].x), round6(walk[walk.length - 1].z)],
+      [0, 0, 2, 2],
+    );
+    // ② 走线 = 两段直跑各去掉一个切距 + 一段弧 ⇒ **比折线短**（内切弧 < 折角）。
+    //    注意用的是**离散弦长和**（与几何、坡度同源），所以与理论弧长差在 0.1% 内。
+    check("§33 弯梯：走线长 = (2−1) + 弧 + (2−1)（圆角把折角切短了）", Math.abs(stairRunLength(L) - (2 + Math.PI / 2)) < 0.002, true);
+
+    // ③ 转弯处**不再有平台**：唯一水平的段是顶端到达平台；转弯段逐段上升。
+    check("§33 弯梯：转弯不铺平台（唯一的水平段是顶端到达平台）", runs.filter((r) => Math.abs(r.y1 - r.y0) <= 1e-9).length, 1);
+    check("§33 弯梯：转弯段逐段上升（连续弧度，不是平台）", runs.slice(0, -1).every((r) => r.y1 > r.y0), true);
+    // ④ 走线每一点都落在某段上（接缝无洞），且相邻走线段的夹角 ≤ 离散粒度 5°
+    //    （所以转弯不会触发平台）。注意段与段在拐角处是**故意重叠**的（叠出 miter 填缝），
+    //    所以"后一段起点 = 前一段终点"不再是这里的不变量 —— 不变量是**走线被覆盖**。
+    let maxTurn = 0;
+    let onStair = true;
+    const headingAt = (k: number) =>
+      Math.atan2(walk[k].x - walk[k - 1].x, walk[k].z - walk[k - 1].z);
+    for (let k = 0; k < walk.length; k += 1) {
+      if (!coversXZ(L, walk[k].x, walk[k].z)) onStair = false;
+    }
+    for (let k = 2; k < walk.length; k += 1) {
+      const d = headingAt(k) - headingAt(k - 1);
+      maxTurn = Math.max(maxTurn, Math.abs(((d + Math.PI * 3) % (Math.PI * 2)) - Math.PI));
+    }
+    check("§33 弯梯：走线每一点都有面可站（接缝用重叠段补角，无洞）", onStair, true);
+    // 离散粒度 8°（`ROUND_STEP_DEG`）：90° 拐角切成 11 段 ⇒ 弧上相邻段夹角约 8.2°，
+    // 远低于急转门槛 40° —— 所以转弯永远不会触发"平台 / 补角"那条兜底分支。
+    check("§33 弯梯：走线相邻段夹角 ≤ 10°（离散粒度量级，不触发平台）", maxTurn <= 10 * DEG + 1e-9, true);
+    // ⑤ 转过去的**总量** = 90°（圆角没有把拐弯改小）。
+    const flights = runs.filter((r) => Math.abs(r.y1 - r.y0) > 1e-9);
+    check(
+      "§33 弯梯：首末梯跑的朝向差 = 90°（圆角没有把拐弯改小）",
+      round6((Math.abs(flights[flights.length - 1].heading - flights[0].heading) * 180) / Math.PI),
+      90,
     );
 
+    // ⑥ 沿**走线**密集采样（每 2cm —— 不是沿各段轴线顺次采：段与段在拐角处重叠，
+    //    顺着轴线走会来回跳，那不是几何的问题）：全程有面、高度单调、无整级跳变。
+    //    单调用 1mm 容差：重叠处取两块里的最高面，两块坡度差一丝，允许毫米级的起伏。
     let covered = true;
     let monotone = true;
+    let maxJump = 0;
     let prevY = -Infinity;
-    for (const run of runs) {
-      for (let i = 0; i <= 10; i += 1) {
-        const a = (run.length * i) / 10;
-        const x = run.x + Math.sin(run.heading) * a;
-        const z = run.z + Math.cos(run.heading) * a;
+    for (let k = 1; k < walk.length; k += 1) {
+      const segLen = Math.hypot(walk[k].x - walk[k - 1].x, walk[k].z - walk[k - 1].z);
+      const n = Math.max(1, Math.ceil(segLen / 0.02));
+      for (let j = 0; j <= n; j += 1) {
+        const t = j / n;
+        const x = walk[k - 1].x + (walk[k].x - walk[k - 1].x) * t;
+        const z = walk[k - 1].z + (walk[k].z - walk[k - 1].z) * t;
         if (!coversXZ(L, x, z)) covered = false;
         const y = topAt(L, x, z);
-        if (y < prevY - 1e-6) monotone = false;
+        if (!Number.isFinite(y)) maxJump = Number.NaN;
+        else if (prevY > -Infinity) maxJump = Math.max(maxJump, Math.abs(y - prevY));
+        if (y < prevY - 1e-3) monotone = false;
         prevY = y;
       }
     }
-    check("§33 L 形：沿折线全程有面可站", covered, true);
-    check("§33 L 形：沿折线高度单调不减（不会中途下陷）", monotone, true);
-    check("§33 L 形：末端达到总高", round6(topAt(L, runs[2].x + Math.sin(runs[2].heading) * runs[2].length, runs[2].z + Math.cos(runs[2].heading) * runs[2].length)), 2.4);
+    check("§33 弯梯：沿走线全程有面可站", covered, true);
+    check("§33 弯梯：沿走线高度单调不减（不会中途下陷）", monotone, true);
+    check("§33 弯梯：沿走线无整级跳变（每 2cm 抬升 < 0.03m）", maxJump < 0.03, true);
+    check("§33 弯梯：末端达到总高", round6(topAt(L, 2, 2)), 2.4);
+
+    // ⑦ **作者画的那个转折点必须还在梯段上**：路径点把手就钉在它上面，它一旦掉出梯段，
+    //    把手就会"看得见却点不中"。这条钉住 `filletPath` 里那个半径上限（0.85 × 半宽）。
+    const cornerY = topAt(L, 0, 2);
+    check("§33 弯梯：转折点仍在梯段上（把手的落点有着落）", Number.isFinite(cornerY) && cornerY > 0.1 && cornerY < 2.3, true);
+    check("§33 弯梯：把手贴在表面（不是退回到顶面）", [round6(stairHandleY(L, 0, 2)), stairHandleY(L, 0, 2) < 2.3], [round6(cornerY), true]);
+  }
+
+  // ⑤b **任意角度拐角的接缝**（作者报的"转角处有很大的缝隙 / 宽出来这么多"）。
+  //
+  // 迭代史：按"边长 = 宽度"铺方形平台 ⇒ 非 90° 盖不住端面（Δ=60°、w=4 时缺口约 0.7m）；
+  // 把平台放大到"够包住接缝" ⇒ 比梯跑还宽（Δ=45° 时宽 41%），画面上就是"转角宽出来一块"。
+  // 现在改为**急转圆角**：走线本身就是一条弧，两段梯跑与弧切向相接 —— 于是
+  //   (a) 沿走线（每段的中线）全程有面可站；
+  //   (b) 作者画的**转折点仍在梯段上**（把手就钉在那儿，掉出去就"看得见却点不中"）；
+  //   (c) **没有哪块比梯跑宽**（转角不再宽出来）；
+  //   (d) 站在转折点上、整个脚印的支撑比例（外缘只剩多边形近似啃掉的一丝，与缓转同一口径）。
+  {
+    const misses: string[] = [];
+    const support: number[] = [];
+    for (const turn of [45, 60, 90, 120, 135, 150]) {
+      const rad = turn * DEG;
+      const s = {
+        ...box("TT", 0, 0, 4, 4, 2),
+        topShape: "stair",
+        stair: {
+          path: [
+            { id: "T_a", x: 0, z: 0 },
+            { id: "T_b", x: 0, z: 4 },
+            { id: "T_c", x: 4 * Math.sin(rad), z: 4 + 4 * Math.cos(rad) },
+          ],
+        },
+      } as DirectorObject;
+      const runs = stairRuns(s);
+      const corridor = runs.length > 0 ? runs[0].halfWidth : 0;
+      // (a) 沿走线采样（弧的中点线——外缘是折线近似，中线才是"一定有面"的那条）。
+      for (const r of runs) {
+        for (let i = 0; i <= 10; i += 1) {
+          const a = (r.length * i) / 10;
+          if (!coversXZ(s, r.x + Math.sin(r.heading) * a, r.z + Math.cos(r.heading) * a)) {
+            misses.push(`${turn}°:走线`);
+          }
+        }
+      }
+      // (b) 转折点仍在梯段上，且高度在 0 与总高之间。
+      const corner = topAt(s, 0, 4);
+      if (!Number.isFinite(corner) || corner <= 0 || corner >= 2) misses.push(`${turn}°:转折点悬空`);
+      // (c) 没有一个盒子比梯跑宽。
+      for (const r of runs) {
+        if (r.halfWidth > corridor + 1e-9) misses.push(`${turn}°:宽出来`);
+      }
+      // (d) 转折点上整个脚印（0.6 见方，7×7）的支撑比例。
+      let ok = 0;
+      for (let i = -3; i <= 3; i += 1) {
+        for (let j = -3; j <= 3; j += 1) {
+          if (coversXZ(s, (i * 0.3) / 3, 4 + (j * 0.3) / 3)) ok += 1;
+        }
+      }
+      support.push(ok / 49);
+    }
+    check("§33 拐角：走线全程有面、转折点不悬空、不比梯跑宽", misses, []);
+    // 实测：填缝之前转角脚印只站得住 27%（折线近似圆弧的外缘楔口把它啃掉了）；填上之后
+    // 45°~150° 六种转角**全部 100%**。门槛留 95%，给多边形近似一点余量。
+    check("§33 拐角：转折点脚印支撑 ≥ 95%（外缘楔口已用重叠段填掉）", Math.round(Math.min(...support) * 100) >= 95, true);
+  }
+
+  // ⑤c **几何缓存必须跟着对象失效**。
+  //
+  // 热路径（演员落地 / 绕障 / 拾取每帧都在问）不能每次查询都重跑圆角 + 重建段表，
+  // 所以几何是缓存的；失效判据 = 对象引用（+ 路径数组引用）。本项目的写入点全是不可变的
+  // `{...object}`（见 store 的 `updateAsset`），所以"改了就得算新的"这条必须钉住 ——
+  // 缓存陈旧 = 渲染与物理一起错，而且不会有任何报错。
+  {
+    const a = {
+      ...box("SC", 0, 0, 2, 2, 2),
+      topShape: "stair",
+      stair: {
+        path: [
+          { id: "C_a", x: 0, z: 0 },
+          { id: "C_b", x: 0, z: 2 },
+          { id: "C_c", x: 2, z: 2 },
+        ],
+      },
+    } as DirectorObject;
+    const hit = topAt(a, 0, 1);
+    // 同一对象重复问：命中缓存不能改变结果。
+    check("§33 缓存：同一对象重复查询结果一致", [round6(topAt(a, 0, 1)), round6(stairRunLength(a))], [round6(hit), round6(stairRunLength(a))]);
+    check("§33 缓存：转折点仍在梯段上", Number.isFinite(topAt(a, 0, 2)), true);
+    // 拖长一段（新 path 数组 + 新对象，与画布拖点同一条路）：几何必须跟着变。
+    const longer = {
+      ...a,
+      stair: {
+        path: [
+          { id: "C_a", x: 0, z: 0 },
+          { id: "C_b", x: 0, z: 2 },
+          { id: "C_c", x: 4, z: 2 },
+        ],
+      },
+    } as DirectorObject;
+    check("§33 缓存：改了路径就有新几何", stairRunLength(longer) > stairRunLength(a) + 1, true);
+    check("§33 缓存：末端仍正好到总高", round6(topAt(longer, 4, 2)), 2);
+    // 改宽度（圆角半径的上限是半宽）：走线必须重算 —— 半径变小 ⇒ 切得少 ⇒ 走线更长。
+    const narrow = { ...a, footprint: { ...a.footprint, w: 1 } } as DirectorObject;
+    check("§33 缓存：改宽度会重算圆角（半径上限 = 半宽）", stairRunLength(narrow) > stairRunLength(a), true);
   }
 
   // ⑥ 画布拾取（拖拽入口）：把手球心必须与**渲染高度同源**，否则"看得见却点不中"。
@@ -2273,15 +2470,39 @@ console.log("\n[33] 抽象楼梯（整体建模：坡度 + 总高 + 拐弯）");
       stair: { path: thinnedL.map((p, i) => ({ id: `D_${i}`, x: p.x, z: p.z })) },
     } as DirectorObject;
     const drawnRuns = stairRuns(drawn);
-    check("§33 手绘：手绘出的 L 形 → 2 梯跑 + 1 转角平台 + 1 顶端平台", drawnRuns.length, 4);
-    // 拐角平台：沿平台取三点必须等高（不写死数值 —— 平台高由"第一段弧长占比"决定）。
-    const cornerY = topAt(drawn, 0, 1.35);
+    // 拐角被圆成一段弧 ⇒ 走线是一串小段，**唯一的水平段是顶端到达平台**。
     check(
-      "§33 手绘：拐角处是平台（三点等高）",
-      [round6(topAt(drawn, 0, 0.8)), round6(topAt(drawn, 0.7, 1.35))],
-      [round6(cornerY), round6(cornerY)],
+      "§33 手绘：手绘出的 L 形 → 转弯被圆成弧（不再铺转角平台）",
+      [drawnRuns.filter((r) => Math.abs(r.y1 - r.y0) <= 1e-9).length, drawnRuns.length > 4],
+      [1, true],
     );
-    check("§33 手绘：平台高度介于 0 与总高之间", cornerY > 0.1 && cornerY < 1.7, true);
+    // 沿走线（含拐角弧）采样：高度连续、单调、没有整级跳变。
+    // 注意采的是**走线**（弧的中点线），不是作者那条折线 —— 折线在弧的外侧，靠外缘有
+    // 多边形近似的楔口（与缓转同一条既定口径：中线始终被覆盖，见 §33 螺旋）。
+    const cornerY = topAt(drawn, 0, 1.35);
+    const drawnWalk = stairWalkPathOf(drawn);
+    let maxJump = 0;
+    let mono = true;
+    let prevYSample = -Infinity;
+    for (let k = 1; k < drawnWalk.length; k += 1) {
+      const segLen = Math.hypot(drawnWalk[k].x - drawnWalk[k - 1].x, drawnWalk[k].z - drawnWalk[k - 1].z);
+      const n = Math.max(1, Math.ceil(segLen / 0.02));
+      for (let j = 0; j <= n; j += 1) {
+        const t = j / n;
+        const y = topAt(
+          drawn,
+          drawnWalk[k - 1].x + (drawnWalk[k].x - drawnWalk[k - 1].x) * t,
+          drawnWalk[k - 1].z + (drawnWalk[k].z - drawnWalk[k - 1].z) * t,
+        );
+        if (!Number.isFinite(y)) maxJump = Number.NaN;
+        else if (prevYSample > -Infinity) maxJump = Math.max(maxJump, Math.abs(y - prevYSample));
+        if (y < prevYSample - 1e-3) mono = false;
+        prevYSample = y;
+      }
+    }
+    check("§33 手绘：沿走线（含拐角弧）高度连续、无整级跳变", maxJump < 0.03, true);
+    check("§33 手绘：沿走线高度单调不减（拐角处不下陷）", mono, true);
+    check("§33 手绘：转折点仍在梯段上（把手有着落）", Number.isFinite(cornerY) && cornerY > 0.1 && cornerY < 1.7, true);
 
     // —— 模型的可读懂性不变量（这两条正是"作者对不上自己画的线"的根源）——
     // ① 末端（= 路径最后一点）正好到达总高；

@@ -14,7 +14,12 @@ import { DirectorObject, StairPathPoint } from "../domain/schema";
  * 3. **不能拐弯**。转向要自己摆两块盒子去凑，接缝、标高全靠手工对齐。
  *
  * 抽象成一个整体后，作者只画一条**路径**（与资产 / 相机路径同一套逻辑）：楼梯沿它上升，
- * 转角即拐弯，**急转**处自动铺方形休息平台（缓转按连续曲面接上，见 `LANDING_MIN_TURN`）。
+ * 转角即拐弯，而且**急转是圆的**（作者的原话："不要做硬转，做弧度"）：每个急转顶点被内切掉
+ * 一段等半径圆弧（见 `filletPath`），弧上每段的折角都很小 ⇒ 直接落进"缓转 = 连续曲面"
+ * 那条既有通道：不铺平台、不补角、转角也不会"宽出来"，踏步沿弧自然铺开。
+ * 弧是折线近似的，段与段之间那一丝外侧楔口由相邻两段**互相重叠**填掉（各自沿自身方向
+ * 延伸 `半宽·tan(Δ/2)`）—— 实测转角上整个脚印 100% 站得住。
+ * 只有圆角放不下（相邻段太短）时才退回"硬角 + 平台 / 补角"兜底（见 `LANDING_MIN_TURN`）。
  * **物理上是连续坡面**（不是一级级台阶），
  * 所以第 1 条从根上消失；第 2 条由"坡脚在 maxStep 内即可走上去"解决
  * （见 `avoidance.isPassable`）；第 3 条由折线直接表达。
@@ -59,6 +64,14 @@ export interface StairRun {
 
 /** 只用于渲染的踏步级高（米）。细分出来的"视觉台阶"不参与任何判定。 */
 export const STAIR_VISUAL_STEP = 0.16;
+
+/**
+ * 「悬空板」楼梯的踏板厚度（米）：`stair.solid === false` 时，每级只留这么厚的一块板。
+ *
+ * 与 `STAIR_VISUAL_STEP`（级高）同量级但略薄 —— 视觉上读得出"这是板、不是台阶"，
+ * 又不会薄到像纸片。**只影响渲染**（物理是连续坡面，见 `StairSpec.solid` 的说明）。
+ */
+export const STAIR_TREAD_THICKNESS = 0.12;
 
 /** 一段梯跑细分出来的一块**视觉踏步**（仅渲染，不参与任何判定）。 */
 export interface StairTread {
@@ -119,10 +132,210 @@ const EPS = 1e-6;
  */
 const LANDING_MIN_TURN = 40;
 
+/**
+ * 超过这个转角就不再"沿两段走廊探出去补角"（miter），改铺一块方形平台。
+ * （只对**圆角放不下**的那种硬角生效：正常路径的急转已经被 `filletPath` 圆掉了。）
+ *
+ * miter 的探出量是 `(w/2)·tan(Δ/2)`，在折返角上随 tan 发散 —— Δ→180° 时长出一条尖舌。
+ * 135° 处探出量 ≈ 2.4 × 半宽，还在"看起来像两段梯跑咬在一起"的范围里；
+ * 再钝就该摆了（真实回折梯也是在折返处放一块平台，而不是让两条梯跑咬成尖角）。
+ */
+const MITER_MAX_TURN = 135;
+
+/**
+ * 多大以上的转角才**圆角**（度）。
+ *
+ * 门槛放在"急转"之下、螺旋每段之上：螺旋路径每段只转 15°（它本来就是一条连续曲面），
+ * 再给每个采样点切圆角只会把盒子数量翻倍、还把"路径长 = 弦长和"精确成立的那条钉子拔掉。
+ * 而 ≥ 20° 的折角是**看得出来**的硬角 —— 那才是要圆掉的东西。
+ */
+const ROUND_MIN_TURN = 20;
+
+/**
+ * 圆弧的离散粒度（度）：切出的每段折角都很小 ⇒ 每段都落在"缓转 = 连续曲面"区间里。
+ *
+ * 别调太小：弧上每段都会变成**一段梯跑 + 若干踏步网格**，粒度直接乘到渲染与查询的成本上
+ * （5° 时一个 90° 拐角 = 19 段，8° = 11 段）。而外侧轮廓由相邻段的重叠 miter 填成真弧，
+ * 所以调粗并不"变方"—— 台阶扇面细一点粗一点，肉眼都在"圆弧"这一档里。
+ */
+const ROUND_STEP_DEG = 8;
+
 /** 两条朝向之间的最小夹角（度，0..180）。 */
 function turnDeg(a: number, b: number): number {
   const d = ((a - b) / DEG) % 360;
   return Math.abs(((d + 540) % 360) - 180);
+}
+
+/**
+ * **把折线里的硬角换成圆弧**（内切圆角，与 CAD 的 fillet 同一套）。
+ *
+ * 为什么圆：硬角处两段走廊的端面必然对不上 —— 要么裂一个楔口、要么得拿一块平台去补，
+ * 而那块平台一定**比梯跑宽**（作者看到的就是"转角宽出来一块"）。换成**等半径圆弧**之后，
+ * 弧上每一段的折角都很小，直接落进"缓转 = 连续曲面"那条既有通道（螺旋梯就是这么走的）：
+ * 不铺平台、不补角、不宽出来，踏步还会沿弧自然铺开 —— 看上去就是一段弯梯。
+ *
+ * 半径全是**派生量**（作者不用填）：
+ *   · ≤ `w/2`（半个梯宽）—— 再大就成了绕圈的旋转楼梯；
+ *   · ≤ `0.85·(w/2)/(sec(Δ/2) − 1)`：**保证作者画的那个转折点仍落在梯段内**（它到圆弧的
+ *     横向偏移 = `R·(sec(Δ/2) − 1)` ≤ 0.85 个半宽）。这条不能省 —— 路径点把手就钉在
+ *     那个点上，它一旦掉出梯段，把手就"看得见却点不中"（见 `stairHandleY` 与 §33 拾取）；
+ *   · ≤ 由相邻两段的**长度**夹住（切点不越过段中点，否则相邻两个圆角会互相吃掉）。
+ * 半径小到没意义就直接**不圆**：留给急转的平台 / 补角去兜底 —— 那种拐角看着硬，
+ * 但至少接缝有面、没有洞（见 `walkStair` 里的接缝处理）。
+ */
+function filletPath(
+  pts: Array<{ x: number; z: number }>,
+  halfWidth: number,
+): Array<{ x: number; z: number; arc?: boolean }> {
+  if (pts.length < 3 || halfWidth <= EPS) return pts;
+  const out: Array<{ x: number; z: number; arc?: boolean }> = [pts[0]];
+  // 上一段的**实际起点**：上一个圆角的切点（没圆就是原顶点）。相邻段的可用长度从它算起。
+  let cx = pts[0].x;
+  let cz = pts[0].z;
+  for (let i = 1; i < pts.length - 1; i += 1) {
+    const vx = pts[i].x;
+    const vz = pts[i].z;
+    const nx = pts[i + 1].x;
+    const nz = pts[i + 1].z;
+    const inLen = Math.hypot(vx - cx, vz - cz);
+    const outLen = Math.hypot(nx - vx, nz - vz);
+    // 退化点（重合）直接丢掉：留着只会喂给下面一次 0/0。
+    if (inLen <= EPS || outLen <= EPS) continue;
+    const uix = (vx - cx) / inLen;
+    const uiz = (vz - cz) / inLen;
+    const uox = (nx - vx) / outLen;
+    const uoz = (nz - vz) / outLen;
+    const cosT = Math.min(1, Math.max(-1, uix * uox + uiz * uoz));
+    const turn = Math.acos(cosT);
+    const sinT = Math.sin(turn);
+    const half = turn / 2;
+    const tanHalf = Math.tan(half);
+    if ((turn * 180) / Math.PI >= ROUND_MIN_TURN && sinT > EPS) {
+      const radius = Math.min(
+        halfWidth,
+        (0.85 * halfWidth * Math.cos(half)) / Math.max(EPS, 1 - Math.cos(half)),
+        (0.5 * Math.min(inLen, outLen)) / Math.max(EPS, tanHalf),
+      );
+      const t = radius * tanHalf;
+      if (radius > 0.01 && t <= 0.5 * Math.min(inLen, outLen) + EPS) {
+        // 圆心：从**入射切点**沿"入射方向指向出射方向"的法向偏 R。
+        // 解 `(C−Tin)⊥u_in` 与 `(C−Tout)⊥u_out` 得 `C = Tin + R·n̂`，
+        // 其中 `n̂ = (u_out − cosΔ·u_in)/sinΔ`（垂直于 u_in、指向拐弯那一侧）。
+        const nrx = (uox - cosT * uix) / sinT;
+        const nrz = (uoz - cosT * uiz) / sinT;
+        const tinX = vx - uix * t;
+        const tinZ = vz - uiz * t;
+        const toutX = vx + uox * t;
+        const toutZ = vz + uoz * t;
+        const ox = tinX + nrx * radius;
+        const oz = tinZ + nrz * radius;
+        const a0 = Math.atan2(tinX - ox, tinZ - oz);
+        let dA = Math.atan2(toutX - ox, toutZ - oz) - a0;
+        while (dA > Math.PI) dA -= Math.PI * 2;
+        while (dA < -Math.PI) dA += Math.PI * 2;
+        // **取奇数段**：让弧的中点落在某一段的**正中**，而不是两段的缝上。
+        // 作者画的那个转折点正好在弧的中点上（它是弧上离转折点最近的点）—— 落在缝上就会掉进
+        // 外侧楔口里：点查询报"不在梯段上"，把手立刻变成"看得见却点不中"（见 §33 拾取）。
+        let steps = Math.max(2, Math.round((turn * 180) / Math.PI / ROUND_STEP_DEG));
+        if (steps % 2 === 0) steps += 1;
+        out.push({ x: tinX, z: tinZ });
+        for (let k = 1; k < steps; k += 1) {
+          const a = a0 + (dA * k) / steps;
+          out.push({ x: ox + radius * Math.sin(a), z: oz + radius * Math.cos(a) });
+        }
+        // 收尾用**切点本身**（不用累加出来的角度），免得浮点误差让接缝错开一丝。
+        out.push({ x: toutX, z: toutZ });
+        // `arc: true` 标出"这些点是圆角切出来的"——`walkStair` 据此把外侧的楔口补掉
+        // （折线近似圆弧，每段之间必然留一个 ≤ 半宽·tan(粒度/2) 的三角缺口）。
+        for (let k = out.length - (steps + 1); k < out.length; k += 1) out[k].arc = true;
+        cx = toutX;
+        cz = toutZ;
+        continue;
+      }
+    }
+    out.push({ x: vx, z: vz });
+    cx = vx;
+    cz = vz;
+  }
+  out.push(pts[pts.length - 1]);
+  return out;
+}
+
+/**
+ * **人真正走的那条线**：作者画的路径，但急转处的硬角已被 `filletPath` 换成圆弧。
+ *
+ * 渲染、拾取、坡度、走线规划全都走它 —— 于是"坡度是派生量""水平延伸 = 路径长"
+ * 这些不变量都对着**真实几何**成立。作者画的折线（`stairPathOf`）只用来记路径点 /
+ * 画把手：每个转折点都还在梯段内（见 `filletPath` 的半径上限）。
+ */
+export function stairWalkPathOf(object: DirectorObject): Array<{ x: number; z: number }> {
+  return stairGeomOf(object).walk;
+}
+
+/**
+ * 每座楼梯的几何缓存（圆角走线 + 水平包围盒 + 段表）。
+ *
+ * 为什么必须缓存：`stairHitAt` / `stairCoversXZ` 是**热路径** —— 演员落地、绕障、路径
+ * 检查、画布拾取每帧都会问它。而圆角要跑一行三角函数、还要分配一整条新折线
+ * （一个急转 = 十几个点）。把圆角直接接进热路径之后，页面立刻卡了（实测）。
+ *
+ * 失效判据 = **路径数组的引用**：本项目所有写入点都是不可变的
+ * `{ ...object, stair: { path: next } }`（store 的 `updateAsset`、画布拖点、Inspector），
+ * 所以引用一变就是新形状；几何查询于是退化成"一次 WeakMap 查表 + 一次引用比较 +
+ * 一次包围盒判定"，不再重建任何几何。
+ */
+interface StairGeom {
+  pathRef: unknown;
+  walk: Array<{ x: number; z: number; arc?: boolean }>;
+  runs: StairRun[];
+  hasRuns: boolean;
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+}
+const stairGeomCache = new WeakMap<DirectorObject, StairGeom>();
+
+/** 取（必要时重建）该对象的圆角走线与包围盒；段表惰性重建（只有渲染 / 包围盒要）。 */
+function stairGeomOf(object: DirectorObject): StairGeom {
+  const path = stairPathOf(object);
+  let geom = stairGeomCache.get(object);
+  if (!geom) {
+    geom = {
+      pathRef: null,
+      walk: [],
+      runs: [],
+      hasRuns: false,
+      minX: 0,
+      maxX: 0,
+      minZ: 0,
+      maxZ: 0,
+    };
+    stairGeomCache.set(object, geom);
+  }
+  if (geom.pathRef !== path) {
+    geom.pathRef = path;
+    geom.walk = filletPath(path, object.footprint.w / 2);
+    geom.hasRuns = false;
+    // 包围盒 = 走线 ± 半宽，末端再放一个到达平台。查询绝大多数落在盒外 ——
+    // 早退一次就省掉整条折线的遍历（这是热路径上最便宜的那道闸）。
+    let minX = Number.POSITIVE_INFINITY;
+    let maxX = Number.NEGATIVE_INFINITY;
+    let minZ = Number.POSITIVE_INFINITY;
+    let maxZ = Number.NEGATIVE_INFINITY;
+    for (const p of geom.walk) {
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.z < minZ) minZ = p.z;
+      if (p.z > maxZ) maxZ = p.z;
+    }
+    const pad = object.footprint.w + object.footprint.w / 2;
+    geom.minX = minX - pad;
+    geom.maxX = maxX + pad;
+    geom.minZ = minZ - pad;
+    geom.maxZ = maxZ + pad;
+  }
+  return geom;
 }
 
 /** 生效的水平路线：作者画的路径（≥2 点），否则退回沿局部 +Z 的一段直跑。 */
@@ -137,9 +350,9 @@ export function stairPathOf(object: DirectorObject): Array<{ x: number; z: numbe
   ];
 }
 
-/** 路径水平总长（米）。 */
+/** **走线**的水平总长（米）——圆角之后那条线，与几何 / 坡度同源。 */
 export function stairRunLength(object: DirectorObject): number {
-  const pts = stairPathOf(object);
+  const pts = stairWalkPathOf(object);
   let sum = 0;
   for (let i = 1; i < pts.length; i += 1) {
     sum += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].z - pts[i - 1].z);
@@ -172,12 +385,14 @@ function hitRun(run: StairRun, x: number, z: number): number | null {
 }
 
 /**
- * 唯一的梯段遍历：沿路径逐边铺梯跑，**急转**处铺一段水平休息平台，顶端铺到达平台。
+ * 唯一的梯段遍历：沿**圆角之后**的走线逐边铺梯跑，顶端铺到达平台。
  *
- * **转角平台是从路径里扣除的**（吃掉两侧边各 `landing/2`）—— 于是水平延伸 = 路径长，
- * 末端正好在**最后一个路径点**到达总高，作者画的那条线就是人走的那条线。
- * 梯跑与平台在拐角处铺满、不留空洞；短边把裁切量夹住时两者会重叠，重叠处取**最高面**
- * （与离散盒子堆叠同一条语义：谁在上面谁说了算）。
+ * 急转已经被 `filletPath` 圆成一段弧 ⇒ 弧上每段折角都很小，落进"缓转 = 连续曲面"那条通道：
+ * 不铺平台、不补角、转角也不会宽出来。相邻两段在拐角处**故意重叠**一点点（各自沿自身方向
+ * 延伸 `半宽·tan(Δ/2)`），把"折线近似圆弧"留下的外侧楔口填掉 —— 于是角上整个脚印都站得住。
+ * 重叠处取**最高面**（与离散盒子堆叠同一条语义：谁在上面谁说了算）。
+ * 只有圆角放不下（相邻段太短）时才退回平台 / 补角，且**平台从路径里扣除**（吃掉两侧
+ * 各 `landing/2`）⇒ 水平延伸 = 路径长、末端正好在**最后一个路径点**到达总高。
  *
  * **顶端到达平台接在路径之外**（外扩一个宽度）：它是"到达面"，用来让站在路线终点上的人
  * 整个脚印都有支撑 —— 所以它不参与 `flightsRun`，也不改变"末端到顶"。
@@ -190,8 +405,16 @@ function walkStair(object: DirectorObject, x: number, z: number, out: StairRun[]
   const total = object.footprint.h;
   if (halfWidth <= EPS || total <= EPS) return Number.NaN;
 
-  const pts = stairPathOf(object);
+  // 人走的是**圆角之后**那条线（见 `filletPath`）：急转不再是硬角，而是一段圆弧。
+  // 走线与包围盒都取自缓存 —— 这是热路径，不能每次查询都重跑一遍圆角。
+  const geom = stairGeomOf(object);
+  const pts = geom.walk;
   if (pts.length < 2) return Number.NaN;
+  // 早退：不在包围盒里就不必逐段测（绝大多数查询离得很远）。`NaN` 入参不会命中任何比较，
+  // 所以"只想取段表"的调用（`stairRuns` 传 `NaN`）照常走完全程。
+  if (out === null && (x < geom.minX || x > geom.maxX || z < geom.minZ || z > geom.maxZ)) {
+    return Number.NaN;
+  }
 
   const landing = object.footprint.w;
 
@@ -232,6 +455,13 @@ function walkStair(object: DirectorObject, x: number, z: number, out: StairRun[]
   // 上一条边在"当前顶点"被平台吃掉的份额（= 平台的入射侧）。一个转折点只铺一次：
   // 在**出射**那条边上处理（否则同一拐角会被处理两遍、平台叠两层）。
   let prevTrimEnd = 0;
+  // 圆角把折线切成一小段一小段之后，每两段之间会留一个"折线近似圆弧"的三角楔口
+  // （≤ 半宽·tan(粒度/2)）。**那是真的缺口**：点查询看不见它、脚印会漏下去
+  // （实测：站在转角上 0.6 见方的脚印只有 27% 有支撑）。所以把每段沿**自身方向**
+  // 延伸 miter 长度 `半宽·tan(Δ/2)` —— 两块一叠，楔口正好填满，而横向仍然只占走廊
+  // 自己的宽度（不会"宽出来"）。高度按**本段坡度外推**，于是
+  // "水平延伸 = 路径长、末端到顶"那本账（`flightsRun`）一分不动。
+  let prevSeamLen = 0;
   prevHeading = Number.NaN;
 
   for (let i = 1; i < pts.length; i += 1) {
@@ -258,36 +488,99 @@ function walkStair(object: DirectorObject, x: number, z: number, out: StairRun[]
         ? Math.min(landing / 2, len / 2)
         : 0;
 
-    // 休息平台：边长 = 楼梯宽度、**以转折点为中心**（沿入射方向表达）。
-    // 沿路径的长度取两侧被吃掉的实际份额 `prevTrimEnd + trimStart`（短边会被夹住，
-    // 平台不该沿路径外伸），横向半宽 = 宽度的一半 —— 正常情况就是个正方平台。
+    // 接缝：**不是拿一块"方块"去盖**（无论那块方块是"边长 = 宽度"还是"边长够包住接缝"——
+    // 后者为了包住接缝会做得比梯跑还宽，转角就"宽出来一块"，那不对），
+    // 而是让两段走廊各自沿**自身方向**探出去补角（经典 miter）：
+    //
+    //   · 入射侧：从入射梯跑被切掉的地方（转折点 − w/2·u）补到 转折点 + miter·u；
+    //   · 出射侧：从 转折点 − miter·v 补到出射梯跑的起点（转折点 + w/2·v）。
+    //
+    // 探出量 = 两段走廊外缘交点离转折点的距离 = `(w/2)·tan(Δ/2)`。
+    // 两块都**只占走廊自己的宽度**（半宽 = w/2）—— 这就是"转角不该宽出来"的保证。
+    // 90° 时两块**重合**（正好是原来的 w×w 方形平台，逐值不变），只铺一块免得共面打架；
+    // 其余角度两块并起来恰好填满两段端面之间的缺口。
+    //
+    // 折返角（> `MITER_MAX_TURN`）改成方形平台，见该常量。
+    //
+    // 梯跑被吃掉的份额（`trimStart` / `prevTrimEnd`）仍按 `landing/2` 算 —— 那是
+    // "水平延伸 = 路径长、末端到顶"这条不变量的账；补角只是把缺口填上，
+    // 与相邻梯跑重叠处取**最高面**（与离散盒子堆叠同一条语义）。
     if (trimStart > 0) {
-      const run: StairRun = {
-        x: px - Math.sin(prevHeading) * prevTrimEnd,
-        z: pz - Math.cos(prevHeading) * prevTrimEnd,
-        heading: prevHeading,
-        length: prevTrimEnd + trimStart,
+      const half = landing / 2;
+      const turn = (turnDeg(heading, prevHeading) * Math.PI) / 180;
+      const at = (head: number, ax: number, az: number, length: number, hw: number): StairRun => ({
+        x: ax,
+        z: az,
+        heading: head,
+        length,
         y0: py,
         y1: py,
-        halfWidth: landing / 2,
-      };
-      if (out) out.push(run);
-      else {
-        const h = hitRun(run, x, z);
-        if (h !== null && (Number.isNaN(hitY) || h > hitY)) hitY = h;
+        halfWidth: hw,
+      });
+      const seam: StairRun[] = [];
+      if (turn <= (MITER_MAX_TURN * Math.PI) / 180) {
+        const miter = half * Math.tan(turn / 2);
+        seam.push(
+          at(
+            prevHeading,
+            px - Math.sin(prevHeading) * half,
+            pz - Math.cos(prevHeading) * half,
+            half + miter,
+            half,
+          ),
+        );
+        // 90° 时"出射侧那块"与上面那块是**同一块**（同位置同尺寸），别铺两遍。
+        if (Math.abs(turn - Math.PI / 2) > 1e-9) {
+          seam.push(
+            at(
+              heading,
+              px - Math.sin(heading) * miter,
+              pz - Math.cos(heading) * miter,
+              half + miter,
+              half,
+            ),
+          );
+        }
+      } else {
+        // 方形平台：边长 = 能包住两段端面的大小 `(w/2)·(|cosΔ| + |sinΔ|)`（90° 时 = 宽度）。
+        const cover = half * (Math.abs(Math.cos(turn)) + Math.abs(Math.sin(turn)));
+        seam.push(
+          at(
+            prevHeading,
+            px - Math.sin(prevHeading) * cover,
+            pz - Math.cos(prevHeading) * cover,
+            cover * 2,
+            cover,
+          ),
+        );
+      }
+      for (const run of seam) {
+        if (out) out.push(run);
+        else {
+          const h = hitRun(run, x, z);
+          if (h !== null && (Number.isNaN(hitY) || h > hitY)) hitY = h;
+        }
       }
     }
 
     const flen = Math.max(0, len - trimStart - trimEnd);
     const rise = (total * flen) / flightsRun;
+    // 本段两端的"填缝延伸"：只对**圆角切出来的**顶点做（`pts[·].arc`）。缓转 / 螺旋维持原样
+    // （它们的楔口是既定口径：中线始终有面，见 LANDING_MIN_TURN）。
+    const seamStart = prevSeamLen;
+    const seamEnd =
+      pts[i].arc === true && tailLen > EPS
+        ? halfWidth * Math.tan((turnDeg(tailHeading, heading) * DEG) / 2)
+        : 0;
     if (flen > EPS) {
+      const slope = rise / flen;
       const run: StairRun = {
-        x: px + Math.sin(heading) * trimStart,
-        z: pz + Math.cos(heading) * trimStart,
+        x: px + Math.sin(heading) * (trimStart - seamStart),
+        z: pz + Math.cos(heading) * (trimStart - seamStart),
         heading,
-        length: flen,
-        y0: py,
-        y1: py + rise,
+        length: flen + seamStart + seamEnd,
+        y0: py - seamStart * slope,
+        y1: py + rise + seamEnd * slope,
         halfWidth,
       };
       if (out) out.push(run);
@@ -301,6 +594,7 @@ function walkStair(object: DirectorObject, x: number, z: number, out: StairRun[]
     py += rise;
     prevHeading = heading;
     prevTrimEnd = trimEnd;
+    prevSeamLen = seamEnd;
   }
 
   // **顶端到达平台**：从最后一个路径点再往外铺一块边长 = 楼梯宽度的水平平台。
@@ -332,21 +626,47 @@ function walkStair(object: DirectorObject, x: number, z: number, out: StairRun[]
   return out ? Number.NaN : hitY;
 }
 
-/** `(x, z)` 处楼梯的顶面高度；不在楼梯上返回 `NaN`。热路径，零分配。 */
+/**
+ * `(x, z)` 处楼梯的顶面高度；不在楼梯上返回 `NaN`。**热路径**。
+ *
+ * 快在哪：几何（圆角走线 + 包围盒）走缓存，查询先过包围盒 —— 不在盒里直接 `NaN`，
+ * 连折线都不碰。**不要**在这里面重建几何（见 `stairGeomOf` 的注释）。
+ */
 export function stairHitAt(object: DirectorObject, x: number, z: number): number {
   return walkStair(object, x, z, null);
 }
 
-/** `(x, z)` 是否落在楼梯的水平投影内。热路径，零分配。 */
+/** `(x, z)` 是否落在楼梯的水平投影内。热路径（同上）。 */
 export function stairCoversXZ(object: DirectorObject, x: number, z: number): boolean {
   return !Number.isNaN(walkStair(object, x, z, null));
 }
 
-/** 分段列出每一段（渲染 / 包围盒 / Inspector）。冷路径。 */
+/**
+ * 分段列出每一段（渲染 / 包围盒 / Inspector / 射线）。
+ *
+ * 结果**每座楼梯只建一次**并缓存，返回的是**同一个数组** —— 调用方只读，别改。
+ * （渲染每帧都要它、射线每次拾取都要它、而圆角之后的段数不少，重建一遍很贵。）
+ */
 export function stairRuns(object: DirectorObject): StairRun[] {
-  const out: StairRun[] = [];
-  walkStair(object, Number.NaN, Number.NaN, out);
-  return out;
+  const geom = stairGeomOf(object);
+  if (!geom.hasRuns) {
+    const out: StairRun[] = [];
+    walkStair(object, Number.NaN, Number.NaN, out);
+    geom.runs = out;
+    geom.hasRuns = true;
+  }
+  return geom.runs;
+}
+
+/**
+ * **单段**版的命中测试：段内返回该处高度，出段返回 `null`。
+ *
+ * 给射线求交用：平面是无限的、段是有限的，命中的落点必须真在这一段里。
+ * 那里**不能**调 `stairHitAt` —— 那是 O(段数) 的全局查询，套在逐段循环里就是 O(段数²)，
+ * 圆角之后的段数足够多，一次拾取就能卡住。
+ */
+export function stairRunHeightAt(run: StairRun, x: number, z: number): number | null {
+  return hitRun(run, x, z);
 }
 
 /** 楼梯的**世界 AABB**（含转折）。不依赖 `footprint.d` —— 它是几何反推的结果。 */

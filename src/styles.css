@@ -3119,6 +3119,38 @@ header .actions button {
 .vf-zoom button:hover {
   border-color: var(--ap-blue);
 }
+
+/* 楼梯路径点：每点**一行、不换行**。
+   面板本来就窄，两个数字框 + 删除键一旦允许换行，行高就会翻倍、
+   数字框还会被挤出可视区（作者截图里的"排版乱"）。这里用 flex 定死：序号固定宽、
+   两个数字框等分剩余宽度、删除键不参与压缩。 */
+.stair-points .pt-row {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.stair-points .pt-row .node-label {
+  flex: 0 0 auto;
+  min-width: 22px;
+}
+
+.stair-points .pt-row .pt-num {
+  flex: 1 1 0;
+  width: auto;
+  min-width: 0;
+}
+
+.stair-points .pt-row .ghost-button {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  white-space: nowrap;
+}
+
+.stair-points > summary {
+  cursor: pointer;
+}
 .vf-tool {
   background: var(--ap-surface-2);
   color: var(--ap-text);
@@ -3228,10 +3260,16 @@ header .actions button {
   color: #ffffff;
 }
 .obj-row .obj {
-  padding-right: 32px;
+  /* 名字（省略号截断）右侧要给**角标**留位，而这个角标是 absolute 浮在右上角的，
+     宽度不会自动从名字里扣 —— 必须按它的实际宽度留：
+       3 个按钮 × 16px（隐藏 / 锁定 / 删除）+ 2 个 3px 间隙 = 54px，
+       再加上 `.obj-actions { right: 2px }` = **56px**，这里留 58px 余量。
+     改角标按钮数量 / 尺寸时，这个值要跟着改（别凭感觉给）。 */
+  padding-right: 58px;
 }
 .obj-row .obj-name {
-  font-size: 12.5px;
+  /* 比原来小 2 号（12.5 → 10.5）：左栏一行能放下更长的名字，列表也更容易扫。 */
+  font-size: 10.5px;
   font-weight: 500;
   color: inherit;
 }
