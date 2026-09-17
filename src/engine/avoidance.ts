@@ -69,6 +69,15 @@ export function routeHeightFor(state: DirectorState, objectId: string): number {
   // 没有段（静止对象）：它本来就站在某层上，用那个高度。
   if (segs.length === 0) {
     const obj = state.objects.find((o) => o.id === objectId);
+    // **团队队员**：他自己没有段，走的是**队首那条路线** —— 层高必须跟着队首。
+    // 否则会用他自己的 baseY（0），于是 `pathHeightAt` 只允许从地面抬一个 maxStep ⇒
+    // 队员上不了楼梯面，只能在楼梯下方穿模跑（巨型楼梯实测）。
+    const grp = obj
+      ? (state.groups ?? []).find(
+          (g) => g.dynamics && g.members.includes(obj.id) && g.members[0] !== obj.id,
+        )
+      : undefined;
+    if (grp) return routeHeightFor(state, grp.members[0]);
     return obj ? objectBottom(obj) : 0;
   }
   let minY = Infinity;

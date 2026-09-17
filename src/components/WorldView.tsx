@@ -796,6 +796,27 @@ const StairMesh = memo(function StairMesh({ object }: { object: DirectorObject }
   // 梯跑的轴排开（盒子长边在 Z、位置却沿 X 递增），楼梯就画成了一堆错位的方块。
   // 父 group 已经把对象摆到「底面中心 + rotation」上（世界→局部的逆旋转与 coversXZ 同源）。
   const bottom = objectBottom(object);
+  // **共享一份几何 + 一份材质**：`StairMesh` 是"一个踏步一棵 mesh"（巨型楼梯实测 106 棵），
+  // 每棵各建 `boxGeometry` + `meshStandardMaterial` 会让 GPU 反复上传 / 编译同一份东西，
+  // 这是"场景卡"的主要来源。统一用 1×1×1 盒子 + `mesh.scale` 表达尺寸 ⇒ 几何与材质各只 1 份。
+  const sharedBox = useMemo(() => new THREE.BoxGeometry(1, 1, 1), []);
+  const sharedMaterial = useMemo(
+    () =>
+      new THREE.MeshStandardMaterial({
+        color: new THREE.Color(object.color ?? "#8b9bb0"),
+        roughness: 0.7,
+        metalness: 0.05,
+        transparent: true,
+        opacity: 0.82,
+      }),
+    [object.color],
+  );
+  // 对象换色 / 卸载时把上一份释放掉（作为 props 传进去的对象 R3F 不会自动 dispose）。
+  useEffect(() => () => {
+    sharedBox.dispose();
+    sharedMaterial.dispose();
+  }, [sharedBox, sharedMaterial]);
+
   // **`memo` + `useMemo` 都是必需的**：场景树里任何一次 store 更新都会让整棵子树重渲染
   // （时间轴播放、滚轮缩放都会），而圆角之后一座楼梯的踏步有几十块 —— 每次重渲染都重算
   // 一遍就是明显的掉帧。这里只用 `object`，它在不可变更新下引用不变 ⇒ 可以安全跳过。
@@ -833,16 +854,11 @@ const StairMesh = memo(function StairMesh({ object }: { object: DirectorObject }
           key={index}
           position={[tread.x, tread.y, tread.z]}
           rotation={[0, tread.heading, 0]}
-        >
-          <boxGeometry args={[tread.width, tread.height, tread.depth]} />
-          <meshStandardMaterial
-            color={object.color}
-            roughness={0.7}
-            metalness={0.05}
-            transparent
-            opacity={0.82}
-          />
-        </mesh>
+          geometry={sharedBox}
+          material={sharedMaterial}
+          // 尺寸走 scale：这样所有踏步共用同一份 1×1×1 几何，不必各建一份。
+          scale={[tread.width, tread.height, tread.depth]}
+        />
       ))}
     </group>
   );
@@ -876,6 +892,23 @@ function worldToLocalXZ(object: DirectorObject, x: number, z: number): { x: numb
 function decorAnchor(object: DirectorObject): { x: number; z: number } {
   const center = stairCenterWorld(object);
   return center ? worldToLocalXZ(object, center.x, center.z) : { x: 0, z: 0 };
+}
+
+/**
+ * 团队队员（自己没有 MOVE 段）该用**谁**去问高度：队首。
+ *
+ * 队员走的是队首那条路线，但 `pathHeightAt` 是按"它自己有没有段 / 段上的缓动进度"算的 ——
+ * 队员没有段 ⇒ 走退化的地面判定，只能从地面抬一个 maxStep ⇒ **上不了楼梯面，在楼梯下方
+ * 穿模跑**（巨型楼梯实测：队首 y=5.00，队员 y=0.00）。
+ */
+function heightOwnerOf(state: DirectorState, object: DirectorObject): DirectorObject {
+  const hasOwn = state.segments.some((s) => s.object === object.id);
+  if (hasOwn) return object;
+  const g = (state.groups ?? []).find(
+    (x) => x.dynamics && x.members.includes(object.id) && x.members[0] !== object.id,
+  );
+  if (!g) return object;
+  return state.objects.find((o) => o.id === g.members[0]) ?? object;
 }
 
 /**
@@ -948,7 +981,14 @@ const ActorView = memo(function ActorView({ objectId }: { objectId: string }) {
     if (groupRef.current) {
       // y 由几何派生 —— 有弧线的段走弧线（跳跃 / 落差 / 攀爬），否则站到脚下够得着的最高的面上。
       // planar 且无弧线时这就是恒 0 —— 与扩展前的表现逐像素一致。
-      const groundY = pathHeightAt(state, object, position.x, position.z, currentTime);
+      // 队员（自己没有段）按**队首**求高度：他走的是队首那条路线（见 `heightOwnerOf`）。
+      const groundY = pathHeightAt(
+        state,
+        heightOwnerOf(state, object),
+        position.x,
+        position.z,
+        currentTime,
+      );
       groupRef.current.position.set(position.x, groundY, position.z);
       const target =
         distance > 1e-4 ? Math.atan2(dx, dz) : objectFacing(state, objectId, currentTime);
@@ -2788,8 +2828,36 @@ function Interaction() {
     // 「走上去 / 走下来」：这一次点击是**楼梯**。同样必须走在选择 / 拖拽之前。
     if (store.walkPick) {
       const walkTolerance = 0.7 / store.zoom;
-      const hitStair = hitObjectRay(store.state, store.currentTime, event.ray, walkTolerance);
-      if (hitStair) store.assignStairWalk(hitStair.object.id);
+      // 这一步是"**点一条楼梯**"，所以只在楼梯里找最近的命中 —— 不要拿全场景去比。
+      // 巨大楼梯旁边通常就贴着给它的平台 / 建筑，按"最近命中"会先撞上那些东西，
+      // 作者于是感觉"这条楼梯怎么都选不中"（几何没问题，是命中去比错了对象）。
+      const stairs = store.state.objects.filter((o) => o.topShape === "stair");
+      const hitStair = stairs.length
+        ? hitObjectRay({ ...store.state, objects: stairs }, store.currentTime, event.ray, walkTolerance)
+        : null;
+      if (hitStair) {
+        store.assignStairWalk(hitStair.object.id);
+        return;
+      }
+      // **平面兜底**：射线 vs"每一段的平面"这条路在巨型 / 弯曲楼梯上很容易整条落空
+      // （段多、又短又斜，射线从缝里穿过去）。作者的意图只是"点到这条楼梯上"，
+      // 所以退一步：拿点击的**平面落点**去找离它最近的楼梯（按路径点在平面上的距离），
+      // 容差给一个宽松值 —— 这是纯辅助，不会抢走"点在别的对象上"的情形。
+      const point = screenToGround(event.clientX, event.clientY, store.state, true);
+      if (point) {
+        let nearest: (typeof stairs)[number] | null = null;
+        let bestDist = 3; // 米：放宽到 3m，够覆盖梯宽 + 一点手抖
+        for (const stair of stairs) {
+          for (const p of stair.stair?.path ?? []) {
+            const d = Math.hypot(p.x - point.x, p.z - point.z);
+            if (d < bestDist) {
+              bestDist = d;
+              nearest = stair;
+            }
+          }
+        }
+        if (nearest) store.assignStairWalk(nearest.id);
+      }
       return;
     }
 
@@ -3242,10 +3310,19 @@ function ViewPanControls() {
     };
     const down = (e: KeyboardEvent) => {
       if (isTyping()) return;
-      // 「台阶」选目标模式的唯一"不生成"出口（点空白不算：那更像是点歪了，不是放弃）。
-      if (e.key === "Escape" && useDirectorStore.getState().stairLinkFrom) {
-        useDirectorStore.getState().cancelStairLink();
-        return;
+      // 「选目标」类模式的唯一"不生成"出口（点空白不算：那更像是点歪了，不是放弃）。
+      // **两种模式都要认**：连台阶（stairLinkFrom）与走上去 / 走下来（walkPick）——
+      // 提示文案里都写着"Esc 取消"，那就必须真的能取消，否则作者被卡在模式里出不来。
+      if (e.key === "Escape") {
+        const s = useDirectorStore.getState();
+        if (s.stairLinkFrom) {
+          s.cancelStairLink();
+          return;
+        }
+        if (s.walkPick) {
+          useDirectorStore.setState({ walkPick: null, pickHint: null });
+          return;
+        }
       }
       const k = e.key.toLowerCase();
       if (["w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright"].includes(k)) {
@@ -3373,6 +3450,54 @@ function CameraPointRingAnchor({ pointId }: { pointId: string }) {
   );
 }
 
+/**
+ * 「走上去 / 走下来」选目标时的**抓手**：每条楼梯上方浮一个可点的感叹号。
+ *
+ * 为什么必须有它：让作者去"点中楼梯本身"是靠不住的 —— 楼梯顶面是折线 + 圆角拼出来的，
+ * 射线很容易**整条**从段与段的缝里穿过去（巨型 / 弯曲楼梯尤其），于是就成了"怎么点都选不中"。
+ * 抓手把命中变成一个**明确、固定、DOM 级**的目标：看得见就点得中，不再依赖射线与几何求交。
+ *
+ * 位置取楼梯的**几何中心**（`stairCenterWorld`，不是 `object.x/z` —— 路径是世界坐标，
+ * 拖点之后两者会分家），高度取"底面 + 总高 + 一点余量"，于是抓手浮在整座楼梯上方。
+ */
+function StairPickTargets() {
+  const walkPick = useDirectorStore((s) => s.walkPick);
+  const objects = useDirectorStore((s) => s.state.objects);
+  const assignStairWalk = useDirectorStore((s) => s.assignStairWalk);
+  if (!walkPick) return null;
+  const stairs = objects.filter((o) => o.topShape === "stair");
+  if (stairs.length === 0) return null;
+  return (
+    <group>
+      {stairs.map((stair) => {
+        const center = stairCenterWorld(stair) ?? { x: stair.x, z: stair.z };
+        const y = (stair.baseY ?? 0) + stair.footprint.h + 0.7;
+        return (
+          <Html
+            key={stair.id}
+            position={[center.x, y, center.z]}
+            center
+            style={{ pointerEvents: "auto" }}
+            zIndexRange={[80, 0]}
+          >
+            <button
+              type="button"
+              className="pick-target"
+              title={`点这里 = 让${walkPick.direction === "up" ? "他走上去" : "他走下来"}这条楼梯`}
+              onClick={(e) => {
+                e.stopPropagation();
+                assignStairWalk(stair.id);
+              }}
+            >
+              !
+            </button>
+          </Html>
+        );
+      })}
+    </group>
+  );
+}
+
 function RadialLayer() {
   const radialTarget = useDirectorStore((s) => s.radialTarget);
   const viewMode = useDirectorStore((s) => s.viewMode);
@@ -3409,6 +3534,7 @@ function WorldScene() {
       <StairPathHandles />
       <DragReachTip />
       <PickHint />
+      <StairPickTargets />
       <StairDraftLayer />
       <HandoffMarkers />
       <FollowLinks />

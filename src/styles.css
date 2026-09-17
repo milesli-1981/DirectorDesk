@@ -92,7 +92,9 @@ button:hover {
       max(var(--rail-w), calc(100% - var(--right-w) - var(--center-min-w)))
     )
     minmax(var(--center-min-w), 1fr) var(--right-w);
-  grid-template-rows: 30px 34px minmax(200px, 1fr) 264px;
+  /* 第 4 行 = 时间轴高度。它是「给画布让高度」的唯一旋钮：画布是第 3 行 minmax(200px,1fr)，
+     时间轴每矮 1px，画布就高 1px。这里从 264 → 216（矮 48px），视觉密度靠下面 .tlbar 一起收。 */
+  grid-template-rows: 30px 34px minmax(200px, 1fr) 216px;
   /* 收起 / 展开走带回弹的缓动（末端轻微过冲）；拖动时由 .is-resizing 关掉动画以便跟手 */
   transition: grid-template-columns 0.44s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
@@ -746,8 +748,10 @@ header {
 /* 场景树行内图标（锁 / 删除）比工具栏更小，适配紧凑单行 */
 .obj-actions .lock-icon-btn,
 .obj-actions .obj-del {
-  width: 16px;
-  height: 16px;
+  /* 16 → 14：这一对角标按钮就是对象行的**行高地板**，
+     不收它们，字号再小行高也不会跟着矮。 */
+  width: 14px;
+  height: 14px;
   border-radius: 3px;
 }
 /* 统一的锁角标按钮：工具栏 / 场景树 / 资产面板共用，只显示图标 */
@@ -1089,15 +1093,33 @@ canvas {
   border-top: 1px solid #27313b;
   background: #0c1117;
   display: grid;
-  grid-template-rows: 38px minmax(0, 1fr);
+  /* 顶栏从 38 → 30：那一行是"控制条"，不是内容，收掉它等于把高度还给轨道区。 */
+  grid-template-rows: 30px minmax(0, 1fr);
 }
 
 .tlbar {
   display: flex;
   align-items: center;
-  gap: 7px;
-  padding: 5px 8px;
+  gap: 5px;
+  padding: 3px 8px;
   border-bottom: 1px solid #27313b;
+  /* 整条顶栏缩一号：字号、控件内边距一起收（上面的 30px 行高就是这个密度定出来的）。 */
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+/* 顶栏里的控件也跟着缩 —— 它们各自写了 font-size，用后代选择器统一压住。
+   `.timecode` 是读数，留略大一点便于扫。 */
+.tlbar button,
+.tlbar input,
+.tlbar select,
+.tlbar label,
+.tlbar span {
+  font-size: 11px;
+}
+
+.tlbar .timecode {
+  font-size: 13px;
 }
 
 /* 时间轴顶栏的「Scene Duration (s)」配置 */
@@ -3151,6 +3173,69 @@ header .actions button {
 .stair-points > summary {
   cursor: pointer;
 }
+
+/* 「走上去 / 走下来」选楼梯时的抓手：浮在楼梯上方的可点感叹号。
+   它存在的唯一理由是**让命中不再是"射线 vs 楼梯折线"**（那条链在巨型/弯曲楼梯上会整条落空），
+   所以它必须显眼、可点、有 hover 反馈 —— 看得见就点得中。 */
+.pick-target {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid rgba(255, 214, 120, 0.9);
+  border-radius: 999px;
+  background: rgba(40, 30, 8, 0.86);
+  color: #ffd678;
+  font: 700 16px/1 var(--ap-font, system-ui);
+  cursor: pointer;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+}
+
+.pick-target:hover {
+  border-color: #fff;
+  background: rgba(70, 52, 10, 0.95);
+  color: #fff;
+  transform: scale(1.12);
+}
+
+/* ---- 时间轴片段的左右拖拽把手 ----
+   逻辑本来就有（`Timeline` 里 `<span className="handle l|r">` + `dragModeOf` 按它判左右拉伸），
+   但它们又细又不可见 —— 作者的实际感受是"根本没有把手、抓不到"。这里给它两件事：
+   ① 给足热区（9px 宽，整条边高），② 显形（内嵌一条竖条，hover 变亮）。
+   只动视觉与热区，不动拖动逻辑（改时长仍走 `handleClipMove` 的 mode l/r）。 */
+.clip .handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 9px;
+  cursor: ew-resize;
+  z-index: 3;
+}
+
+.clip .handle.l {
+  left: 0;
+}
+
+.clip .handle.r {
+  right: 0;
+}
+
+.clip .handle::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: 3px;
+  right: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.clip:hover .handle::after {
+  background: rgba(255, 255, 255, 0.6);
+}
 .vf-tool {
   background: var(--ap-surface-2);
   color: var(--ap-text);
@@ -3262,14 +3347,19 @@ header .actions button {
 .obj-row .obj {
   /* 名字（省略号截断）右侧要给**角标**留位，而这个角标是 absolute 浮在右上角的，
      宽度不会自动从名字里扣 —— 必须按它的实际宽度留：
-       3 个按钮 × 16px（隐藏 / 锁定 / 删除）+ 2 个 3px 间隙 = 54px，
-       再加上 `.obj-actions { right: 2px }` = **56px**，这里留 58px 余量。
-     改角标按钮数量 / 尺寸时，这个值要跟着改（别凭感觉给）。 */
-  padding-right: 58px;
+       3 个按钮 × 14px（隐藏 / 锁定 / 删除）+ 2 个 3px 间隙 = 48px，
+       再加上 `.obj-actions { right: 2px }` = **50px**，这里留 50px。
+     改角标按钮数量 / 尺寸时，这个值要跟着改（别凭感觉给）。
+     纵向内边距归零 + 行高压紧：行高的**地板**是角标那三颗按钮（现在 14px），
+     所以字号收到 9.5px 之后行高才会真的跟着变矮。 */
+  padding-top: 0;
+  padding-bottom: 0;
+  line-height: 1.25;
+  padding-right: 50px;
 }
 .obj-row .obj-name {
-  /* 比原来小 2 号（12.5 → 10.5）：左栏一行能放下更长的名字，列表也更容易扫。 */
-  font-size: 10.5px;
+  /* 逐轮收窄：12.5 → 10.5 → 9.5。配合下面的零内边距与 14px 角标，整行才真的变矮。 */
+  font-size: 9.5px;
   font-weight: 500;
   color: inherit;
 }

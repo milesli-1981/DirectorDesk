@@ -2496,7 +2496,11 @@ export const useDirectorStore = create<DirectorStore>((setParam, get) => {
       // 落脚链条会从 0 起步 ⇒ 人贴地穿过整座楼梯（见 engine/stairWalk 模块说明）。
       get().updateAsset(actor.id, { baseY: round1(result.plan.startY) });
       // 路线点直接来自楼梯的路径（含接近段）—— 没有第二份几何。
-      get().setSegmentPoints(segment.id, result.plan.points);
+      // **路线必须抽稀**：楼梯路径可能有很多点（手绘 / 螺旋 / 圆角后都在里面），原样写进去
+      // 会在时间轴上塞满节点 —— 段块**左右两端的拖拽把手被这些节点盖住**（就是"拉不动时长"），
+      // 节点多了画布也卡。这里用与画布手绘**同一个抽稀器与容差**（`simplifyPath` 保首尾，
+      // 所以起终点、接近段端点都不会丢），视觉与走位不变（最坏在弯道内侧偏 0.35m）。
+      get().setSegmentPoints(segment.id, simplifyPath(result.plan.points, HAND_DRAW_EPSILON));
       set({
         walkPick: null,
         pickHint: null,
